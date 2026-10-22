@@ -147,7 +147,8 @@ Everything in §5, §8 and §10:
      - Not tied to a distro codename, since the binary is the same across distros.
      - Packages depend on the PHP API virtual package (e.g. `phpapi-20180731` for 7.3).
      - Signing uses an RSA key that xenial- and CentOS-7-era `apt`/`rpm` can verify.
-     - Repos are served over plain HTTP as well as HTTPS. Ubuntu 16.04's `apt` can't fetch HTTPS until `apt-transport-https` is installed, and GPG signatures protect the packages either way. The signing key itself is only fetched over HTTPS.
+     - Repos are **HTTPS-only** (owner decision 2026-10-22, matching the industry norm set by Docker's and Ondřej Surý's own repos). CentOS 7 negotiates TLS 1.2 to the repo host without trouble. Pre-2018 Debian/Ubuntu (16.04 and older) need `apt-transport-https` and `ca-certificates` installed first — a documented one-line prerequisite, exactly what those other third-party repos already require. GPG signatures protect package integrity regardless of transport.
+     - HTTPS-only means the package repo can sit behind a Cloudflare tunnel or any ordinary HTTPS host; it no longer needs to serve plain HTTP on port 80.
   2. **(0.1) Signed tarball** of the `.so` plus `.ini`, with SHA-256 checksums and a signature, for manual installs.
   3. **(0.1) Build from source** with `cargo` against the server's own PHP headers (`php-config`).
 - **`howdah-check` detection helper:** finds every PHP install on the box. Several PHP versions side by side is normal with Surý, Remi and control panels. For each one it reports: version, API number, NTS/ZTS, `extension_dir`, which SAPIs are present, and whether Howdah is loaded in each. **Read-only by default.**
@@ -165,9 +166,10 @@ php7.3 -v
 howdah-check detect           # or: php7.3 -i | grep -E 'PHP API|Thread Safety|extension_dir'
 #   -> PHP 7.3.33, API 20180731, NTS, /usr/lib/php/20180731, SAPIs: cli fpm
 
-# 2a. Install from the apt repo (works on xenial's stock apt, no extra packages)
+# 2a. Install from the apt repo (HTTPS-only; xenial needs the https transport first)
+sudo apt-get install -y apt-transport-https ca-certificates curl
 curl -fsSL https://howdah.org/key.asc | sudo apt-key add -
-echo "deb http://pkg.howdah.org/apt stable main" | sudo tee /etc/apt/sources.list.d/howdah.list
+echo "deb https://pkg.howdah.org/apt stable main" | sudo tee /etc/apt/sources.list.d/howdah.list
 sudo apt-get update && sudo apt-get install php7.3-howdah
 
 # 2b. ...or manually from the signed tarball
@@ -279,8 +281,9 @@ The docs need equivalent worked examples, at least for:
 ### Tech (Claude's call)
 
 - Astro static site, deployed to GitHub Pages by GitHub Actions from the main repo's `site/` folder, on the custom domain howdah.org from day one.
-- Package repos live on `pkg.howdah.org` so their hosting can change without changing users' sources lists.
+- Package repos live on `pkg.howdah.org` (HTTPS) so their hosting can change without changing users' sources lists.
 - Package repo and signing-key URLs are written permanently into users' apt sources and yum `.repo` files, so they must be final before the first release that uses them.
+- **Open 1.0 decision — where `pkg.howdah.org` is hosted.** Options discussed 2026-10-22: (a) a small dedicated VPS running nginx (Claude's recommendation — keeps a public download target off the production box and clear of Cloudflare free-plan bulk-file ToS); (b) the existing `ashlar-prod` server via its Cloudflare Zero Trust tunnel as a public hostname with **no Access policy** (now viable since the repo is HTTPS-only). Not needed until 1.0; 0.1 uses GitHub Releases tarballs.
 
 ## 11. What success looks like
 

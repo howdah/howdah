@@ -70,6 +70,7 @@ impl Config {
     /// Parse a TOML document. Unknown keys are rejected; absent keys take safe defaults.
     pub fn from_toml(s: &str) -> Result<Config, ConfigError> {
         let raw: RawConfig = toml::from_str(s).map_err(|e| ConfigError(e.to_string()))?;
+        raw.limits.validate().map_err(ConfigError)?;
         Ok(Config {
             mode: raw.mode,
             limits: raw.limits,
@@ -99,7 +100,7 @@ mode = "detect"
 
 [limits]
 max_parts = 50
-max_part_bytes = 1048576
+max_part_header_bytes = 1024
 
 [log]
 path = "/var/log/howdah.log"
@@ -113,7 +114,7 @@ self_test = "off"
         let c = Config::from_toml(SAMPLE).unwrap();
         assert_eq!(c.mode, Mode::Detect);
         assert_eq!(c.limits.max_parts, 50);
-        assert_eq!(c.limits.max_part_bytes, 1_048_576);
+        assert_eq!(c.limits.max_part_header_bytes, 1024);
         assert_eq!(c.log.path.as_deref(), Some("/var/log/howdah.log"));
         assert_eq!(c.rule_modes.get(&RuleId::SelfTest), Some(&Mode::Off));
     }
@@ -140,6 +141,12 @@ self_test = "off"
     }
 
     #[test]
+    fn zero_limit_rejected() {
+        let e = Config::from_toml("[limits]\nmax_parts = 0").unwrap_err();
+        assert!(e.to_string().contains("max_parts"), "{e}");
+    }
+
+    #[test]
     fn invalid_mode_rejected() {
         assert!(Config::from_toml("mode = \"yolo\"").is_err());
     }
@@ -156,7 +163,7 @@ self_test = "off"
         let c = Config::safe_defaults();
         assert_eq!(c.mode, Mode::Block);
         assert!(c.limits.max_parts > 0);
-        assert!(c.limits.max_part_bytes > 0);
+        assert!(c.limits.validate().is_ok());
         assert!(c.rule_modes.is_empty());
     }
 }

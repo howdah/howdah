@@ -14,15 +14,15 @@ pub enum Action {
 }
 
 /// Resolve a hit into an action. A per-rule override wins over the global
-/// mode. Critical rules block regardless of the global mode (even `Detect` or
-/// `Off`) unless explicitly overridden by name.
+/// mode. Critical rules block even in global `Detect`; global `Off` disables
+/// everything. Only an explicit per-rule override can change either outcome.
 pub fn decide(hit: Option<&LimitHit>, mode: Mode, overrides: &BTreeMap<RuleId, Mode>) -> Action {
     let Some(hit) = hit else {
         return Action::Allow;
     };
     let effective = match overrides.get(&hit.rule) {
         Some(m) => *m,
-        None if hit.severity == Severity::Critical => Mode::Block,
+        None if hit.severity == Severity::Critical && mode != Mode::Off => Mode::Block,
         None => mode,
     };
     match effective {
@@ -56,10 +56,12 @@ mod tests {
     }
 
     #[test]
-    fn critical_blocks_in_block_and_off() {
+    fn critical_blocks_in_block_allowed_in_off() {
         let h = hit(RuleId::MaxParts, Severity::Critical);
         assert_eq!(decide(Some(&h), Mode::Block, &none()), Action::Block);
-        assert_eq!(decide(Some(&h), Mode::Off, &none()), Action::Block);
+        assert_eq!(decide(Some(&h), Mode::Off, &none()), Action::Allow);
+        let o = BTreeMap::from([(RuleId::MaxParts, Mode::Block)]);
+        assert_eq!(decide(Some(&h), Mode::Off, &o), Action::Block);
     }
 
     #[test]

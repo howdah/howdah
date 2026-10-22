@@ -301,8 +301,12 @@ The docs need equivalent worked examples, at least for:
 - Hosting for `pkg.howdah.org` (GitHub Pages, GitHub Releases behind a redirect, or OSS package hosting such as Cloudsmith), as long as plain-HTTP apt works.
 - Site information architecture details and copy, within §10.
 
-## 13. Owner actions before 0.1
+## 13. Owner actions / setup status
 
-- Register **howdah.org** (in progress). howdah.dev also looked free on 2026-10-22, and could be added as a redirect.
-- Create the **`howdah` GitHub organisation**. The name was free on 2026-10-22.
-- Create the **primary GPG signing key** and keep it offline. Claude can walk through this.
+- ✅ **howdah.org** registered (Namecheap, 2026-10-22).
+- ✅ **`howdah` GitHub organisation** created; repo at github.com/howdah/howdah (public), private vulnerability reporting enabled.
+- ✅ **Release-signing GPG key** created 2026-10-22: RSA 4096 certify-only primary + RSA 4096 signing subkey (expires 2028-10-21), UID `Howdah release signing <security@howdah.org>`.
+  - **Primary fingerprint:** `11521035C600F63831F825512087B8720997807B`
+  - Public key: `howdah-signing-public.asc` → will be published at `howdah.org/key.asc` and shipped with releases.
+  - Owner backs up the master secret + revocation certificate offline. At CI setup (Task 13), only the signing subkey goes to CI and the primary secret is removed from online keyrings.
+- Optional: add howdah.dev as a redirect to howdah.org (howdah.dev looked free on 2026-10-22).

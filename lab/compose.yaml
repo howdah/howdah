@@ -1,0 +1,66 @@
+# Milestone-0 lab harness.
+#
+# Each service is a long-running container with build tools for the PHP
+# version it names, so the throwaway spike extension (lab/spike/probe.c)
+# can be compiled against real per-version PHP headers. Build context is
+# the repo root so COPY can reach lab/spike/*.
+#
+# Usage (from the repo root):
+#   docker compose -f lab/compose.yaml up -d --build
+#   docker compose -f lab/compose.yaml exec php-7.4 sh
+#
+# The actual request generator and measurement driver
+# (lab/spike/gen-shaped-request.* and lab/spike/measure.sh) are
+# intentionally gitignored and not part of this file; see
+# docs/superpowers/specs/milestone-0-findings.md for how they're used
+# against these services.
+
+services:
+  php-5.4:
+    build:
+      context: ..
+      dockerfile: lab/images/php-5.4.Dockerfile
+    volumes:
+      - ./spike:/lab/spike:ro
+
+  php-5.5:
+    build:
+      context: ..
+      dockerfile: lab/images/php-5.5.Dockerfile
+    volumes:
+      - ./spike:/lab/spike:ro
+
+  php-5.6:
+    build:
+      context: ..
+      dockerfile: lab/images/php-5.6.Dockerfile
+    volumes:
+      - ./spike:/lab/spike:ro
+
+  php-7.3:
+    build:
+      context: ..
+      dockerfile: lab/images/php-7.3.Dockerfile
+    volumes:
+      - ./spike:/lab/spike:ro
+
+  php-7.4:
+    build:
+      context: ..
+      dockerfile: lab/images/php-7.4.Dockerfile
+    volumes:
+      - ./spike:/lab/spike:ro
+
+  php-8.1:
+    build:
+      context: ..
+      dockerfile: lab/images/php-8.1.Dockerfile
+    volumes:
+      - ./spike:/lab/spike:ro
+
+  php-8.4:
+    build:
+      context: ..
+      dockerfile: lab/images/php-8.4.Dockerfile
+    volumes:
+      - ./spike:/lab/spike:ro

@@ -1,0 +1,19 @@
+/target
+**/target
+Cargo.lock
+*.so
+*.o
+*.rlib
+*.swp
+.DS_Store
+# Lab/build artifacts
+/lab/**/vendor
+/packaging/out
+# Site build
+/site/dist
+/site/node_modules
+# Local-only: shaped-request generator and reproducers stay out of the public repo
+# until a release that blocks them is installable (design §9).
+/lab/spike/measure.sh
+/lab/spike/*gen*
+/private/

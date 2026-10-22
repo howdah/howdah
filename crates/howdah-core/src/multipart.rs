@@ -72,6 +72,14 @@ pub struct MultipartState {
     headers: u32,
     saw_disposition: bool,
     closed: bool,
+    // High-water marks (never reset): let limit checks hold regardless of
+    // when they run or whether a call's events were dropped by an error.
+    max_headers: u32,
+    max_header_bytes: usize,
+    max_field_name: usize,
+    max_filename: usize,
+    max_part_data: u64,
+    total_fed: u64,
 }
 
 impl MultipartState {
@@ -107,6 +115,12 @@ impl MultipartState {
             headers: 0,
             saw_disposition: false,
             closed: false,
+            max_headers: 0,
+            max_header_bytes: 0,
+            max_field_name: 0,
+            max_filename: 0,
+            max_part_data: 0,
+            total_fed: 0,
         }
     }
 
@@ -118,6 +132,31 @@ impl MultipartState {
     }
     pub fn headers_in_current_part(&self) -> u32 {
         self.headers
+    }
+
+    /// Highest header count seen in any single part so far.
+    pub fn max_headers_in_any_part(&self) -> u32 {
+        self.max_headers
+    }
+    /// Largest `name + value` byte length of any part header seen.
+    pub fn max_header_bytes_seen(&self) -> usize {
+        self.max_header_bytes
+    }
+    /// Longest field name seen in a Content-Disposition.
+    pub fn max_field_name_seen(&self) -> usize {
+        self.max_field_name
+    }
+    /// Longest filename seen in a Content-Disposition.
+    pub fn max_filename_seen(&self) -> usize {
+        self.max_filename
+    }
+    /// Largest part body seen so far, including the part in progress.
+    pub fn max_part_data_seen(&self) -> u64 {
+        self.max_part_data.max(self.data_len)
+    }
+    /// Total bytes fed so far (all chunks).
+    pub fn total_fed_bytes(&self) -> u64 {
+        self.total_fed
     }
 
     /// Signal end of input. Errors if the closing boundary was never seen.
@@ -150,6 +189,7 @@ impl MultipartState {
     }
 
     pub fn feed(&mut self, chunk: &[u8]) -> Result<Vec<Event>, MalformedBody> {
+        self.total_fed = self.total_fed.saturating_add(chunk.len() as u64);
         let mut ev = Vec::new();
         let mut i = 0;
         while i < chunk.len() {
@@ -185,6 +225,7 @@ impl MultipartState {
                     self.m = nm;
                     if self.m == self.pat.len() {
                         if !preamble {
+                            self.max_part_data = self.max_part_data.max(self.data_len);
                             ev.push(Event::PartData { len: self.data_len });
                             ev.push(Event::PartEnd);
                         }
@@ -291,6 +332,8 @@ impl MultipartState {
         }
         let value = trim_ws(&line[colon + 1..]);
         self.headers = self.headers.saturating_add(1);
+        self.max_headers = self.max_headers.max(self.headers);
+        self.max_header_bytes = self.max_header_bytes.max(name.len().saturating_add(value.len()));
         ev.push(Event::PartHeader { name_len: name.len(), value_len: value.len() });
         if name.eq_ignore_ascii_case(b"content-disposition") {
             if self.saw_disposition {
@@ -299,11 +342,16 @@ impl MultipartState {
             self.saw_disposition = true;
             match parse_disposition(value) {
                 Err(m) => return Err(self.fail_with(m)),
-                Ok((_, Some(filename_len))) => {
+                Ok((name_len, Some(filename_len))) => {
+                    self.max_field_name = self.max_field_name.max(name_len);
+                    self.max_filename = self.max_filename.max(filename_len);
                     self.files += 1;
                     ev.push(Event::FileStart { filename_len });
                 }
-                Ok((name_len, None)) => ev.push(Event::FieldStart { name_len }),
+                Ok((name_len, None)) => {
+                    self.max_field_name = self.max_field_name.max(name_len);
+                    ev.push(Event::FieldStart { name_len });
+                }
             }
         }
         Ok(())

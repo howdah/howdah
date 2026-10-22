@@ -4,7 +4,9 @@
 //!
 //! Zero policy: a limit of 0 is rejected by [`Limits::validate`] (called from
 //! `Config::from_toml`), because 0 would silently block every multipart body.
-//! There is no "unlimited" value; set a large number instead.
+//! There is no "unlimited" value; set a large number instead. A `Limits`
+//! built by hand (bypassing `from_toml`) can still contain zeros; `check` then
+//! blocks everything but never panics.
 
 use serde::Deserialize;
 
@@ -18,15 +20,18 @@ pub struct Limits {
     pub max_parts: usize,
     /// Maximum number of file parts in one body.
     pub max_files: usize,
-    /// Maximum number of header lines in a single part.
+    /// Maximum number of header lines in any single part.
     pub max_part_headers: usize,
-    /// Maximum bytes (name + value) of a single part header.
+    /// Maximum bytes (name + value) of any single part header.
     pub max_part_header_bytes: usize,
     /// Maximum bytes of a form field name.
     pub max_field_name_bytes: usize,
     /// Maximum bytes of an uploaded filename.
     pub max_filename_bytes: usize,
-    /// Maximum bytes of any single part body / running parse total.
+    /// Backstop on the TOTAL body bytes Howdah will process for one request
+    /// (also bounds any single part). Set it above your PHP `post_max_size`
+    /// (PHP default 8 MiB) so it never fires before PHP's own limit on normal
+    /// uploads; the 256 MiB default is far above typical `post_max_size`.
     pub max_parse_memory_bytes: usize,
 }
 
@@ -48,7 +53,8 @@ impl Limits {
             max_field_name_bytes: 1024,
             // Filesystems cap names at 255 bytes; 512 allows encoded forms.
             max_filename_bytes: 512,
-            // 256 MiB: above any sane single part, below host memory exhaustion.
+            // 256 MiB total body: well above PHP's default post_max_size (8 MiB)
+            // and common raised values, below host memory exhaustion.
             max_parse_memory_bytes: 256 * 1024 * 1024,
         }
     }
@@ -72,9 +78,12 @@ impl Limits {
         Ok(())
     }
 
-    /// Check the analyzer state (counters, not only `ev`) against the limits.
-    /// Call after feeding; robust even if a mid-chunk error dropped events.
-    pub fn check(&self, state: &MultipartState, ev: &Event) -> Option<LimitHit> {
+    /// Check the analyzer state against the limits.
+    ///
+    /// Every decision reads state counters / high-water marks, never `ev`
+    /// (kept for API stability), so enforcement holds whenever this runs:
+    /// after a multi-part chunk, or after an error dropped that call's events.
+    pub fn check(&self, state: &MultipartState, _ev: &Event) -> Option<LimitHit> {
         let crit = |rule, detail: String| {
             Some(LimitHit { rule, severity: Severity::Critical, detail })
         };
@@ -90,48 +99,44 @@ impl Limits {
                 format!("{} files exceeds limit {}", state.files(), self.max_files),
             );
         }
-        if state.headers_in_current_part() as u64 > self.max_part_headers as u64 {
+        let hdrs = state.max_headers_in_any_part();
+        if hdrs as u64 > self.max_part_headers as u64 {
             return crit(
                 RuleId::MaxPartHeaders,
-                format!(
-                    "{} headers in one part exceeds limit {}",
-                    state.headers_in_current_part(),
-                    self.max_part_headers
-                ),
+                format!("{hdrs} headers in one part exceeds limit {}", self.max_part_headers),
             );
         }
-        match ev {
-            Event::PartHeader { name_len, value_len }
-                if name_len.saturating_add(*value_len) > self.max_part_header_bytes =>
-            {
-                crit(
-                    RuleId::MaxPartHeaderBytes,
-                    format!("part header of {} bytes exceeds limit", name_len + value_len),
-                )
-            }
-            Event::FieldStart { name_len } if *name_len > self.max_field_name_bytes => crit(
-                RuleId::MaxFieldNameLen,
-                format!("field name of {name_len} bytes exceeds limit"),
-            ),
-            Event::FileStart { filename_len } if *filename_len > self.max_filename_bytes => crit(
-                RuleId::MaxFilenameLen,
-                format!("filename of {filename_len} bytes exceeds limit"),
-            ),
-            Event::PartData { len } if *len > self.max_parse_memory_bytes as u64 => crit(
-                RuleId::ParseMemoryBudget,
-                format!("part of {len} bytes exceeds budget"),
-            ),
-            _ => None,
+        let hb = state.max_header_bytes_seen();
+        if hb > self.max_part_header_bytes {
+            return crit(
+                RuleId::MaxPartHeaderBytes,
+                format!("part header of {hb} bytes exceeds limit {}", self.max_part_header_bytes),
+            );
         }
+        let fnl = state.max_field_name_seen();
+        if fnl > self.max_field_name_bytes {
+            return crit(
+                RuleId::MaxFieldNameLen,
+                format!("field name of {fnl} bytes exceeds limit {}", self.max_field_name_bytes),
+            );
+        }
+        let fl = state.max_filename_seen();
+        if fl > self.max_filename_bytes {
+            return crit(
+                RuleId::MaxFilenameLen,
+                format!("filename of {fl} bytes exceeds limit {}", self.max_filename_bytes),
+            );
+        }
+        self.check_fed_bytes(state.max_part_data_seen().max(state.total_fed_bytes()))
     }
 
-    /// Check the running total of fed body bytes against the memory budget.
-    /// PartData arrives only at PartEnd, so callers count chunk lengths.
+    /// Check a byte total against `max_parse_memory_bytes` (total body bytes
+    /// processed). `check` already applies this using the state's totals.
     pub fn check_fed_bytes(&self, total_fed: u64) -> Option<LimitHit> {
         (total_fed > self.max_parse_memory_bytes as u64).then(|| LimitHit {
             rule: RuleId::ParseMemoryBudget,
             severity: Severity::Critical,
-            detail: format!("{total_fed} body bytes exceeds budget"),
+            detail: format!("{total_fed} body bytes exceeds budget {}", self.max_parse_memory_bytes),
         })
     }
 }
@@ -190,15 +195,12 @@ pub struct LimitHit {
 mod tests {
     use super::*;
 
+    /// Feed the whole body in one chunk (parse errors fail the test), then
+    /// check once, as a caller would after a multi-part chunk.
     fn feed(limits: &Limits, body: &[u8]) -> Option<LimitHit> {
         let mut st = MultipartState::new(b"B");
-        let evs = st.feed(body).unwrap_or_default();
-        for ev in &evs {
-            if let Some(h) = limits.check(&st, ev) {
-                return Some(h);
-            }
-        }
-        None
+        st.feed(body).expect("test body must parse");
+        limits.check(&st, &Event::BodyEnd)
     }
 
     fn part(name: &str) -> String {
@@ -238,11 +240,31 @@ mod tests {
         assert_eq!((h.rule, h.severity), (RuleId::MaxFiles, Severity::Critical));
     }
 
+    const FLOOD: &str =
+        "--B\r\nContent-Disposition: form-data; name=\"a\"\r\nX-1: a\r\nX-2: b\r\n\r\nv\r\n";
+
     #[test]
     fn too_many_headers_critical() {
-        let b = "--B\r\nContent-Disposition: form-data; name=\"a\"\r\nX-1: a\r\nX-2: b\r\n\r\nv\r\n--B--\r\n";
+        let b = format!("{FLOOD}--B--\r\n");
         let h = feed(&small(), b.as_bytes()).unwrap();
         assert_eq!((h.rule, h.severity), (RuleId::MaxPartHeaders, Severity::Critical));
+    }
+
+    #[test]
+    fn header_flood_followed_by_normal_part_in_one_chunk_still_fires() {
+        let b = format!("{FLOOD}{}--B--\r\n", part("ok"));
+        let h = feed(&small(), b.as_bytes()).unwrap();
+        assert_eq!(h.rule, RuleId::MaxPartHeaders);
+    }
+
+    #[test]
+    fn long_filename_followed_by_normal_part_still_fires() {
+        let l = Limits { max_filename_bytes: 4, ..Limits::defaults() };
+        let b = format!(
+            "--B\r\nContent-Disposition: form-data; name=\"f\"; filename=\"abcdefgh\"\r\n\r\nx\r\n{}--B--\r\n",
+            part("ok")
+        );
+        assert_eq!(feed(&l, b.as_bytes()).unwrap().rule, RuleId::MaxFilenameLen);
     }
 
     #[test]
@@ -263,6 +285,23 @@ mod tests {
         assert_eq!(feed(&l, b.as_bytes()).unwrap().rule, RuleId::ParseMemoryBudget);
         assert!(l.check_fed_bytes(4).is_some());
         assert!(l.check_fed_bytes(3).is_none());
+    }
+
+    #[test]
+    fn default_budget_allows_normal_upload() {
+        let l = Limits::defaults();
+        assert!(l.check_fed_bytes(8 * 1024 * 1024).is_none());
+    }
+
+    #[test]
+    fn fires_from_state_after_mid_chunk_error_dropped_events() {
+        let l = Limits { max_filename_bytes: 4, ..Limits::defaults() };
+        let mut st = MultipartState::new(b"B");
+        // Valid file part with a long filename, then garbage after a delimiter:
+        // feed errors and returns no events at all.
+        let body = "--B\r\nContent-Disposition: form-data; name=\"f\"; filename=\"abcdefgh\"\r\n\r\nx\r\n--Bzzz";
+        assert!(st.feed(body.as_bytes()).is_err());
+        assert_eq!(l.check(&st, &Event::PartEnd).unwrap().rule, RuleId::MaxFilenameLen);
     }
 
     #[test]
@@ -295,5 +334,12 @@ mod tests {
         assert!(Limits::defaults().validate().is_ok());
         let l = Limits { max_parts: 0, ..Limits::defaults() };
         assert!(l.validate().unwrap_err().contains("max_parts"));
+    }
+
+    #[test]
+    fn hand_built_zero_limits_block_without_panic() {
+        let l = Limits { max_parts: 0, ..Limits::defaults() };
+        let b = format!("{}--B--\r\n", part("a"));
+        assert_eq!(feed(&l, b.as_bytes()).unwrap().rule, RuleId::MaxParts);
     }
 }

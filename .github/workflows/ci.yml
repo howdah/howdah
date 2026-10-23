@@ -1,0 +1,99 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  schedule:
+    - cron: '17 4 * * 1'   # weekly full matrix
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  host:
+    name: host tests, clippy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: host-${{ hashFiles('Cargo.lock') }}
+      - run: cargo test --locked -p howdah-core
+      - run: cargo test --locked -p howdah-ext
+      - run: cargo clippy --locked -p howdah-core -p howdah-ext --all-targets -- -D warnings
+      # cargo fmt --check is intentionally not run yet: the tree has not been
+      # rustfmt-formatted and there is no rustfmt.toml.
+
+  fuzz-smoke:
+    name: fuzz smoke (multipart)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz --locked --version 0.12.0
+      - name: Run the multipart target briefly
+        working-directory: fuzz
+        run: cargo fuzz run multipart -- -runs=20000 -max_total_time=60
+
+  lab:
+    name: lab PHP ${{ matrix.php }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    # PRs and pushes run the reduced set (reduced: true); tags and the weekly
+    # schedule run every entry.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { php: '5.6', feature: php5, reduced: true }
+          - { php: '7.3', feature: php7, reduced: true }
+          - { php: '8.4', feature: php8, reduced: true }
+          - { php: '5.4', feature: php5, reduced: false }
+          - { php: '7.4', feature: php7, reduced: false }
+          - { php: '8.1', feature: php8, reduced: false }
+    env:
+      IMAGE: howdah-dev-php${{ matrix.php }}
+      BASE: lab-php-${{ matrix.php }}
+      FEATURE: ${{ matrix.feature }}
+      RUN_IT: ${{ matrix.reduced || startsWith(github.ref, 'refs/tags/') || github.event_name == 'schedule' }}
+    steps:
+      - uses: actions/checkout@v4
+        if: env.RUN_IT == 'true'
+      - name: Build lab base image
+        if: env.RUN_IT == 'true'
+        run: docker build -f lab/images/php-${{ matrix.php }}.Dockerfile -t "$BASE" lab/images
+      - name: Shaped upload is blocked
+        if: env.RUN_IT == 'true'
+        run: lab/integration/block_shaped.sh
+      - name: Self-test flags the server
+        if: env.RUN_IT == 'true'
+        run: lab/integration/selftest.sh
+      - name: Panic guard is active in the release build (panic=unwind)
+        if: env.RUN_IT == 'true'
+        run: |
+          docker run --rm -v "$PWD":/src:ro "$IMAGE" sh -ec '
+            export CARGO_TARGET_DIR=/tmp/t
+            cd /src
+            cargo build --locked -p howdah-ext --features "'"$FEATURE"'" --release 2>&1 | tail -3
+            out=$(php -d extension=/tmp/t/release/libhowdah_ext.so --ri howdah)
+            echo "$out"
+            echo "$out" | grep -E "Panic guard.*=> yes" || { echo "panic guard NOT active (panic=abort regression?)"; exit 1; }
+          '

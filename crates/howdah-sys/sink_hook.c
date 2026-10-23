@@ -19,11 +19,12 @@
 
 #include <stddef.h>
 
-/* Must match HOWDAH_SINK_* in howdah-core's ffi.rs and the glue's action codes
- * (0 ALLOW, 1 LOG, 2 BLOCK). */
+/* Sink ids: must match HOWDAH_SINK_* in howdah-core's ffi.rs. */
 #define HOWDAH_SINK_COMMAND_EXEC 0
 #define HOWDAH_SINK_UNSERIALIZE  3
-#define HOWDAH_SINK_BLOCK        2
+/* Action code returned by the decide callback (0 ALLOW, 1 LOG, 2 BLOCK) — this
+ * is an ACTION, not a sink id (hence not in the HOWDAH_SINK_* family). */
+#define HOWDAH_ACTION_BLOCK      2
 
 /* The glue callback: decides for one intercepted call. Returns 0/1/2. */
 typedef int (*howdah_sink_decide_t)(int sink, const char *name, size_t name_len,
@@ -74,7 +75,7 @@ typedef void (*howdah_zif)(INTERNAL_FUNCTION_PARAMETERS);
         if (ok && howdah_g_decide) {                                         \
             int d = howdah_g_decide((sinkid), (phpname), sizeof(phpname) - 1, \
                                     arg, arglen);                            \
-            if (d == HOWDAH_SINK_BLOCK) {                                    \
+            if (d == HOWDAH_ACTION_BLOCK) {                                    \
                 RETVAL_FALSE;                                                \
                 return; /* neutralize: do not call the original */          \
             }                                                               \

@@ -204,8 +204,11 @@ release; do not rely on them as guards today.
 
 ### Known limitations
 
-- `proc_open` with an **array** command (PHP 7.4+) is **not inspected** — it
-  fails open. Only the string form is guarded.
+- **Only a string first argument is inspected.** A guarded call whose first
+  argument is not a plain string — an array (e.g. `proc_open` with an array
+  command on PHP 7.4+), or any non-string value — fails open and is chained
+  unguarded. In practice real injection targets (request values, concatenated
+  strings) are always strings and are guarded.
 - As with `[inspect]`, this is best-effort hardening, not a substitute for
   fixing the application. phar:// and SSRF coverage are on the roadmap.
 

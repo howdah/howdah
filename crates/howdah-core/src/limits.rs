@@ -40,6 +40,10 @@ pub struct Limits {
     pub max_input_nesting_depth: usize,
     /// Maximum bytes of any single variable name or array key.
     pub max_input_key_bytes: usize,
+    /// Maximum number of request headers.
+    pub max_request_headers: usize,
+    /// Maximum bytes (name + value) of any single request header.
+    pub max_request_header_bytes: usize,
 }
 
 impl Limits {
@@ -96,6 +100,12 @@ impl Limits {
             max_input_nesting_depth: 64,
             // Same generous bound as field names: keys are identifiers.
             max_input_key_bytes: 1024,
+            // Provisional: browsers send ~10-30 headers and proxies add a few
+            // more; 200 is far beyond legitimate use.
+            max_request_headers: 200,
+            // Provisional: 16 KiB tolerates large cookies and auth tokens in one
+            // header (servers commonly cap a header line at 8-16 KiB).
+            max_request_header_bytes: 16384,
         }
     }
 
@@ -112,6 +122,8 @@ impl Limits {
             ("max_input_vars", self.max_input_vars),
             ("max_input_nesting_depth", self.max_input_nesting_depth),
             ("max_input_key_bytes", self.max_input_key_bytes),
+            ("max_request_headers", self.max_request_headers),
+            ("max_request_header_bytes", self.max_request_header_bytes),
         ];
         for (name, v) in fields {
             if v == 0 {
@@ -174,7 +186,8 @@ impl Limits {
     }
 
     /// Check request input-shape high-water marks against the limits, in
-    /// field order (var count, nesting depth, key bytes); first hit wins.
+    /// field order (var count, nesting depth, key bytes, header count, header
+    /// bytes); first hit wins.
     pub fn check_input(&self, st: &InputState) -> Option<LimitHit> {
         let hit = |rule: RuleId, detail: String| {
             Some(LimitHit { rule, severity: rule.severity(), detail })
@@ -202,6 +215,22 @@ impl Limits {
                     "input key of {} bytes exceeds limit {}",
                     st.max_key_bytes(),
                     self.max_input_key_bytes
+                ),
+            );
+        }
+        if st.headers() > self.max_request_headers as u64 {
+            return hit(
+                RuleId::MaxRequestHeaders,
+                format!("{} request headers exceeds limit {}", st.headers(), self.max_request_headers),
+            );
+        }
+        if st.max_header_bytes() > self.max_request_header_bytes {
+            return hit(
+                RuleId::MaxRequestHeaderBytes,
+                format!(
+                    "request header of {} bytes exceeds limit {}",
+                    st.max_header_bytes(),
+                    self.max_request_header_bytes
                 ),
             );
         }
@@ -278,6 +307,8 @@ pub enum RuleId {
     MaxInputNestingDepth,
     MaxInputKeyBytes,
     CgiArgInjection,
+    MaxRequestHeaders,
+    MaxRequestHeaderBytes,
 }
 
 impl RuleId {
@@ -288,7 +319,9 @@ impl RuleId {
             RuleId::MalformedMultipart
             | RuleId::UploadProgressAbuse
             | RuleId::SelfTest
-            | RuleId::MaxInputKeyBytes => Severity::Standard,
+            | RuleId::MaxInputKeyBytes
+            | RuleId::MaxRequestHeaders
+            | RuleId::MaxRequestHeaderBytes => Severity::Standard,
             _ => Severity::Critical,
         }
     }

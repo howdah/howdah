@@ -96,6 +96,8 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::MaxInputVars => "too many input variables",
         RuleId::MaxInputNestingDepth => "input array nesting too deep",
         RuleId::MaxInputKeyBytes => "input variable key too long",
+        RuleId::MaxRequestHeaders => "too many request headers",
+        RuleId::MaxRequestHeaderBytes => "request header too large",
         RuleId::CgiArgInjection => "php-cgi argument injection (CVE-2012-1823)",
     }
 }

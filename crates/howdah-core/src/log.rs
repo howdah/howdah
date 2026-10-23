@@ -37,6 +37,8 @@ fn rule_name(r: RuleId) -> &'static str {
         RuleId::MaxInputVars => "max_input_vars",
         RuleId::MaxInputNestingDepth => "max_input_nesting_depth",
         RuleId::MaxInputKeyBytes => "max_input_key_bytes",
+        RuleId::MaxRequestHeaders => "max_request_headers",
+        RuleId::MaxRequestHeaderBytes => "max_request_header_bytes",
         RuleId::CgiArgInjection => "cgi_arg_injection",
     }
 }

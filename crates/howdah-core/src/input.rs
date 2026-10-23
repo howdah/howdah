@@ -38,6 +38,8 @@ pub struct InputState {
     vars: u64,
     max_depth: usize,
     max_key_bytes: usize,
+    headers: u64,
+    max_header_bytes: usize,
 }
 
 impl InputState {
@@ -50,6 +52,20 @@ impl InputState {
         self.vars += 1;
         self.max_depth = self.max_depth.max(nesting_depth(name));
         self.max_key_bytes = self.max_key_bytes.max(longest_key(name));
+    }
+
+    /// Record one request header (name and value lengths in bytes).
+    pub fn note_header(&mut self, name_len: usize, value_len: usize) {
+        self.headers += 1;
+        self.max_header_bytes = self.max_header_bytes.max(name_len.saturating_add(value_len));
+    }
+
+    pub fn headers(&self) -> u64 {
+        self.headers
+    }
+
+    pub fn max_header_bytes(&self) -> usize {
+        self.max_header_bytes
     }
 
     pub fn vars(&self) -> u64 {
@@ -68,7 +84,7 @@ impl InputState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::limits::{Limits, RuleId};
+    use crate::limits::{Limits, RuleId, Severity};
 
     #[test] fn nesting_depth_matches_php_bracket_counting() {
         assert_eq!(nesting_depth(b"a"), 0);
@@ -106,5 +122,31 @@ mod tests {
         let l = Limits { max_input_nesting_depth: 1, ..Limits::defaults() };
         let mut s = InputState::new(); s.note_var(b"a[b][c]");
         assert_eq!(l.check_input(&s).unwrap().rule, RuleId::MaxInputNestingDepth);
+    }
+    #[test] fn header_flood_yields_max_request_headers_standard() {
+        let l = Limits { max_request_headers: 2, ..Limits::defaults() };
+        let mut s = InputState::new();
+        for _ in 0..3 { s.note_header(4, 4); }
+        assert_eq!(s.headers(), 3);
+        let h = l.check_input(&s).unwrap();
+        assert_eq!((h.rule, h.severity), (RuleId::MaxRequestHeaders, Severity::Standard));
+        assert_eq!(RuleId::MaxRequestHeaders.severity(), Severity::Standard);
+    }
+    #[test] fn oversized_header_yields_max_request_header_bytes_standard() {
+        let l = Limits { max_request_header_bytes: 10, ..Limits::defaults() };
+        let mut s = InputState::new();
+        s.note_header(3, 4);
+        assert!(l.check_input(&s).is_none());
+        s.note_header(5, 6);
+        assert_eq!(s.max_header_bytes(), 11);
+        let h = l.check_input(&s).unwrap();
+        assert_eq!((h.rule, h.severity), (RuleId::MaxRequestHeaderBytes, Severity::Standard));
+        assert_eq!(RuleId::MaxRequestHeaderBytes.severity(), Severity::Standard);
+    }
+    #[test] fn variable_checks_precede_header_checks() {
+        let l = Limits { max_input_vars: 1, max_request_headers: 1, ..Limits::defaults() };
+        let mut s = InputState::new();
+        s.note_var(b"a"); s.note_var(b"b"); s.note_header(1, 1); s.note_header(1, 1);
+        assert_eq!(l.check_input(&s).unwrap().rule, RuleId::MaxInputVars);
     }
 }

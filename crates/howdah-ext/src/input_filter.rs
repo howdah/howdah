@@ -75,7 +75,7 @@ pub(crate) unsafe extern "C" fn filter(
     // Our own processing is fully panic-guarded: a glue bug must never unwind
     // into PHP (carry-forward #4). On panic we do NOT drop — we fall through to
     // chaining the prior filter (fail-open), exactly like rfc1867::callback.
-    let drop_var = catch_unwind(AssertUnwindSafe(|| process(arg, var))).unwrap_or(false);
+    let drop_var = catch_unwind(AssertUnwindSafe(|| process(arg, var, val_len))).unwrap_or(false);
 
     if drop_var {
         // The core decided Block: drop THIS variable (return 0, do not chain) to
@@ -97,23 +97,42 @@ pub(crate) unsafe extern "C" fn filter(
     }
 }
 
-/// Begin the request (idempotent), then, for GET/POST/COOKIE variables only,
-/// feed the variable name's length into the core's input-shape limits. Returns
-/// true when the variable must be dropped (the core returned Block).
-///
-/// `PARSE_SERVER` (`$_SERVER`, incl. `HTTP_*` headers) and any other `arg` are
-/// ignored here — request-header handling is a later task.
-unsafe fn process(arg: c_int, var: VarPtr) -> bool {
+/// Begin the request (idempotent), then feed the variable into the core:
+///   * `PARSE_SERVER` `HTTP_*` entries ARE the request headers PHP exposes in
+///     `$_SERVER`; feed each one's name/value lengths to the core's header
+///     count/size limits (regardless of MULTIPART — headers apply to every
+///     request). We never drop a `$_SERVER` entry (returning 0 for one could
+///     break the script); a header-limit Block is latched for the RSHUTDOWN
+///     response and the chain's own verdict is returned.
+///   * GET/POST/COOKIE names are fed to the input-shape limits.
+/// Returns true only when a GET/POST/COOKIE variable must be dropped (the core
+/// returned Block); always false for `PARSE_SERVER` and any other `arg`.
+unsafe fn process(arg: c_int, var: VarPtr, val_len: ValLen) -> bool {
     // Whichever hook fires first in a request begins the core request; the rest
     // skip. The input_filter fires before RINIT, so this may be the first.
     module::maybe_begin();
+
+    // Request headers: PHP routes the `HTTP_*` `$_SERVER` entries through
+    // PARSE_SERVER. Feed their lengths to the core; non-HTTP_ $_SERVER entries
+    // (SCRIPT_NAME, SERVER_PORT, ...) are not headers and are ignored. Never
+    // drop one — just latch a block for the RSHUTDOWN response.
+    if arg == sys::PARSE_SERVER as c_int {
+        let (name, name_len) = var_name(var);
+        if is_http_header(name, name_len) {
+            let action = core::howdah_request_header(module::CTX, name_len, val_len as usize);
+            if action == core::HOWDAH_BLOCK {
+                INPUT_BLOCKED = true;
+            }
+        }
+        return false;
+    }
 
     // Count GET/POST/COOKIE through the input-shape limits. On a multipart
     // request the POST variables ARE the multipart fields (already counted by
     // the part limits via the rfc1867 path), so skip PARSE_POST there to avoid
     // double-counting and to preserve 0.1's `max_parts` attribution; GET and
-    // COOKIE are still counted. PARSE_SERVER (`$_SERVER`, incl. HTTP_* headers)
-    // and any other `arg` are ignored here (request headers are a later task).
+    // COOKIE are still counted. PARSE_SERVER was handled above; any other `arg`
+    // is ignored here.
     let counted = arg == sys::PARSE_GET as c_int
         || arg == sys::PARSE_COOKIE as c_int
         || (arg == sys::PARSE_POST as c_int && !*ptr::addr_of!(module::MULTIPART));
@@ -128,6 +147,16 @@ unsafe fn process(arg: c_int, var: VarPtr) -> bool {
         return true;
     }
     false
+}
+
+/// True when a `PARSE_SERVER` variable name is an `HTTP_*` request header (the
+/// prefix PHP uses for every client-supplied header in `$_SERVER`).
+unsafe fn is_http_header(name: *const c_char, name_len: usize) -> bool {
+    const PREFIX: &[u8] = b"HTTP_";
+    if name.is_null() || name_len < PREFIX.len() {
+        return false;
+    }
+    std::slice::from_raw_parts(name as *const u8, PREFIX.len()) == PREFIX
 }
 
 /// The variable name as a `(ptr, len)` pair for the core (the name is inspected

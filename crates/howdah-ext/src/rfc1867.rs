@@ -238,7 +238,7 @@ pub(crate) unsafe fn cbytes(p: *const c_char) -> Vec<u8> {
 /// value and drops it (and every other heap-owned Rust value) BEFORE the
 /// `bail()` longjmp, which skips destructors — otherwise each blocked (i.e.
 /// attacker-triggerable) request would leak the id string.
-unsafe fn emit_and_bail(status: c_int, request_id: String) -> ! {
+pub(crate) unsafe fn emit_and_bail(status: c_int, request_id: String) -> ! {
     // emit_block only borrows request_id; it copies the bytes into the client
     // response and the log sink, leaving nothing of ours alive past its return.
     let _ = catch_unwind(AssertUnwindSafe(|| response::emit_block(status, &request_id)));

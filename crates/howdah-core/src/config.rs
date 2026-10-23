@@ -147,6 +147,30 @@ self_test = "off"
     }
 
     #[test]
+    fn layer1_limits_parse() {
+        let c = Config::from_toml(
+            "[limits]\nmax_input_vars = 500\nmax_input_nesting_depth = 8\nmax_request_headers = 40",
+        )
+        .unwrap();
+        assert_eq!(c.limits.max_input_vars, 500);
+        assert_eq!(c.limits.max_input_nesting_depth, 8);
+        assert_eq!(c.limits.max_request_headers, 40);
+    }
+
+    #[test]
+    fn zero_layer1_limits_rejected() {
+        for f in ["max_input_vars", "max_request_header_bytes"] {
+            let e = Config::from_toml(&format!("[limits]\n{f} = 0")).unwrap_err();
+            assert!(e.to_string().contains(f), "{e}");
+        }
+    }
+
+    #[test]
+    fn unknown_limits_key_rejected() {
+        assert!(Config::from_toml("[limits]\nnope = 1").is_err());
+    }
+
+    #[test]
     fn invalid_mode_rejected() {
         assert!(Config::from_toml("mode = \"yolo\"").is_err());
     }

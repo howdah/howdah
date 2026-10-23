@@ -320,6 +320,10 @@ unsafe extern "C" fn minfo(_module: *mut sys::zend_module_entry) {
         b"Panic guard (catch_unwind active)\0",
         if crate::panic_unwinds() { b"yes\0" } else { b"NO - UNSAFE BUILD\0" },
     );
+    row(
+        b"Layer-1 limits\0",
+        b"multipart, input-shape, request-header, cgi-arg-injection\0",
+    );
     sys::php_info_print_table_end();
 }
 

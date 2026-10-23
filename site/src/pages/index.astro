@@ -6,8 +6,9 @@ import { REPO, PKG } from '../lib/site';
 const rows = coverage.rows;
 const ranDate = (coverage.generated || '').slice(0, 10);
 
-// Four-layer model (design §3). Layer 1 is what 1.0 delivers; 2–4 are the
-// roadmap and are shown dimmed so the page never implies they exist yet.
+// Four-layer model (design §3). Layer 1 is what 1.0 delivers. Layer 2 is
+// implemented but unreleased (status 'next', log-only); 3–4 are the roadmap.
+// Non-active layers are dimmed so the page never implies they are in 1.0.
 const layers = [
   { n: 1, name: 'Request parsing', covers: 'Upload/multipart floods (PHP2Shell), input-variable floods, deeply nested arrays, oversized headers — refused while PHP parses the request.', status: 'active' },
   { n: 2, name: 'Request inspection', covers: 'Content inspection of decoded GET/POST/cookie/path values for SQL injection, path traversal and command/code injection. It detects and logs; it does not block by default.', status: 'next' },
@@ -65,7 +66,7 @@ const compare = [
   <section id="how" class="alt">
     <div class="wrap">
       <h2>How it works: four layers</h2>
-      <p>Howdah's protection is organised in four layers. <strong>Version 1.0 delivers Layer 1 in full.</strong> Layer 2 is implemented in the codebase but is not in any published release yet: it is coming in the next release (1.1), and it detects and logs; it does not block by default. Layers 3 and 4 are the roadmap, and this page never claims they are here yet. Signature inspection is best-effort and can be bypassed, which is why Layer 2 logs rather than blocks.</p>
+      <p>Howdah's protection is organised in four layers. <strong>Version 1.0 delivers Layer 1 in full.</strong> Layer 2 is implemented in the codebase but is not in any published release yet: it is coming in the next release (1.1), and it detects and logs; it does not block by default. Layers 3 and 4 are the roadmap, and this page never claims they are here yet.</p>
       <ol class="layers" aria-label="The four protection layers; a request flows from the top down">
         {layers.map((l) => (
           <li class={l.status}>

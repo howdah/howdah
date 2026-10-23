@@ -1,0 +1,38 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { REPO } from '../../lib/site';
+---
+<Layout
+  title="Howdah documentation"
+  description="How to install, configure, verify, troubleshoot and uninstall Howdah — the defensive firewall for PHP."
+  path="/docs/"
+>
+  <div class="pagehead">
+    <div class="wrap">
+      <p class="crumbs"><a href="/">Home</a> / <span aria-current="page">Docs</span></p>
+      <h1>Documentation</h1>
+      <p class="lede">Everything you need to install Howdah, configure its rules, read its logs, and roll it back.</p>
+    </div>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <ul class="cardgrid">
+        <li><a class="card" href="/install/"><h3>Install &amp; verify</h3><p>The picker builds the exact apt/yum/tarball commands for your OS, PHP source, version and server type, with verify and rollback.</p></a></li>
+        <li><a class="card" href="/docs/configuration/"><h3>Configuration &amp; rules</h3><p>The TOML file, every <code>howdah.*</code> setting, the full rule reference with defaults and severity, and the JSON log format.</p></a></li>
+        <li><a class="card" href="/docs/troubleshooting/"><h3>Troubleshooting &amp; FAQ</h3><p>&ldquo;Loaded in CLI but not FPM&rdquo;, detect vs block, upgrading and uninstalling, and common questions.</p></a></li>
+        <li><a class="card" href="/coverage/"><h3>Coverage</h3><p>Exactly which PHP versions and server types have been tested, generated from the lab matrix.</p></a></li>
+      </ul>
+
+      <h2 style="margin-top:2.5rem">Reference in the repository</h2>
+      <p>The documentation on this site is drawn from the source-of-truth docs in the repository, which are versioned with the code:</p>
+      <ul class="facts">
+        <li><a href={`${REPO}/blob/main/docs/config.md`}>docs/config.md</a> — configuration and rule reference</li>
+        <li><a href={`${REPO}/blob/main/docs/coverage.md`}>docs/coverage.md</a> — coverage in prose</li>
+        <li><a href={`${REPO}/blob/main/docs/coverage-data.md`}>docs/coverage-data.md</a> — the memory measurements behind the default limits</li>
+        <li><a href={`${REPO}/blob/main/docs/install-repos.md`}>docs/install-repos.md</a> — apt/yum repository install</li>
+        <li><a href={`${REPO}/security/policy`}>Security policy</a> — how to report a vulnerability</li>
+      </ul>
+    </div>
+  </section>
+</Layout>

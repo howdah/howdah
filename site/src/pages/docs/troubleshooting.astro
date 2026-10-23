@@ -1,0 +1,87 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { REPO } from '../../lib/site';
+---
+<Layout
+  title="Howdah troubleshooting & FAQ"
+  description="Common Howdah questions and fixes: loaded in CLI but not FPM, detect vs block, upgrading, uninstalling, thread safety, and performance."
+  path="/docs/troubleshooting/"
+>
+  <div class="pagehead">
+    <div class="wrap">
+      <p class="crumbs"><a href="/">Home</a> / <a href="/docs/">Docs</a> / <span aria-current="page">Troubleshooting</span></p>
+      <h1>Troubleshooting &amp; FAQ</h1>
+      <p class="lede">The questions that come up most, and how to settle them.</p>
+    </div>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <h2>Troubleshooting</h2>
+
+      <h3>It loads on the command line but not in FPM / Apache</h3>
+      <p>PHP has a separate configuration per SAPI. <code>php --ri howdah</code> working on the CLI does not mean the web server loaded it. Enable it for the running SAPI and reload that service:</p>
+      <pre tabindex="0"><code><span class="c"># Debian/Ubuntu (Surý)</span>
+sudo phpenmod -v 8.1 howdah
+sudo systemctl reload php8.1-fpm       <span class="c"># or: systemctl reload apache2</span>
+
+<span class="c"># then confirm against the SAPI's own config</span>
+php-fpm8.1 -i | grep -i howdah          <span class="c"># or check a phpinfo() page</span></code></pre>
+      <p>On Apache <code>mod_php</code>, the module is loaded by the web server process, so reload Apache, not FPM.</p>
+
+      <h3>The self-test is flagged but an over-limit request is not blocked</h3>
+      <p>PHP's own <code>max_input_vars</code> (default 1000) can stop parsing before Howdah's higher <code>max_input_vars</code> (2000) is reached — PHP is protecting itself first, which is fine. For the multipart limits, confirm the request really crosses the limit, and that the rule is not set to <code>detect</code>/<code>off</code> in your TOML.</p>
+
+      <h3>A request logged an event but still returned HTTP 200</h3>
+      <p>Expected for the input-shape and request-header rules on some SAPIs: the offending variable is dropped and logged (the real mitigation), but the 403 is best-effort and may not land before the script has already produced output. The multipart limits, by contrast, block before the script runs. See <a href="/docs/configuration/">Enforcement timing</a>.</p>
+
+      <h3>Nothing is being blocked at all</h3>
+      <p>Check the global mode (<code>php --ri howdah</code> shows it). In <code>detect</code> mode only the Critical rules block; Standard rules log. Switch to <code>block</code> once the logs look clean. Confirm the log path is writable, or events will be silently lost.</p>
+
+      <h2>Upgrading</h2>
+      <pre tabindex="0"><code><span class="c"># apt</span>
+sudo apt-get update &amp;&amp; sudo apt-get install --only-upgrade php8.1-howdah
+sudo systemctl reload php8.1-fpm
+<span class="c"># yum / dnf</span>
+sudo yum update php81-howdah
+<span class="c"># tarball: verify + replace howdah.so for your PHP minor, then reload</span></code></pre>
+      <p class="legend">Always verify the signature of a new tarball before replacing (see the <a href="/install/">install picker</a>). Your TOML and ini are not touched by an upgrade.</p>
+
+      <h2>Uninstalling</h2>
+      <pre tabindex="0"><code><span class="c"># apt: stop loading but keep the package, or remove entirely</span>
+sudo phpdismod -v 8.1 howdah &amp;&amp; sudo systemctl reload php8.1-fpm
+sudo apt-get purge php8.1-howdah
+<span class="c"># yum</span>
+sudo yum remove php81-howdah
+<span class="c"># tarball: remove the extension=howdah.so line (or the conf.d file) and reload</span></code></pre>
+      <p class="legend">Removal never breaks PHP: the package maintainer scripts only enable/disable the module and never fail the transaction.</p>
+
+      <h2>FAQ</h2>
+      <dl class="faq">
+        <dt>Does Howdah replace patching or upgrading PHP?</dt>
+        <dd>No. Upgrade PHP when you can. Howdah is for when you cannot, or until you can — especially on EOL PHP that will never get the official fix.</dd>
+
+        <dt>Will it break my site?</dt>
+        <dd>It is designed to fail open: a bug in Howdah must never crash or wedge PHP. Start in <code>detect</code> mode, watch the logs, then move to <code>block</code>. The false-positive corpus (ordinary galleries, settings forms, nested arrays) passes with zero blocks at the default limits.</dd>
+
+        <dt>Does it phone home or need a cloud service?</dt>
+        <dd>No. Howdah runs entirely inside your PHP. It makes no outbound connections and needs no account or external service.</dd>
+
+        <dt>Which PHP builds are supported?</dt>
+        <dd>Non-thread-safe (NTS) PHP 5.4 through 8.5 on Linux x86_64 and aarch64, one build per minor version. ZTS builds are not supported. See <a href="/coverage/">coverage</a> for what has been tested.</dd>
+
+        <dt>What is the performance cost?</dt>
+        <dd>Howdah counts parts and variables as PHP already parses them; there is no second parse of the body. It adds bounded bookkeeping per request and does not buffer the whole body itself.</dd>
+
+        <dt>How do I report a security issue?</dt>
+        <dd>Privately, through GitHub's vulnerability reporting — see the <a href={`${REPO}/security/policy`}>security policy</a>. Please do not open a public issue for a suspected vulnerability.</dd>
+      </dl>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .faq { margin: 1rem 0 0; }
+  .faq dt { font-weight: 600; font-family: var(--display); font-size: 1.15rem; margin-top: 1.5rem; }
+  .faq dd { margin: .4rem 0 0; max-width: 46rem; }
+</style>

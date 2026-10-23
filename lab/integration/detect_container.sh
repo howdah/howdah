@@ -34,6 +34,20 @@ EOF
 done
 printf 'extension_dir=/opt/php74/ext\n;extension=/h/howdah.so\n' > /opt/php74/etc/php.ini
 
+# Issue-1 fixture: a PHP 7.4 whose every invocation prints a startup warning BEFORE the banner.
+# Issue-2 fixture: its prefix has a sibling UNVERSIONED php-fpm that is really 7.3 (must not be credited).
+mkdir -p /opt/php74w/bin
+cat > /opt/php74w/bin/php <<'EOF'
+#!/bin/sh
+echo "Warning:  Module already loaded in Unknown on line 0"
+exec /opt/php74/bin/php "$@"
+EOF
+cat > /opt/php74w/bin/php-fpm <<'EOF'
+#!/bin/sh
+exec /usr/local/sbin/php-fpm "$@"
+EOF
+chmod +x /opt/php74w/bin/php /opt/php74w/bin/php-fpm
+
 mkdir -p /etc/php/8.0/cli/conf.d /etc/php/8.0/fpm/conf.d /etc/php/8.0/apache2/conf.d
 echo ';extension=howdah.so' > /etc/php/8.0/cli/conf.d/20-howdah.ini
 echo 'extension=howdah.so'  > /etc/php/8.0/fpm/conf.d/20-howdah.ini
@@ -50,7 +64,7 @@ if [ ! -x "$HC" ]; then
   echo "FAIL: $HC missing or not executable"
   exit 1
 fi
-PATH="/opt/php74/bin:$PATH"
+PATH="/opt/php74/bin:/opt/php74w/bin:$PATH"
 OUT=$("$HC" detect 2>/tmp/detect.err); rc=$?
 echo "$OUT"
 echo "---- stderr ----"; cat /tmp/detect.err; echo "---- assertions ----"
@@ -63,6 +77,7 @@ block() { printf '%s\n' "$OUT" | awk -v pat="$1" '/^php:/{p=($0 ~ pat)} p'; }
 
 B73=$(block 'php: /usr/local/bin/php$')
 B74=$(block 'php: /opt/php74/bin/php$')
+B74W=$(block 'php: /opt/php74w/bin/php$')
 B80=$(block 'no runnable binary')
 
 has() { printf '%s\n' "$1" | grep -Eq "$2"; }
@@ -87,8 +102,12 @@ has "$B80" 'sapi cli: .*howdah=not-loaded'       && ok "8.0 cli commented -> not
 has "$B80" 'sapi fpm: .*howdah=loaded'           && ok "8.0 fpm loaded" || bad "8.0 fpm"
 has "$B80" 'sapi apache: .*howdah=not-loaded'    && ok "8.0 apache not loaded" || bad "8.0 apache"
 
+has "$B74W" 'version: 7\.4\.'    && ok "warning-before-banner php still listed (7.4)" || bad "warning-before-banner php omitted"
+has "$B74W" 'api: 20190902$'     && ok "warned php api 20190902" || bad "warned php api"
+has "$B74W" 'sapi fpm: absent'   && ok "unversioned 7.3 php-fpm not credited to 7.4" || bad "7.3 fpm misattributed to 7.4"
+
 n=$(printf '%s\n' "$OUT" | grep -c '^php:')
-[ "$n" -eq 3 ] && ok "exactly 3 install blocks (7.3, 7.4, 8.0 config-only)" || bad "install blocks: $n"
+[ "$n" -eq 4 ] && ok "exactly 4 install blocks (7.3, 7.4, 7.4-warn, 8.0 config-only)" || bad "install blocks: $n"
 [ "$(printf '%s\n' "$OUT" | grep -c 'howdah=loaded')" -eq 3 ] \
   && ok "howdah=loaded only 3x (7.3 cli, 7.3 fpm, 8.0 fpm)" || bad "unexpected loaded count"
 

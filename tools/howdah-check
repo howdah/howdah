@@ -19,16 +19,20 @@ ROOT=${HOWDAH_CHECK_ROOT:-}
 NL='
 '
 
+say() { printf '%s\n' "$*"; }
+
 usage() {
-  echo "usage: $PROG detect" >&2
-  echo "  detect   find every PHP install and report what Howdah needs (read-only)" >&2
+  say "usage: $PROG detect" >&2
+  say "  detect   find every PHP install and report what Howdah needs (read-only)" >&2
 }
 
 # --- small helpers ----------------------------------------------------------
 
 # run a command with a timeout when one is available (never hang the run)
+HAVE_TMO=0
+if command -v timeout >/dev/null 2>&1 && timeout 1 true >/dev/null 2>&1; then HAVE_TMO=1; fi
 tmo() {
-  if command -v timeout >/dev/null 2>&1; then
+  if [ "$HAVE_TMO" = 1 ]; then
     timeout 15 "$@"
   else
     "$@"
@@ -58,7 +62,7 @@ ini_has_howdah() {
 scan_dir_state() {
   _d=$1
   [ -d "$_d" ] || { echo unknown; return; }
-  if ini_has_howdah "$_d"/php.ini "$_d"/conf.d/*.ini "$_d"/php.d/*.ini; then
+  if ini_has_howdah "$_d"/php.ini "$_d"/conf.d/*.ini "$_d"/php.d/*.ini ${2:+"$2"}; then
     echo loaded
   else
     echo not-loaded
@@ -137,14 +141,17 @@ FOUND=0
 find_fpm() {
   _bd=$(dirname "$1")
   _fm=$2
-  for _p in "$_bd/php-fpm" "$_bd/../sbin/php-fpm" "$_bd/../../sbin/php-fpm" \
-            "$ROOT/usr/sbin/php-fpm$_fm" "$ROOT/usr/sbin/php-fpm"; do
+  [ -n "$_fm" ] || return 0
+  for _p in "$ROOT/usr/sbin/php-fpm$_fm" "$_bd/php-fpm" "$_bd/../sbin/php-fpm" "$_bd/../../sbin/php-fpm" \
+            "$ROOT/usr/sbin/php-fpm"; do
     [ -f "$_p" ] && [ -x "$_p" ] || continue
-    if [ "$_p" = "$ROOT/usr/sbin/php-fpm" ]; then
-      # unversioned /usr/sbin/php-fpm only counts when it is the same MAJ.MIN
-      _fv=$(tmo "$_p" -v 2>/dev/null | head -1 | sed -n 's/^PHP \([0-9][0-9.]*\).*/\1/p')
-      [ "$(mm_of "$_fv")" = "$_fm" ] || continue
-    fi
+    # a version-named php-fpm is trusted; EVERY unversioned one must report the same MAJ.MIN
+    case "$_p" in
+      */php-fpm"$_fm") ;;
+      *)
+        _fv=$(tmo "$_p" -v 2>/dev/null | sed -n '/^PHP [0-9]/{s/^PHP \([0-9][0-9.]*\).*/\1/p;q;}')
+        [ "$(mm_of "$_fv")" = "$_fm" ] || continue ;;
+    esac
     printf '%s\n' "$_p"
     return 0
   done
@@ -152,14 +159,22 @@ find_fpm() {
 
 # $1=MAJ.MIN $2=MMnodot $3=php binary -> prints a mod_php path, or nothing
 find_apache() {
-  _bd=$(dirname "$3")
+  [ -n "$1" ] || return 0
+  # version-named modules in the shared system dirs (never a bare libphp*.so glob there)
   for _p in \
     "$ROOT/usr/lib/apache2/modules/libphp$1.so" "$ROOT/usr/lib64/httpd/modules/libphp$1.so" \
     "$ROOT/usr/lib/httpd/modules/libphp$1.so" "$ROOT/usr/lib64/apache2/modules/libphp$1.so" \
-    "$_bd/../lib64/httpd/modules/libphp"*.so "$_bd/../lib/httpd/modules/libphp"*.so \
-    "$_bd/../lib/apache2/modules/libphp"*.so "$_bd/../../usr/lib64/httpd/modules/libphp"*.so \
     "$ROOT/opt/cpanel/ea-php$2/root/usr/lib64/httpd/modules/libphp"*.so
   do
+    [ -f "$_p" ] && { printf '%s\n' "$_p"; return 0; }
+  done
+  # a private prefix (/opt/phpNN/...) owns any libphp*.so under it; /usr and /usr/local do not
+  _pre=$(realp "$(dirname "$3")/..")
+  case "$_pre" in
+    /|/usr|/usr/local|"$ROOT"|"$ROOT/usr"|"$ROOT/usr/local") return 0 ;;
+  esac
+  for _p in "$_pre"/lib64/httpd/modules/libphp*.so "$_pre"/lib/httpd/modules/libphp*.so \
+            "$_pre"/lib/apache2/modules/libphp*.so "$_pre"/usr/lib64/httpd/modules/libphp*.so; do
     [ -f "$_p" ] && { printf '%s\n' "$_p"; return 0; }
   done
 }
@@ -169,15 +184,19 @@ report_install() {
   _real=$(realp "$_bin")
   case "$SEEN_REAL" in *"$NL$_real$NL"*|"$_real$NL"*) return 0 ;; esac
 
-  _vline=$(tmo "$_bin" -v 2>/dev/null | head -1)
-  case "$_vline" in
-    PHP\ *) ;;
-    *) return 0 ;;   # not a runnable PHP (php-cgi stub, broken wrapper, ...)
-  esac
+  # find the banner anywhere in the output (startup warnings may precede it)
+  _vline=$(tmo "$_bin" -v 2>/dev/null | sed -n '/^PHP [0-9]/{p;q;}')
+  _info=$(tmo "$_bin" -i 2>/dev/null)
+  if [ -z "$_vline" ]; then
+    # No banner: still an install if it demonstrably runs as PHP. Never omit one silently.
+    case "$_info" in
+      *"PHP Version =>"*) ;;
+      *) tmo "$_bin" -m 2>/dev/null | grep -q '^\[PHP Modules\]' || return 0 ;;
+    esac
+  fi
   SEEN_REAL="$SEEN_REAL$_real$NL"
   FOUND=$((FOUND + 1))
 
-  _info=$(tmo "$_bin" -i 2>/dev/null)
   _ver=$(printf '%s\n' "$_info" | sed -n 's/^PHP Version => \(.*[^ ]\) *$/\1/p' | head -1)
   [ -n "$_ver" ] || _ver=$(printf '%s\n' "$_vline" | sed -n 's/^PHP \([^ ]*\).*/\1/p')
   _api=$(printf '%s\n' "$_info" | sed -n 's/^PHP API => \([0-9][0-9]*\).*/\1/p' | head -1)
@@ -197,7 +216,6 @@ report_install() {
   done
   if [ -n "$_pc" ]; then
     [ -n "$_ext" ] || _ext=$(tmo "$_pc" --extension-dir 2>/dev/null | head -1)
-    [ -n "$_api" ] || _api=$(tmo "$_pc" --phpapi 2>/dev/null | head -1)
   fi
   # fallback 2: the extension_dir suffix, e.g. .../no-debug-non-zts-20190902 or .../20190902
   if [ -z "$_api" ] && [ -n "$_ext" ]; then
@@ -215,53 +233,65 @@ report_install() {
     *) _tsl=unknown ;;
   esac
 
-  SEEN_MM="$SEEN_MM $_mm "
-
-  echo "php: $_bin"
-  [ "$_real" = "$_bin" ] || echo "  realpath: $_real"
-  echo "  version: ${_ver:-unknown}"
-  echo "  api: ${_api:-unknown}"
-  echo "  thread_safety: $_tsl"
-  echo "  extension_dir: ${_ext:-unknown}"
-  echo "  php_ini: ${_ini:-(none)}"
-  if [ -n "$_scan" ] && [ "$_scan" != "(none)" ]; then echo "  ini_scan_dir: $_scan"; fi
+  say "php: $_bin"
+  [ "$_real" = "$_bin" ] || say "  realpath: $_real"
+  say "  version: ${_ver:-unknown}"
+  say "  api: ${_api:-unknown}"
+  say "  thread_safety: $_tsl"
+  say "  extension_dir: ${_ext:-unknown}"
+  say "  php_ini: ${_ini:-(none)}"
+  if [ -n "$_scan" ] && [ "$_scan" != "(none)" ]; then say "  ini_scan_dir: $_scan"; fi
 
   # --- cli: ask PHP itself
   if tmo "$_bin" -m 2>/dev/null | grep -qix howdah; then _cs=loaded
   elif tmo "$_bin" -m >/dev/null 2>&1; then _cs=not-loaded
   else _cs=unknown; fi
-  echo "  sapi cli: present  howdah=$_cs"
+  say "  sapi cli: present  howdah=$_cs"
 
   # --- fpm: ask php-fpm -m, else scan its config dir
   _fpm=$(find_fpm "$_bin" "$_mm")
+  # Debian /etc/php/<ver>/* belongs only to the distro binary /usr/bin/php<ver>,
+  # not to a custom build that merely shares MAJ.MIN.
+  _debdir=""
+  if [ -n "$_mm" ] && [ "$_real" = "$(realp "$ROOT/usr/bin/php$_mm")" ] && [ -d "$ROOT/etc/php/$_mm" ]; then
+    _debdir="$ROOT/etc/php/$_mm"
+    SEEN_MM="$SEEN_MM $_mm "   # only the distro binary accounts for /etc/php/<ver>
+  fi
   _fdir=""
-  for _d in "$ROOT/etc/php/$_mm/fpm" "$ROOT/etc/opt/remi/php$_mmn" "$ROOT/opt/cpanel/ea-php$_mmn/root/etc" \
-            "$ROOT/opt/alt/php$_mmn/etc"; do
-    [ -d "$_d" ] && { _fdir=$_d; break; }
-  done
+  if [ -n "$_mmn" ]; then
+    for _d in ${_debdir:+"$_debdir/fpm"} "$ROOT/etc/opt/remi/php$_mmn" "$ROOT/opt/cpanel/ea-php$_mmn/root/etc" \
+              "$ROOT/opt/alt/php$_mmn/etc"; do
+      [ -d "$_d" ] && { _fdir=$_d; break; }
+    done
+  fi
   if [ -n "$_fpm" ]; then
     if tmo "$_fpm" -m 2>/dev/null | grep -qix howdah; then _fs=loaded
     elif tmo "$_fpm" -m >/dev/null 2>&1; then _fs=not-loaded
     elif [ -n "$_fdir" ]; then _fs=$(scan_dir_state "$_fdir")
     else _fs=unknown; fi
-    echo "  sapi fpm: present ($_fpm)  howdah=$_fs"
-  elif [ -d "$ROOT/etc/php/$_mm/fpm" ]; then
-    echo "  sapi fpm: present (config only: $ROOT/etc/php/$_mm/fpm)  howdah=$(scan_dir_state "$ROOT/etc/php/$_mm/fpm")"
+    say "  sapi fpm: present ($_fpm)  howdah=$_fs"
+  elif [ -n "$_debdir" ] && [ -d "$_debdir/fpm" ]; then
+    say "  sapi fpm: present (config only: $_debdir/fpm)  howdah=$(scan_dir_state "$_debdir/fpm")"
   else
-    echo "  sapi fpm: absent"
+    say "  sapi fpm: absent"
   fi
 
   # --- apache (mod_php): not runnable, so config files are scanned
   _ap=$(find_apache "$_mm" "$_mmn" "$_bin")
-  if [ -d "$ROOT/etc/php/$_mm/apache2" ]; then
-    echo "  sapi apache: present ($ROOT/etc/php/$_mm/apache2)  howdah=$(scan_dir_state "$ROOT/etc/php/$_mm/apache2")"
+  if [ -n "$_debdir" ] && [ -d "$_debdir/apache2" ]; then
+    # Debian: scan apache2's own php.ini + conf.d (contents, not mere directory existence)
+    say "  sapi apache: present ($_debdir/apache2)  howdah=$(scan_dir_state "$_debdir/apache2")"
   elif [ -n "$_ap" ]; then
-    # non-Debian: mod_php reads the same scan dir as the CLI; say unknown if we cannot tell
+    # non-Debian: assume mod_php reads the CLI's main php.ini + scan dir; unknown if neither is known
     _as=unknown
-    if [ -n "$_scan" ] && [ "$_scan" != "(none)" ]; then _as=$(scan_dir_state "$_scan"); fi
-    echo "  sapi apache: present ($_ap)  howdah=$_as"
+    _sd=""
+    if [ -n "$_scan" ] && [ "$_scan" != "(none)" ]; then _sd=$_scan; fi
+    if [ -n "$_sd" ] || { [ -n "$_ini" ] && [ "$_ini" != "(none)" ]; }; then
+      if ini_has_howdah ${_ini:+"$_ini"} ${_sd:+"$_sd"/*.ini}; then _as=loaded; else _as=not-loaded; fi
+    fi
+    say "  sapi apache: present ($_ap)  howdah=$_as"
   else
-    echo "  sapi apache: absent"
+    say "  sapi apache: absent"
   fi
 }
 
@@ -272,17 +302,17 @@ report_config_only() {
     _v=$(basename "$_d")
     case "$SEEN_MM" in *" $_v "*) continue ;; esac
     FOUND=$((FOUND + 1))
-    echo "php: (no runnable binary found)"
-    echo "  version: $_v (from $_d)"
-    echo "  api: unknown"
-    echo "  thread_safety: unknown"
-    echo "  extension_dir: unknown"
+    say "php: (no runnable binary found)"
+    say "  version: $_v (from $_d)"
+    say "  api: unknown"
+    say "  thread_safety: unknown"
+    say "  extension_dir: unknown"
     for _s in cli fpm apache2; do
       _n=$_s; [ "$_s" = apache2 ] && _n=apache
       if [ -d "$_d/$_s" ]; then
-        echo "  sapi $_n: present (config only)  howdah=$(scan_dir_state "$_d/$_s")"
+        say "  sapi $_n: present (config only)  howdah=$(scan_dir_state "$_d/$_s")"
       else
-        echo "  sapi $_n: absent"
+        say "  sapi $_n: absent"
       fi
     done
   done
@@ -299,9 +329,9 @@ cmd_detect() {
   IFS=$_oifs
   report_config_only
   if [ "$FOUND" -eq 0 ]; then
-    echo "no PHP installs found"
+    say "no PHP installs found"
   else
-    echo "found $FOUND PHP install(s)"
+    say "found $FOUND PHP install(s)"
   fi
   return 0
 }
@@ -310,5 +340,5 @@ case "${1:-}" in
   detect) cmd_detect ;;
   "") usage; exit 2 ;;
   -h|--help|help) usage ;;
-  *) echo "$PROG: unknown command '$1'" >&2; usage; exit 2 ;;
+  *) say "$PROG: unknown command '$1'" >&2; usage; exit 2 ;;
 esac

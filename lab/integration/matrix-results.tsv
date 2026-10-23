@@ -1,4 +1,4 @@
-## Howdah cross-version block matrix -- generated 2026-10-23T07:43:02Z
+## Howdah cross-version block matrix -- generated 2026-10-23T08:04:01Z
 ## columns: phpver\tsapi\tscenario\tresult\tdetail
 5.4.16	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
 5.4.16	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
@@ -14,9 +14,9 @@
 5.4.16	cli	up_progress_off	PASS	http=403
 5.4.16	cli	detect_standard	PASS	http=200 action=log
 5.4.16	cli	detect_critical	PASS	http=403
-5.4.16	cli	input_vars_flood	PASS	blocked rule=max_input_vars http=403 (403 best-effort on input path)
-5.4.16	cli	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=403 (403 best-effort on input path)
-5.4.16	cli	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=403 (403 best-effort on input path)
+5.4.16	cli	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+5.4.16	cli	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+5.4.16	cli	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort on input path)
 5.4.16	cli	request_headers_flood	SKIP	header counting asserted under fpm/apache (cli HTTP_* routing is version-dependent)
 5.4.16	cli	request_headers_flood_detect	SKIP	header counting asserted under fpm/apache
 5.4.16	cli	fp_large_form	PASS	http=200 no block
@@ -34,8 +34,6 @@
 5.4.16	fpm	up_progress_off	SKIP	php-fpm/cgi-fcgi unavailable
 5.4.16	fpm	detect_standard	SKIP	php-fpm/cgi-fcgi unavailable
 5.4.16	fpm	detect_critical	SKIP	php-fpm/cgi-fcgi unavailable
-5.4.16	cgi	cgi_arg_safe	PASS	http=200 no block (sapi=cgi-fcgi)
-5.4.16	cgi	cgi_arg_injection	SKIP	fire-path not reached: php-cgi (cgi-fcgi) consumes argv-injection query before module RINIT; only patched php-cgi available (core-unit-tested)
 5.6.40	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
 5.6.40	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
 5.6.40	cli	selftest	PASS	http=200 self_test logged
@@ -50,9 +48,9 @@
 5.6.40	cli	up_progress_off	PASS	http=403
 5.6.40	cli	detect_standard	PASS	http=200 action=log
 5.6.40	cli	detect_critical	PASS	http=403
-5.6.40	cli	input_vars_flood	PASS	blocked rule=max_input_vars http=403 (403 best-effort on input path)
-5.6.40	cli	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=403 (403 best-effort on input path)
-5.6.40	cli	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=403 (403 best-effort on input path)
+5.6.40	cli	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+5.6.40	cli	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+5.6.40	cli	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort on input path)
 5.6.40	cli	request_headers_flood	SKIP	header counting asserted under fpm/apache (cli HTTP_* routing is version-dependent)
 5.6.40	cli	request_headers_flood_detect	SKIP	header counting asserted under fpm/apache
 5.6.40	cli	fp_large_form	PASS	http=200 no block
@@ -77,9 +75,9 @@
 5.6.40	fpm	up_progress_off	PASS	http=403
 5.6.40	fpm	detect_standard	PASS	http=200 log
 5.6.40	fpm	detect_critical	PASS	http=403
-5.6.40	fpm	input_vars_flood	PASS	blocked rule=max_input_vars http=403 (403 best-effort on input path)
-5.6.40	fpm	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=403 (403 best-effort on input path)
-5.6.40	fpm	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=403 (403 best-effort on input path)
+5.6.40	fpm	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+5.6.40	fpm	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+5.6.40	fpm	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort on input path)
 5.6.40	fpm	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort on input path)
 5.6.40	fpm	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
 5.6.40	fpm	fp_large_form	PASS	http=200 no block
@@ -90,7 +88,6 @@
 5.6.40	fpm	fp_query_filter_a_b_order	PASS	http=200 no block
 5.6.40	fpm	fp_query_range_10_20_unit	PASS	http=200 no block
 5.6.40	fpm	fp_query_slug_my_blog_pos	PASS	http=200 no block
-5.6.40	cgi	cgi_available	SKIP	no php-cgi binary in image
 7.3.33	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
 7.3.33	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
 7.3.33	cli	selftest	PASS	http=200 self_test logged
@@ -105,9 +102,9 @@
 7.3.33	cli	up_progress_off	PASS	http=403
 7.3.33	cli	detect_standard	PASS	http=200 action=log
 7.3.33	cli	detect_critical	PASS	http=403
-7.3.33	cli	input_vars_flood	PASS	blocked rule=max_input_vars http=403 (403 best-effort on input path)
-7.3.33	cli	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=403 (403 best-effort on input path)
-7.3.33	cli	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=403 (403 best-effort on input path)
+7.3.33	cli	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+7.3.33	cli	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+7.3.33	cli	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort on input path)
 7.3.33	cli	request_headers_flood	SKIP	header counting asserted under fpm/apache (cli HTTP_* routing is version-dependent)
 7.3.33	cli	request_headers_flood_detect	SKIP	header counting asserted under fpm/apache
 7.3.33	cli	fp_large_form	PASS	http=200 no block
@@ -132,9 +129,9 @@
 7.3.33	fpm	up_progress_off	PASS	http=403
 7.3.33	fpm	detect_standard	PASS	http=200 log
 7.3.33	fpm	detect_critical	PASS	http=403
-7.3.33	fpm	input_vars_flood	PASS	blocked rule=max_input_vars http=403 (403 best-effort on input path)
-7.3.33	fpm	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=403 (403 best-effort on input path)
-7.3.33	fpm	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=403 (403 best-effort on input path)
+7.3.33	fpm	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+7.3.33	fpm	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+7.3.33	fpm	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort on input path)
 7.3.33	fpm	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort on input path)
 7.3.33	fpm	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
 7.3.33	fpm	fp_large_form	PASS	http=200 no block
@@ -145,7 +142,6 @@
 7.3.33	fpm	fp_query_filter_a_b_order	PASS	http=200 no block
 7.3.33	fpm	fp_query_range_10_20_unit	PASS	http=200 no block
 7.3.33	fpm	fp_query_slug_my_blog_pos	PASS	http=200 no block
-7.3.33	cgi	cgi_available	SKIP	no php-cgi binary in image
 7.4.33	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
 7.4.33	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
 7.4.33	cli	selftest	PASS	http=200 self_test logged
@@ -160,9 +156,9 @@
 7.4.33	cli	up_progress_off	PASS	http=403
 7.4.33	cli	detect_standard	PASS	http=200 action=log
 7.4.33	cli	detect_critical	PASS	http=403
-7.4.33	cli	input_vars_flood	PASS	blocked rule=max_input_vars http=403 (403 best-effort on input path)
-7.4.33	cli	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=403 (403 best-effort on input path)
-7.4.33	cli	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=403 (403 best-effort on input path)
+7.4.33	cli	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+7.4.33	cli	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+7.4.33	cli	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort on input path)
 7.4.33	cli	request_headers_flood	SKIP	header counting asserted under fpm/apache (cli HTTP_* routing is version-dependent)
 7.4.33	cli	request_headers_flood_detect	SKIP	header counting asserted under fpm/apache
 7.4.33	cli	fp_large_form	PASS	http=200 no block
@@ -187,9 +183,9 @@
 7.4.33	fpm	up_progress_off	PASS	http=403
 7.4.33	fpm	detect_standard	PASS	http=200 log
 7.4.33	fpm	detect_critical	PASS	http=403
-7.4.33	fpm	input_vars_flood	PASS	blocked rule=max_input_vars http=403 (403 best-effort on input path)
-7.4.33	fpm	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=403 (403 best-effort on input path)
-7.4.33	fpm	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=403 (403 best-effort on input path)
+7.4.33	fpm	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+7.4.33	fpm	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+7.4.33	fpm	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort on input path)
 7.4.33	fpm	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort on input path)
 7.4.33	fpm	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
 7.4.33	fpm	fp_large_form	PASS	http=200 no block
@@ -200,7 +196,6 @@
 7.4.33	fpm	fp_query_filter_a_b_order	PASS	http=200 no block
 7.4.33	fpm	fp_query_range_10_20_unit	PASS	http=200 no block
 7.4.33	fpm	fp_query_slug_my_blog_pos	PASS	http=200 no block
-7.4.33	cgi	cgi_available	SKIP	no php-cgi binary in image
 8.1.34	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
 8.1.34	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
 8.1.34	cli	selftest	PASS	http=200 self_test logged
@@ -215,9 +210,9 @@
 8.1.34	cli	up_progress_off	PASS	http=403
 8.1.34	cli	detect_standard	PASS	http=200 action=log
 8.1.34	cli	detect_critical	PASS	http=403
-8.1.34	cli	input_vars_flood	PASS	blocked rule=max_input_vars http=403 (403 best-effort on input path)
-8.1.34	cli	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=403 (403 best-effort on input path)
-8.1.34	cli	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=403 (403 best-effort on input path)
+8.1.34	cli	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+8.1.34	cli	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+8.1.34	cli	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort on input path)
 8.1.34	cli	request_headers_flood	SKIP	header counting asserted under fpm/apache (cli HTTP_* routing is version-dependent)
 8.1.34	cli	request_headers_flood_detect	SKIP	header counting asserted under fpm/apache
 8.1.34	cli	fp_large_form	PASS	http=200 no block
@@ -242,9 +237,9 @@
 8.1.34	fpm	up_progress_off	PASS	http=403
 8.1.34	fpm	detect_standard	PASS	http=200 log
 8.1.34	fpm	detect_critical	PASS	http=403
-8.1.34	fpm	input_vars_flood	PASS	blocked rule=max_input_vars http=403 (403 best-effort on input path)
-8.1.34	fpm	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=403 (403 best-effort on input path)
-8.1.34	fpm	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=403 (403 best-effort on input path)
+8.1.34	fpm	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+8.1.34	fpm	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+8.1.34	fpm	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort on input path)
 8.1.34	fpm	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort on input path)
 8.1.34	fpm	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
 8.1.34	fpm	fp_large_form	PASS	http=200 no block
@@ -255,7 +250,6 @@
 8.1.34	fpm	fp_query_filter_a_b_order	PASS	http=200 no block
 8.1.34	fpm	fp_query_range_10_20_unit	PASS	http=200 no block
 8.1.34	fpm	fp_query_slug_my_blog_pos	PASS	http=200 no block
-8.1.34	cgi	cgi_available	SKIP	no php-cgi binary in image
 8.4.27	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
 8.4.27	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
 8.4.27	cli	selftest	PASS	http=200 self_test logged
@@ -270,9 +264,9 @@
 8.4.27	cli	up_progress_off	PASS	http=403
 8.4.27	cli	detect_standard	PASS	http=200 action=log
 8.4.27	cli	detect_critical	PASS	http=403
-8.4.27	cli	input_vars_flood	PASS	blocked rule=max_input_vars http=403 (403 best-effort on input path)
-8.4.27	cli	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=403 (403 best-effort on input path)
-8.4.27	cli	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=403 (403 best-effort on input path)
+8.4.27	cli	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+8.4.27	cli	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+8.4.27	cli	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort on input path)
 8.4.27	cli	request_headers_flood	SKIP	header counting asserted under fpm/apache (cli HTTP_* routing is version-dependent)
 8.4.27	cli	request_headers_flood_detect	SKIP	header counting asserted under fpm/apache
 8.4.27	cli	fp_large_form	PASS	http=200 no block
@@ -297,9 +291,9 @@
 8.4.27	fpm	up_progress_off	PASS	http=403
 8.4.27	fpm	detect_standard	PASS	http=200 log
 8.4.27	fpm	detect_critical	PASS	http=403
-8.4.27	fpm	input_vars_flood	PASS	blocked rule=max_input_vars http=403 (403 best-effort on input path)
-8.4.27	fpm	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=403 (403 best-effort on input path)
-8.4.27	fpm	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=403 (403 best-effort on input path)
+8.4.27	fpm	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+8.4.27	fpm	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+8.4.27	fpm	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort on input path)
 8.4.27	fpm	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort on input path)
 8.4.27	fpm	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
 8.4.27	fpm	fp_large_form	PASS	http=200 no block
@@ -310,7 +304,6 @@
 8.4.27	fpm	fp_query_filter_a_b_order	PASS	http=200 no block
 8.4.27	fpm	fp_query_range_10_20_unit	PASS	http=200 no block
 8.4.27	fpm	fp_query_slug_my_blog_pos	PASS	http=200 no block
-8.4.27	cgi	cgi_available	SKIP	no php-cgi binary in image
 7.4.33	apache	shaped_block_files	PASS	http=403 rule=max_files ip=127.0.0.1
 7.4.33	apache	shaped_block_fields	PASS	http=403
 7.4.33	apache	selftest	PASS	http=200
@@ -325,9 +318,9 @@
 7.4.33	apache	up_progress_off	PASS	http=403
 7.4.33	apache	detect_standard	PASS	http=200 log
 7.4.33	apache	detect_critical	PASS	http=403
-7.4.33	apache	input_vars_flood	PASS	blocked rule=max_input_vars http=403 (403 best-effort)
-7.4.33	apache	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=403 (403 best-effort)
-7.4.33	apache	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=403 (403 best-effort)
+7.4.33	apache	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+7.4.33	apache	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+7.4.33	apache	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort)
 7.4.33	apache	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort)
 7.4.33	apache	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
 7.4.33	apache	fp_large_form	PASS	http=200 no block
@@ -352,9 +345,9 @@
 8.1.34	apache	up_progress_off	PASS	http=403
 8.1.34	apache	detect_standard	PASS	http=200 log
 8.1.34	apache	detect_critical	PASS	http=403
-8.1.34	apache	input_vars_flood	PASS	blocked rule=max_input_vars http=403 (403 best-effort)
-8.1.34	apache	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=403 (403 best-effort)
-8.1.34	apache	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=403 (403 best-effort)
+8.1.34	apache	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+8.1.34	apache	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+8.1.34	apache	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort)
 8.1.34	apache	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort)
 8.1.34	apache	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
 8.1.34	apache	fp_large_form	PASS	http=200 no block

@@ -9,8 +9,10 @@ use crate::rules::Action;
 /// One security event. Exactly these fields are ever logged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventRecord {
-    /// Unix timestamp, seconds.
-    pub ts: u64,
+    /// UTC timestamp, Unix epoch milliseconds, as a decimal string. The FFI
+    /// layer stamps it from the system clock at the moment the record is built
+    /// (the core has no clock of its own otherwise).
+    pub ts: String,
     pub request_id: String,
     pub rule: RuleId,
     pub action: Action,
@@ -48,7 +50,7 @@ fn action_name(a: Action) -> &'static str {
 /// raw newline.
 pub fn log_line(rec: &EventRecord) -> String {
     let v = serde_json::json!({
-        "ts": rec.ts,
+        "ts": rec.ts.clone(),
         "request_id": rec.request_id,
         "rule": rule_name(rec.rule),
         "action": action_name(rec.action),
@@ -84,7 +86,7 @@ mod tests {
 
     fn rec() -> EventRecord {
         EventRecord {
-            ts: 1_700_000_000,
+            ts: "1700000000000".to_string(),
             request_id: new_request_id(),
             rule: RuleId::MaxParts,
             action: Action::Block,
@@ -108,7 +110,8 @@ mod tests {
         assert_eq!(keys, want);
         assert_eq!(v["rule"], "max_parts");
         assert_eq!(v["action"], "block");
-        assert_eq!(v["ts"], 1_700_000_000u64);
+        assert_eq!(v["ts"], "1700000000000");
+        assert!(v["ts"].is_string());
         assert_eq!(v["reason"], "too many\nparts");
     }
 
@@ -145,7 +148,7 @@ mod tests {
             body: "password=SECRETBODYPASSWORD",
         };
         let r = EventRecord {
-            ts: 1,
+            ts: "1".to_string(),
             request_id: new_request_id(),
             rule: RuleId::MalformedMultipart,
             action: Action::Log,

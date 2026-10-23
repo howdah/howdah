@@ -94,8 +94,15 @@ fn describe(r: RuleId) -> &'static str {
     }
 }
 
-fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+/// Current UTC time as Unix epoch milliseconds, decimal string. The core has no
+/// clock of its own; this stamps every stashed log record so emitted JSON lines
+/// always carry a real timestamp.
+fn now() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+        .to_string()
 }
 
 /// Copy `len` bytes at `p` (lossy UTF-8). NULL or zero len gives "".

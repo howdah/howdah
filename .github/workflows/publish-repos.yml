@@ -141,9 +141,11 @@ jobs:
 
       # Seed the build from the EXISTING published pool so the regenerated index
       # keeps every prior version (apt-ftparchive / createrepo_c index the union
-      # of seed + new). Resilient: on the first publish these paths do not exist
-      # yet (empty seed), so the downloads are allowed to fail (`|| true`). The
-      # R2 `R2:` remote is the same env-var remote the upload step uses.
+      # of seed + new). On the FIRST publish these paths do not exist yet (empty
+      # seed) and that is fine; on any LATER publish an empty seed means the
+      # download failed, so we abort rather than regenerate an index that silently
+      # drops every prior version. The `R2:` remote is the same env-var remote the
+      # upload step uses.
       - name: Seed the pool from R2 (keep prior versions in the index)
         env:
           RCLONE_CONFIG_R2_TYPE: s3
@@ -157,11 +159,38 @@ jobs:
           SEED="${{ github.workspace }}/.repo-seed"
           rm -rf "$SEED"; mkdir -p "$SEED/apt/pool" "$SEED/yum"
           echo "SEED=$SEED" >> "$GITHUB_ENV"
-          # First publish: these objects do not exist yet -> empty seed, do not fail.
+
+          # 1. Probe what R2 ALREADY holds (before downloading). `lsf` lists object
+          #    paths; an absent/empty prefix prints nothing and must not fail the
+          #    step (hence `|| true`). Non-empty => a prior publish exists.
+          REMOTE_DEB="$(rclone lsf "R2:$HOWDAH_R2_BUCKET/apt/pool" -R --files-only --include '*.deb' 2>/dev/null | head -1 || true)"
+          REMOTE_RPM="$(rclone lsf "R2:$HOWDAH_R2_BUCKET/yum"      -R --files-only --include '*.rpm' 2>/dev/null | head -1 || true)"
+          echo "== remote has apt debs: $([ -n "$REMOTE_DEB" ] && echo yes || echo no); yum rpms: $([ -n "$REMOTE_RPM" ] && echo yes || echo no)"
+
+          # 2. Download the seed. A genuinely-absent prefix can make rclone exit
+          #    non-zero, so stay tolerant here; the assert in step 3 is what turns
+          #    a FAILED (vs legitimately-empty) download into a hard error.
           rclone copy "R2:$HOWDAH_R2_BUCKET/apt/pool" "$SEED/apt/pool" -v --retries 5 --low-level-retries 10 || true
           rclone copy "R2:$HOWDAH_R2_BUCKET/yum" "$SEED/yum" --include '*.rpm' -v --retries 5 --low-level-retries 10 || true
+
+          LOCAL_DEB="$(find "$SEED/apt/pool" -name '*.deb' 2>/dev/null | head -1 || true)"
+          LOCAL_RPM="$(find "$SEED/yum" -name '*.rpm' 2>/dev/null | head -1 || true)"
           echo "== seeded apt pool:"; find "$SEED/apt/pool" -name '*.deb' | sort | sed 's/^/  /' || true
           echo "== seeded yum rpms:"; find "$SEED/yum" -name '*.rpm' | sort | sed 's/^/  /' || true
+
+          # 3. Consistency assert: if R2 already has a published pool but our local
+          #    seed came back empty, the download failed — abort, because building
+          #    now would regenerate an index that drops every prior version while
+          #    the publish still "succeeds" (the exact silent regression this
+          #    feature exists to prevent). First publish (remote empty) skips this.
+          if [ -n "$REMOTE_DEB" ] && [ -z "$LOCAL_DEB" ]; then
+            echo "::error::R2 already has an apt pool but the local seed is empty — the seed download failed; aborting so we do not publish an index that drops prior versions."
+            exit 1
+          fi
+          if [ -n "$REMOTE_RPM" ] && [ -z "$LOCAL_RPM" ]; then
+            echo "::error::R2 already has yum rpms but the local seed is empty — the seed download failed; aborting so we do not publish an index that drops prior versions."
+            exit 1
+          fi
 
       - name: Assemble + sign the apt repo (apt-ftparchive, seeded)
         env:

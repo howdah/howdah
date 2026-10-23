@@ -66,6 +66,9 @@ apt-ftparchive \
   release dists/stable > dists/stable/Release
 
 # 4. sign: InRelease (clearsigned) + Release.gpg (detached, armored), SHA256.
+#    NOTE: Release.gpg is now ASCII-armored (--armor), a format change from
+#    reprepro's binary detached signature. Both modern apt and xenial accept an
+#    armored detached sig; modern apt prefers InRelease anyway.
 gpg --batch --yes --digest-algo SHA256 -u "$KEYID" \
     --clearsign -o dists/stable/InRelease dists/stable/Release
 gpg --batch --yes --digest-algo SHA256 -u "$KEYID" --armor \

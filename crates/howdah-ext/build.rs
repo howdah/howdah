@@ -6,9 +6,9 @@
 //! boundary falls INSIDE the `php8` feature (8.0 is still `char *`), so a plain
 //! `#[cfg(feature = "php8")]` cannot express it. We ask `php-config` for the
 //! exact `PHP_VERSION_ID` and emit `cfg(howdah_input_filter_const)` when it is
-//! >= 8.1.0, so `input_filter.rs` can pick the matching pointer type and the
-//! handler's `extern "C"` signature matches `sys::`'s generated field type on
-//! every generation (the in-container compiler enforces the match).
+//! 8.1.0 or newer, so `input_filter.rs` can pick the matching pointer type and
+//! the handler's `extern "C"` signature matches `sys::`'s generated field type
+//! on every generation (the in-container compiler enforces the match).
 //!
 //! With no `phpN` feature this does nothing (plain host `cargo build`/`test`).
 

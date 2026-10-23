@@ -85,13 +85,17 @@ Purge Everything, or the `/apt/pool/*` and `*.rpm` paths) so the edge serves the
 new bytes that the new index references. Verify with a fresh-container install
 (step 5) once the cache is purged.
 
-**Known limitation: the index reflects only the latest publish.** The workflow
-re-indexes just the packages built in that run. Earlier versions stay in R2 as
-objects (the pool) but drop out of the apt `Packages` and yum `repodata`
-indexes, so after a second release users cannot `apt install pkg=<oldver>` or
-roll back through the repo. This is fine for the first (1.0.0) publish.
-**Required follow-up before the second release:** seed the build from the
-existing published pool so the index keeps prior versions. Not implemented yet.
+**The index keeps every published version.** Before assembling the repos, the
+`publish` job seeds the build from the existing R2 pool (`rclone copy` of
+`apt/pool` and `yum/*.rpm` into a seed dir, resiliently — the first publish has
+nothing to seed). `build-apt-repo.sh` (apt-ftparchive) and `build-yum-repo.sh`
+(createrepo_c) then index the union of the seeded pool and the newly built
+packages, so earlier versions stay in the apt `Packages` and yum `repodata`
+indexes and users can still `apt install pkg=<oldver>` / roll back through the
+repo. The seeded objects are copied byte-for-byte and only the new packages are
+signed, so re-uploading them is a no-op under `publish-r2.sh --immutable`. A
+deliberate same-version re-publish (architecture backfill) still uses
+`overwrite` (see above), since those package bytes are rebuilt and differ.
 
 The arm64/aarch64 jobs are best-effort: a failed cell only drops that
 architecture for that minor.
@@ -123,9 +127,8 @@ curl -fsSI https://pkg.howdah.org/yum/repodata/repomd.xml.asc
 
 ## Rollback of a bad publish
 
-The workflow never deletes objects, so old package files stay in R2 (though after
-a newer publish they are no longer listed in the index; see the limitation
-above). To retract, delete the
+The workflow never deletes objects, so old package files stay in R2 and remain
+listed in the index (every publish re-seeds from the pool). To retract, delete the
 affected `Release`/`InRelease`/`repomd.xml` objects (or overwrite them with the
 previous signed copies) in the R2 dashboard, then purge the Cloudflare cache for
 `/apt/dists/*` and `/yum/repodata/*`.

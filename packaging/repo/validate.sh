@@ -25,13 +25,16 @@ if [ "$KIND" = apt ]; then
   VARIANTS="t-packages t-deb t-inrelease"
   for v in $VARIANTS; do mkdir -p "$SERVE/$v"; cp -a "$OUT/repo/apt" "$SERVE/$v/apt"; done
   for f in Packages Packages.gz; do flip "$SERVE/t-packages/apt/dists/stable/main/binary-amd64/$f" 150; done
-  flip "$(ls "$SERVE"/t-deb/apt/pool/main/p/php"$MINOR"-howdah/*_amd64.deb)" 3000
+  # The pool now holds every published version (pool-seeding); tamper the newest
+  # amd64 deb — the one apt actually resolves and installs — so the check is real.
+  flip "$(ls -v "$SERVE"/t-deb/apt/pool/main/p/php"$MINOR"-howdah/*_amd64.deb | tail -1)" 3000
   sed -i 's/^Suite: stable/Suite: stabIe/' "$SERVE/t-inrelease/apt/dists/stable/InRelease"
 else
   VARIANTS="t-repomd t-rpm"
   for v in $VARIANTS; do mkdir -p "$SERVE/$v"; cp -a "$OUT/repo/yum" "$SERVE/$v/yum"; done
   sed -i 's#<revision>[0-9]*</revision>#<revision>1</revision>#' "$SERVE/t-repomd/yum/repodata/repomd.xml"
-  rpmf="$(ls "$SERVE"/t-rpm/yum/php"${MINOR//./}"-howdah-*.x86_64.rpm)"
+  # Multi-version pool: tamper the newest x86_64 rpm (the one dnf installs).
+  rpmf="$(ls -v "$SERVE"/t-rpm/yum/php"${MINOR//./}"-howdah-*.x86_64.rpm | tail -1)"
   flip "$rpmf" $(( $(stat -c %s "$rpmf") - 200 ))
 fi
 

@@ -127,19 +127,57 @@ jobs:
           printf '%s\n' "$HOWDAH_GPG_SIGNING_KEY" | gpg --batch --import
           gpg --list-secret-keys --keyid-format=long
 
-      - name: Assemble + sign the apt repo (reprepro)
+      - name: Install rclone
+        run: |
+          set -euo pipefail
+          v=v1.75.2
+          cd "$(mktemp -d)"
+          curl -fsSLO "https://downloads.rclone.org/$v/rclone-$v-linux-amd64.zip"
+          # sha256 of rclone-v1.75.2-linux-amd64.zip (from downloads.rclone.org/v1.75.2/SHA256SUMS)
+          echo "349ac8fba6ff65d6247043f1750cdcb518ec5d500ef91463a10d37c0ccdf3702  rclone-$v-linux-amd64.zip" | sha256sum -c -
+          unzip -q "rclone-$v-linux-amd64.zip"
+          sudo install -m 0755 "rclone-$v-linux-amd64/rclone" /usr/local/bin/rclone
+          rclone version | head -1
+
+      # Seed the build from the EXISTING published pool so the regenerated index
+      # keeps every prior version (apt-ftparchive / createrepo_c index the union
+      # of seed + new). Resilient: on the first publish these paths do not exist
+      # yet (empty seed), so the downloads are allowed to fail (`|| true`). The
+      # R2 `R2:` remote is the same env-var remote the upload step uses.
+      - name: Seed the pool from R2 (keep prior versions in the index)
+        env:
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.HOWDAH_R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.HOWDAH_R2_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_ENDPOINT: ${{ secrets.HOWDAH_R2_ENDPOINT }}
+          RCLONE_CONFIG_R2_NO_CHECK_BUCKET: "true"
+          HOWDAH_R2_BUCKET: ${{ secrets.HOWDAH_R2_BUCKET }}
+        run: |
+          SEED="${{ github.workspace }}/.repo-seed"
+          rm -rf "$SEED"; mkdir -p "$SEED/apt/pool" "$SEED/yum"
+          echo "SEED=$SEED" >> "$GITHUB_ENV"
+          # First publish: these objects do not exist yet -> empty seed, do not fail.
+          rclone copy "R2:$HOWDAH_R2_BUCKET/apt/pool" "$SEED/apt/pool" -v --retries 5 --low-level-retries 10 || true
+          rclone copy "R2:$HOWDAH_R2_BUCKET/yum" "$SEED/yum" --include '*.rpm' -v --retries 5 --low-level-retries 10 || true
+          echo "== seeded apt pool:"; find "$SEED/apt/pool" -name '*.deb' | sort | sed 's/^/  /' || true
+          echo "== seeded yum rpms:"; find "$SEED/yum" -name '*.rpm' | sort | sed 's/^/  /' || true
+
+      - name: Assemble + sign the apt repo (apt-ftparchive, seeded)
         env:
           # Pin the exact signing subkey, same value release.yml's sign.sh uses.
           HOWDAH_GPG_KEYID: "9A104FB0A073065B2C2631FC1E8D725D31BD5DC9!"
           HOWDAH_GNUPGHOME: ${{ github.workspace }}/.gnupg-home
+          HOWDAH_APT_SEED: ${{ env.SEED }}/apt/pool
         run: |
           rm -rf "$HOWDAH_GNUPGHOME"; cp -a "$HOME/.gnupg" "$HOWDAH_GNUPGHOME"
           packaging/repo/build-apt-repo.sh
 
-      - name: Assemble + sign the yum repo (createrepo_c, rpmsign)
+      - name: Assemble + sign the yum repo (createrepo_c, rpmsign; seeded)
         env:
           HOWDAH_GPG_KEYID: "9A104FB0A073065B2C2631FC1E8D725D31BD5DC9!"
           HOWDAH_GNUPGHOME: ${{ github.workspace }}/.gnupg-home
+          HOWDAH_YUM_SEED: ${{ env.SEED }}/yum
         run: packaging/repo/build-yum-repo.sh
 
       - name: Verify the signatures against the COMMITTED public key (clean keyring)
@@ -153,18 +191,6 @@ jobs:
           gpg --batch --verify "$r/yum/repodata/repomd.xml.asc" "$r/yum/repodata/repomd.xml"
           find "$r" -type f | sort | head -100
           rm -rf "$tmp"
-
-      - name: Install rclone
-        run: |
-          set -euo pipefail
-          v=v1.75.2
-          cd "$(mktemp -d)"
-          curl -fsSLO "https://downloads.rclone.org/$v/rclone-$v-linux-amd64.zip"
-          # sha256 of rclone-v1.75.2-linux-amd64.zip (from downloads.rclone.org/v1.75.2/SHA256SUMS)
-          echo "349ac8fba6ff65d6247043f1750cdcb518ec5d500ef91463a10d37c0ccdf3702  rclone-$v-linux-amd64.zip" | sha256sum -c -
-          unzip -q "rclone-$v-linux-amd64.zip"
-          sudo install -m 0755 "rclone-$v-linux-amd64/rclone" /usr/local/bin/rclone
-          rclone version | head -1
 
       # Owner-set repo secrets (NOT created by this change; see GO-LIVE.md):
       #   HOWDAH_R2_ACCESS_KEY_ID, HOWDAH_R2_SECRET_ACCESS_KEY,

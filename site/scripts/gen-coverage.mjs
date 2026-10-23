@@ -32,11 +32,25 @@ for (const line of raw) {
 }
 
 const minorOf = (v) => v.split('.').slice(0, 2).join('.');
-const verByMinor = {};
-for (const v of Object.keys(cells)) verByMinor[minorOf(v)] = v;
+// Merge all version rows that share a minor so a split patch level still counts
+// as one minor — e.g. an 8.5 fpm image tagged 8.5.12RC1 and an 8.5 apache image
+// tagged 8.5.12 both belong to "8.5" (each contributes its own SAPIs).
+const rc = (v) => /rc|beta|alpha|dev|snapshot/i.test(v);
+const cellsByMinor = {}; // minor -> sapi -> scenario -> {result, detail}
+const verOfMinor = {};   // minor -> representative version string to display
+for (const v of Object.keys(cells)) {
+  const m = minorOf(v);
+  const bucket = (cellsByMinor[m] ??= {});
+  for (const [sp, scs] of Object.entries(cells[v])) {
+    const sb = (bucket[sp] ??= {});
+    for (const [sc, val] of Object.entries(scs)) sb[sc] = val;
+  }
+  // prefer a final (non-RC) version string for display
+  if (!verOfMinor[m] || (rc(verOfMinor[m]) && !rc(v))) verOfMinor[m] = v;
+}
 
-function sapiSummary(ver, sapi) {
-  const s = cells[ver]?.[sapi];
+function sapiSummary(minor, sapi) {
+  const s = cellsByMinor[minor]?.[sapi];
   if (!s) return { state: 'none', pass: 0, fail: 0, skip: 0, total: 0 };
   const all = Object.values(s);
   const pass = all.filter((c) => c.result === 'PASS').length;
@@ -55,24 +69,24 @@ function sapiSummary(ver, sapi) {
 
 const rows = [];
 for (const minor of ALL_MINORS) {
-  const ver = verByMinor[minor];
+  const ver = verOfMinor[minor];
   if (!ver) {
     const nr = notRun.find((n) => n.minor === minor);
     const why = minor === '5.5'
-      ? 'Not tested yet: no test image could be built for 5.5.'
+      ? 'The upstream php:5.5 Docker image is broken (corrupt layers on Docker Hub), so no test environment can be built. PHP 5.5 shares the PHP 5 code path with 5.4 and 5.6, which pass.'
       : 'Not tested yet: no test environment built.';
     rows.push({ minor, version: null, status: 'not-run', why, sapis: {}, tested: [] });
     continue;
   }
   const sapis = {};
   for (const sp of SAPIS) {
-    const sum = sapiSummary(ver, sp);
+    const sum = sapiSummary(minor, sp);
     let note = '';
     if (sum.state === 'none') {
       const nr = notRun.find((n) => n.minor === minor && n.sapis.split(/\s+/).includes(sp));
       note = nr ? nr.why : '';
     }
-    if (sum.state === 'skip') note = cells[ver][sp].selftest?.detail || 'skipped';
+    if (sum.state === 'skip') note = cellsByMinor[minor][sp].selftest?.detail || 'skipped';
     sapis[sp] = { ...sum, note };
   }
   const tested = SAPIS.filter((s) => sapis[s].state === 'pass');
@@ -89,7 +103,7 @@ for (const sp of Object.values(cells)) for (const sc of Object.values(sp)) for (
 }
 // Minors with no test rows at all (whether or not the run emitted a NOT-RUN
 // comment for them): these repeat a tested generation but were not run.
-const notRunMinors = ALL_MINORS.filter((m) => !verByMinor[m]);
+const notRunMinors = ALL_MINORS.filter((m) => !cellsByMinor[m]);
 
 const data = {
   generated, source: 'lab/integration/matrix-results.tsv',

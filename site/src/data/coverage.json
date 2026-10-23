@@ -1,10 +1,10 @@
 {
-  "generated": "2026-10-23T08:04:01Z",
+  "generated": "2026-10-23T16:54:54Z",
   "source": "lab/integration/matrix-results.tsv",
   "totals": {
-    "pass": 339,
+    "pass": 973,
     "fail": 0,
-    "skip": 19
+    "skip": 33
   },
   "corpusFalsePositives": 0,
   "rows": [
@@ -39,7 +39,7 @@
           "fail": 0,
           "skip": 0,
           "total": 0,
-          "note": ""
+          "note": "no php:5.4-apache image available"
         }
       },
       "tested": [
@@ -50,7 +50,7 @@
       "minor": "5.5",
       "version": null,
       "status": "not-run",
-      "why": "Not tested yet: no test image could be built for 5.5.",
+      "why": "The upstream php:5.5 Docker image is broken (corrupt layers on Docker Hub), so no test environment can be built. PHP 5.5 shares the PHP 5 code path with 5.4 and 5.6, which pass.",
       "sapis": {},
       "tested": []
     },
@@ -80,42 +80,147 @@
           "note": ""
         },
         "apache": {
-          "state": "none",
-          "pass": 0,
+          "state": "pass",
+          "pass": 27,
           "fail": 0,
           "skip": 0,
-          "total": 0,
+          "total": 27,
+          "files": "PASS",
+          "fields": "PASS",
           "note": ""
         }
       },
       "tested": [
         "cli",
-        "fpm"
+        "fpm",
+        "apache"
       ]
     },
     {
       "minor": "7.0",
-      "version": null,
-      "status": "not-run",
-      "why": "Not tested yet: no test environment built.",
-      "sapis": {},
-      "tested": []
+      "version": "7.0.33",
+      "status": "run",
+      "sapis": {
+        "cli": {
+          "state": "pass",
+          "pass": 25,
+          "fail": 0,
+          "skip": 2,
+          "total": 27,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        },
+        "fpm": {
+          "state": "pass",
+          "pass": 27,
+          "fail": 0,
+          "skip": 0,
+          "total": 27,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        },
+        "apache": {
+          "state": "pass",
+          "pass": 27,
+          "fail": 0,
+          "skip": 0,
+          "total": 27,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        }
+      },
+      "tested": [
+        "cli",
+        "fpm",
+        "apache"
+      ]
     },
     {
       "minor": "7.1",
-      "version": null,
-      "status": "not-run",
-      "why": "Not tested yet: no test environment built.",
-      "sapis": {},
-      "tested": []
+      "version": "7.1.33",
+      "status": "run",
+      "sapis": {
+        "cli": {
+          "state": "pass",
+          "pass": 25,
+          "fail": 0,
+          "skip": 2,
+          "total": 27,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        },
+        "fpm": {
+          "state": "pass",
+          "pass": 27,
+          "fail": 0,
+          "skip": 0,
+          "total": 27,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        },
+        "apache": {
+          "state": "pass",
+          "pass": 27,
+          "fail": 0,
+          "skip": 0,
+          "total": 27,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        }
+      },
+      "tested": [
+        "cli",
+        "fpm",
+        "apache"
+      ]
     },
     {
       "minor": "7.2",
-      "version": null,
-      "status": "not-run",
-      "why": "Not tested yet: no test environment built.",
-      "sapis": {},
-      "tested": []
+      "version": "7.2.34",
+      "status": "run",
+      "sapis": {
+        "cli": {
+          "state": "pass",
+          "pass": 25,
+          "fail": 0,
+          "skip": 2,
+          "total": 27,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        },
+        "fpm": {
+          "state": "pass",
+          "pass": 27,
+          "fail": 0,
+          "skip": 0,
+          "total": 27,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        },
+        "apache": {
+          "state": "pass",
+          "pass": 27,
+          "fail": 0,
+          "skip": 0,
+          "total": 27,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        }
+      },
+      "tested": [
+        "cli",
+        "fpm",
+        "apache"
+      ]
     },
     {
       "minor": "7.3",
@@ -143,17 +248,20 @@
           "note": ""
         },
         "apache": {
-          "state": "none",
-          "pass": 0,
+          "state": "pass",
+          "pass": 27,
           "fail": 0,
           "skip": 0,
-          "total": 0,
+          "total": 27,
+          "files": "PASS",
+          "fields": "PASS",
           "note": ""
         }
       },
       "tested": [
         "cli",
-        "fpm"
+        "fpm",
+        "apache"
       ]
     },
     {
@@ -200,11 +308,45 @@
     },
     {
       "minor": "8.0",
-      "version": null,
-      "status": "not-run",
-      "why": "Not tested yet: no test environment built.",
-      "sapis": {},
-      "tested": []
+      "version": "8.0.30",
+      "status": "run",
+      "sapis": {
+        "cli": {
+          "state": "pass",
+          "pass": 25,
+          "fail": 0,
+          "skip": 2,
+          "total": 27,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        },
+        "fpm": {
+          "state": "pass",
+          "pass": 27,
+          "fail": 0,
+          "skip": 0,
+          "total": 27,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        },
+        "apache": {
+          "state": "pass",
+          "pass": 27,
+          "fail": 0,
+          "skip": 0,
+          "total": 27,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        }
+      },
+      "tested": [
+        "cli",
+        "fpm",
+        "apache"
+      ]
     },
     {
       "minor": "8.1",
@@ -250,19 +392,87 @@
     },
     {
       "minor": "8.2",
-      "version": null,
-      "status": "not-run",
-      "why": "Not tested yet: no test environment built.",
-      "sapis": {},
-      "tested": []
+      "version": "8.2.35",
+      "status": "run",
+      "sapis": {
+        "cli": {
+          "state": "pass",
+          "pass": 25,
+          "fail": 0,
+          "skip": 2,
+          "total": 27,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        },
+        "fpm": {
+          "state": "pass",
+          "pass": 27,
+          "fail": 0,
+          "skip": 0,
+          "total": 27,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        },
+        "apache": {
+          "state": "pass",
+          "pass": 27,
+          "fail": 0,
+          "skip": 0,
+          "total": 27,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        }
+      },
+      "tested": [
+        "cli",
+        "fpm",
+        "apache"
+      ]
     },
     {
       "minor": "8.3",
-      "version": null,
-      "status": "not-run",
-      "why": "Not tested yet: no test environment built.",
-      "sapis": {},
-      "tested": []
+      "version": "8.3.36",
+      "status": "run",
+      "sapis": {
+        "cli": {
+          "state": "pass",
+          "pass": 25,
+          "fail": 0,
+          "skip": 2,
+          "total": 27,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        },
+        "fpm": {
+          "state": "pass",
+          "pass": 27,
+          "fail": 0,
+          "skip": 0,
+          "total": 27,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        },
+        "apache": {
+          "state": "pass",
+          "pass": 27,
+          "fail": 0,
+          "skip": 0,
+          "total": 27,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        }
+      },
+      "tested": [
+        "cli",
+        "fpm",
+        "apache"
+      ]
     },
     {
       "minor": "8.4",
@@ -290,36 +500,66 @@
           "note": ""
         },
         "apache": {
-          "state": "none",
-          "pass": 0,
+          "state": "pass",
+          "pass": 27,
           "fail": 0,
           "skip": 0,
-          "total": 0,
+          "total": 27,
+          "files": "PASS",
+          "fields": "PASS",
           "note": ""
         }
       },
       "tested": [
         "cli",
-        "fpm"
+        "fpm",
+        "apache"
       ]
     },
     {
       "minor": "8.5",
-      "version": null,
-      "status": "not-run",
-      "why": "Not tested yet: no test environment built.",
-      "sapis": {},
-      "tested": []
+      "version": "8.5.12",
+      "status": "run",
+      "sapis": {
+        "cli": {
+          "state": "pass",
+          "pass": 25,
+          "fail": 0,
+          "skip": 2,
+          "total": 27,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        },
+        "fpm": {
+          "state": "pass",
+          "pass": 27,
+          "fail": 0,
+          "skip": 0,
+          "total": 27,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        },
+        "apache": {
+          "state": "pass",
+          "pass": 27,
+          "fail": 0,
+          "skip": 0,
+          "total": 27,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        }
+      },
+      "tested": [
+        "cli",
+        "fpm",
+        "apache"
+      ]
     }
   ],
   "notRunMinors": [
-    "5.5",
-    "7.0",
-    "7.1",
-    "7.2",
-    "8.0",
-    "8.2",
-    "8.3",
-    "8.5"
+    "5.5"
   ]
 }

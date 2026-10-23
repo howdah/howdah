@@ -178,14 +178,53 @@ fn sqli(s: &[u8]) -> bool {
             }
             b';' => {
                 let j = skip_ws(s, i + 1);
-                for kw in [&b"drop"[..], b"delete", b"update", b"insert", b"select"] {
-                    if word_at(s, j, kw) && skip_ws(s, j + kw.len()) > j + kw.len() {
-                        return true;
-                    }
+                if stacked_statement(s, j) {
+                    return true;
                 }
             }
             _ => {}
         }
+    }
+    false
+}
+
+/// After a `;`: does a stacked SQL statement start at `j`? Requires the
+/// statement's second token to look like SQL, so prose such as
+/// "Thanks; update your profile" or "fine; select one option" stays clean.
+fn stacked_statement(s: &[u8], j: usize) -> bool {
+    let drop_follow: [&[u8]; 6] = [b"table", b"database", b"schema", b"view", b"index", b"user"];
+    let simple: [(&[u8], &[&[u8]]); 3] = [
+        (b"drop", &drop_follow),
+        (b"delete", &[b"from"]),
+        (b"insert", &[b"into"]),
+    ];
+    for (kw, follow) in simple {
+        if word_at(s, j, kw) {
+            let e = j + kw.len();
+            let k = skip_ws(s, e);
+            return k > e && follow.iter().any(|f| word_at(s, k, f));
+        }
+    }
+    if word_at(s, j, b"update") {
+        // update <ident> set
+        let k = skip_ws(s, j + 6);
+        let mut e = k;
+        while e < s.len() && (is_word(s[e]) || s[e] == b'.' || s[e] == b'`') {
+            e += 1;
+        }
+        return k > j + 6 && e > k && word_at(s, skip_ws(s, e), b"set");
+    }
+    if word_at(s, j, b"select") {
+        let k = skip_ws(s, j + 6);
+        if k == j + 6 || k >= s.len() {
+            return false;
+        }
+        if matches!(s[k], b'*' | b'@' | b'(') || s[k].is_ascii_digit() {
+            return true;
+        }
+        // select <cols> from ... within a short window
+        let end = (k + 64).min(s.len());
+        return (k..end).any(|p| word_at(s, p, b"from"));
     }
     false
 }
@@ -195,7 +234,14 @@ const BINARIES: [&[u8]; 14] = [
     b"ping", b"python", b"perl",
 ];
 const SINKS: [&[u8]; 8] = [
-    b"system", b"exec", b"shell_exec", b"passthru", b"proc_open", b"popen", b"eval", b"assert",
+    b"system",
+    b"exec",
+    b"shell_exec",
+    b"passthru",
+    b"proc_open",
+    b"popen",
+    b"eval",
+    b"assert",
 ];
 
 fn cmdi(s: &[u8]) -> bool {
@@ -204,7 +250,16 @@ fn cmdi(s: &[u8]) -> bool {
         match s[i] {
             b'$' if s.get(i + 1) == Some(&b'(') => return true,
             b'`' => match open_backtick {
-                Some(f) if i > f + 1 => return true,
+                // A closed backtick pair only counts when the command
+                // substitution starts with a known binary (markdown
+                // `foo` stays clean).
+                Some(f) if i > f + 1 => {
+                    let j = skip_ws(s, f + 1);
+                    if BINARIES.iter().any(|b| word_at(s, j, b)) {
+                        return true;
+                    }
+                    open_backtick = Some(i);
+                }
                 _ => open_backtick = Some(i),
             },
             b';' | b'|' | b'&' => {
@@ -221,7 +276,7 @@ fn cmdi(s: &[u8]) -> bool {
             }
             c if c.is_ascii_lowercase() => {
                 for sink in SINKS {
-                    if word_at(s, i, sink) && s.get(skip_ws(s, i + sink.len())) == Some(&b'(') {
+                    if word_at(s, i, sink) && s.get(i + sink.len()) == Some(&b'(') {
                         return true;
                     }
                 }
@@ -264,15 +319,40 @@ mod tests {
         );
         assert_eq!(scan(b"admin'--", Source::Post, &d()), Some(SqlInjection));
         assert_eq!(scan(b"\" OR 'a'='a", Source::Get, &d()), Some(SqlInjection));
-        assert_eq!(scan(b"x; DROP TABLE t", Source::Get, &d()), Some(SqlInjection));
+        assert_eq!(
+            scan(b"x; DROP TABLE t", Source::Get, &d()),
+            Some(SqlInjection)
+        );
+        for v in [
+            &b"1; DELETE FROM users"[..],
+            b"1; update users set admin=1",
+            b"1; insert into t values(1)",
+            b"1; select * from users",
+            b"1; select password from users",
+            b"1; select @@version",
+        ] {
+            assert_eq!(scan(v, Source::Get, &d()), Some(SqlInjection), "{:?}", v);
+        }
+        assert_eq!(scan(b"a `id` b", Source::Get, &d()), Some(CommandInjection));
+        assert_eq!(scan(b"system ('x')", Source::Get, &d()), None);
     }
 
     #[test]
     fn traversal_caught() {
-        assert_eq!(scan(b"../../etc/passwd", Source::Get, &d()), Some(PathTraversal));
-        assert_eq!(scan(b"/proc/self/environ", Source::Get, &d()), Some(PathTraversal));
         assert_eq!(
-            scan(b"php://filter/convert.base64-encode/resource=x", Source::Get, &d()),
+            scan(b"../../etc/passwd", Source::Get, &d()),
+            Some(PathTraversal)
+        );
+        assert_eq!(
+            scan(b"/proc/self/environ", Source::Get, &d()),
+            Some(PathTraversal)
+        );
+        assert_eq!(
+            scan(
+                b"php://filter/convert.base64-encode/resource=x",
+                Source::Get,
+                &d()
+            ),
             Some(PathTraversal)
         );
     }
@@ -287,8 +367,18 @@ mod tests {
 
     #[test]
     fn cmdi_caught() {
-        for v in [&b"; cat /etc/passwd"[..], b"$(id)", b"`whoami`", b"system('ls')"] {
-            assert_eq!(scan(v, Source::Get, &d()), Some(CommandInjection), "{:?}", v);
+        for v in [
+            &b"; cat /etc/passwd"[..],
+            b"$(id)",
+            b"`whoami`",
+            b"system('ls')",
+        ] {
+            assert_eq!(
+                scan(v, Source::Get, &d()),
+                Some(CommandInjection),
+                "{:?}",
+                v
+            );
         }
     }
 
@@ -302,6 +392,13 @@ mod tests {
             b"./theme/style.css",
             b"it's a test",
             b"name=O'Brien",
+            b"operating system (Linux)",
+            b"file system (ext4)",
+            b"use `foo` here",
+            b"#fff",
+            b"#main",
+            b"Thanks; update your profile",
+            b"fine; select one option",
         ] {
             assert_eq!(scan(v, Source::Get, &d()), None, "{:?}", v);
             assert_eq!(scan(v, Source::Path, &d()), None, "{:?}", v);

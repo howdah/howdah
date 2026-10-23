@@ -6,6 +6,7 @@ use serde::Deserialize;
 
 use crate::inspect::{InspectClass, InspectLimits};
 use crate::limits::{Limits, RuleId};
+use crate::sinks::SinkId;
 
 /// Global enforcement mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -73,6 +74,87 @@ impl InspectConfig {
     }
 }
 
+/// Layer-3 command-execution sink settings. `mode: None` inherits `SinkConfig.mode`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct CommandExecConfig {
+    pub mode: Option<Mode>,
+    /// Anchored literal commands; a trailing `*` makes a prefix glob.
+    pub allow: Vec<String>,
+}
+
+/// Layer-3 include/require sink settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct IncludeConfig {
+    pub mode: Option<Mode>,
+    pub allow_paths: Vec<String>,
+}
+
+/// Layer-3 eval sink settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct EvalConfig {
+    pub mode: Option<Mode>,
+}
+
+/// Layer-3 unserialize sink settings. Off by default.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct UnserializeConfig {
+    pub mode: Option<Mode>,
+    pub allow_classes: Vec<String>,
+}
+
+impl Default for UnserializeConfig {
+    fn default() -> Self {
+        UnserializeConfig { mode: Some(Mode::Off), allow_classes: Vec::new() }
+    }
+}
+
+/// Layer-3 sink hardening settings. Its `mode` is independent of the global
+/// mode: a global `block` never arms a sink.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SinkConfig {
+    pub enabled: bool,
+    pub mode: Mode,
+    pub command_exec: CommandExecConfig,
+    pub include: IncludeConfig,
+    pub eval: EvalConfig,
+    pub unserialize: UnserializeConfig,
+}
+
+impl Default for SinkConfig {
+    fn default() -> Self {
+        SinkConfig {
+            enabled: true,
+            mode: Mode::Detect,
+            command_exec: CommandExecConfig::default(),
+            include: IncludeConfig::default(),
+            eval: EvalConfig::default(),
+            unserialize: UnserializeConfig::default(),
+        }
+    }
+}
+
+impl SinkConfig {
+    /// Off if the global mode is off or sinks are disabled; otherwise the
+    /// per-sink mode if set, else the section mode (global `block` is ignored).
+    pub fn effective_mode(&self, sink: SinkId, global: Mode) -> Mode {
+        if global == Mode::Off || !self.enabled {
+            return Mode::Off;
+        }
+        let sub = match sink {
+            SinkId::CommandExec => self.command_exec.mode,
+            SinkId::Include => self.include.mode,
+            SinkId::Eval => self.eval.mode,
+            SinkId::Unserialize => self.unserialize.mode,
+        };
+        sub.unwrap_or(self.mode)
+    }
+}
+
 /// Parsed Howdah configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -82,6 +164,7 @@ pub struct Config {
     /// Per-rule mode overrides.
     pub rule_modes: BTreeMap<RuleId, Mode>,
     pub inspect: InspectConfig,
+    pub sinks: SinkConfig,
 }
 
 #[derive(Deserialize)]
@@ -92,6 +175,7 @@ struct RawConfig {
     log: LogConfig,
     rules: BTreeMap<RuleId, Mode>,
     inspect: InspectConfig,
+    sinks: SinkConfig,
 }
 
 impl Default for RawConfig {
@@ -103,6 +187,7 @@ impl Default for RawConfig {
             log: c.log,
             rules: c.rule_modes,
             inspect: c.inspect,
+            sinks: c.sinks,
         }
     }
 }
@@ -125,12 +210,22 @@ impl Config {
         let raw: RawConfig = toml::from_str(s).map_err(|e| ConfigError(e.to_string()))?;
         raw.limits.validate().map_err(ConfigError)?;
         raw.inspect.limits.validate().map_err(ConfigError)?;
+        for p in &raw.sinks.command_exec.allow {
+            if let Some(i) = p.find('*') {
+                if i != p.len() - 1 {
+                    return Err(ConfigError(format!(
+                        "sinks.command_exec.allow pattern {p:?}: '*' is only allowed as the final character"
+                    )));
+                }
+            }
+        }
         Ok(Config {
             mode: raw.mode,
             limits: raw.limits,
             log: raw.log,
             rule_modes: raw.rules,
             inspect: raw.inspect,
+            sinks: raw.sinks,
         })
     }
 
@@ -142,6 +237,7 @@ impl Config {
             log: LogConfig::default(),
             rule_modes: BTreeMap::new(),
             inspect: InspectConfig::default(),
+            sinks: SinkConfig::default(),
         }
     }
 }
@@ -289,5 +385,54 @@ self_test = "off"
     #[test]
     fn inspect_unknown_key_rejected() {
         assert!(Config::from_toml("[inspect]\nnope = 1").is_err());
+    }
+
+    #[test]
+    fn sinks_defaults_detect_enabled_unserialize_off() {
+        use crate::sinks::SinkId;
+        let c = Config::from_toml("").unwrap();
+        assert!(c.sinks.enabled);
+        assert_eq!(c.sinks.mode, Mode::Detect);
+        for s in [SinkId::CommandExec, SinkId::Include, SinkId::Eval] {
+            assert_eq!(c.sinks.effective_mode(s, Mode::Detect), Mode::Detect);
+        }
+        assert_eq!(c.sinks.effective_mode(SinkId::Unserialize, Mode::Detect), Mode::Off);
+    }
+
+    #[test]
+    fn global_block_does_not_arm_sinks() {
+        use crate::sinks::SinkId;
+        let c = Config::from_toml("mode = \"block\"").unwrap();
+        assert_eq!(c.sinks.effective_mode(SinkId::CommandExec, Mode::Block), Mode::Detect);
+    }
+
+    #[test]
+    fn global_off_disables_sinks() {
+        use crate::sinks::SinkId;
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.sinks.effective_mode(SinkId::CommandExec, Mode::Off), Mode::Off);
+    }
+
+    #[test]
+    fn per_sink_mode_overrides_section_mode() {
+        use crate::sinks::SinkId;
+        let c = Config::from_toml(
+            "[sinks]\nmode=\"off\"\n[sinks.command_exec]\nmode=\"block\"",
+        )
+        .unwrap();
+        assert_eq!(c.sinks.effective_mode(SinkId::CommandExec, Mode::Block), Mode::Block);
+        assert_eq!(c.sinks.effective_mode(SinkId::Include, Mode::Block), Mode::Off);
+    }
+
+    #[test]
+    fn mid_wildcard_command_pattern_rejected() {
+        assert!(Config::from_toml("[sinks.command_exec]\nallow=[\"a*b\"]").is_err());
+        assert!(Config::from_toml("[sinks.command_exec]\nallow=[\"ok *\"]").is_ok());
+        assert!(Config::from_toml("[sinks.command_exec]\nallow=[\"exact\"]").is_ok());
+    }
+
+    #[test]
+    fn sinks_unknown_key_rejected() {
+        assert!(Config::from_toml("[sinks]\nnope = 1").is_err());
     }
 }

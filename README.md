@@ -67,7 +67,9 @@ Lab base images come from `lab/images/php-X.Y.Dockerfile`; build them first
 (tag them `lab-php-X.Y`).
 
 `tools/howdah-check` is a read-only helper for installing and verifying
-Howdah on a server:
+Howdah on a server. End users can download it on its own from the
+[v0.1.0 release](https://github.com/howdah/howdah/releases/download/v0.1.0/howdah-check)
+(it is also bundled in each tarball):
 
 ```sh
 tools/howdah-check detect              # list PHP installs and whether Howdah is loaded

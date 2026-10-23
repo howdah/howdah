@@ -1,5 +1,13 @@
 # Input-hook spike findings (1.0 Layer-1 protections, Task 1)
 
+> **SUPERSEDED IN PART (2026-10-23):** the CGI argument-injection virtual patch
+> (CVE-2012-1823) referenced below as GO/CONDITIONAL was later **removed** during
+> implementation — lab testing on a real php-cgi SAPI proved the exploit is
+> consumed during php-cgi's own startup, before any PHP extension/module/request
+> hook can run, so no in-PHP check can ever fire. It is documented as out of
+> reach (see `docs/coverage.md` caveat 7). This spike's input-shape and
+> request-header findings stand; only the CGI-patch verdict is reversed.
+
 **Gate verdict: PASS for the input-shape and CGI-virtual-patch glue on all six
 measured versions, with four precisions the glue must respect (below).**
 Request-header enumeration is reachable on the CLI server but its

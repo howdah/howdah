@@ -108,6 +108,13 @@ fn describe(r: RuleId) -> &'static str {
 /// clock of its own; this stamps every stashed log record so emitted JSON lines
 /// always carry a real timestamp.
 fn now() -> String {
+    // wasm32-unknown-unknown has no wall clock (SystemTime::now panics); the
+    // browser demo does not need a real timestamp.
+    #[cfg(target_arch = "wasm32")]
+    {
+        return "0".to_string();
+    }
+    #[allow(unreachable_code)]
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())

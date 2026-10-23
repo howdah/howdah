@@ -80,6 +80,29 @@ jobs:
           echo "glibc max ref: $max"
           [ "$(printf '%s\n2.17\n' "$max" | sort -V | tail -1)" = 2.17 ]
 
+  wasm:
+    name: wasm build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: wasm-${{ hashFiles('Cargo.lock') }}
+      - run: cargo test --locked -p howdah-wasm
+      - run: cargo build --locked -p howdah-wasm --target wasm32-unknown-unknown --release
+      - name: Demo samples give the expected verdicts on the built wasm
+        run: |
+          cp target/wasm32-unknown-unknown/release/howdah_wasm.wasm site/demo/howdah_wasm.wasm
+          node site/demo/verify.js
+
   lab:
     name: lab PHP ${{ matrix.php }}
     runs-on: ubuntu-24.04

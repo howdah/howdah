@@ -55,7 +55,7 @@ fn main() {
         // Reading registered ini entries, and request termination.
         .allowlist_function("zend_ini_string|zend_ini_long|_?zend_bailout")
         // SAPI.
-        .allowlist_type("_?sapi_module_struct|sapi_request_info|_?sapi_globals_struct|_?sapi_header_struct")
+        .allowlist_type("_?sapi_module_struct|sapi_request_info|_?sapi_globals_struct|_?sapi_header_struct|sapi_header_line")
         .allowlist_var("sapi_module|sapi_globals")
         .allowlist_function("sapi_.*")
         // Module-entry constants the glue must fill in (macros; absent ones are ignored).

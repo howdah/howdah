@@ -28,6 +28,7 @@ const FAILURE: c_int = -1;
 // Per-request state (NTS: one request at a time per worker).
 static mut FEEDER: Option<Feeder> = None;
 static mut BLOCKED: bool = false;
+static mut SELFTEST_SEEN: bool = false;
 
 /// Installed as `php_rfc1867_callback` by MINIT.
 ///
@@ -74,6 +75,7 @@ unsafe fn process(event: c_uint, event_data: *mut c_void) -> bool {
         x if x == sys::MULTIPART_EVENT_FORMDATA => {
             let ev = &*(event_data as *const sys::multipart_event_formdata);
             let name = cbytes(ev.name);
+            note_selftest(&name);
             if let Some(h) = feeder_mut().map(|f| f.field_header(&name)) {
                 feed(&h);
             }
@@ -88,6 +90,7 @@ unsafe fn process(event: c_uint, event_data: *mut c_void) -> bool {
         x if x == sys::MULTIPART_EVENT_FILE_START => {
             let ev = &*(event_data as *const sys::multipart_event_file_start);
             let name = cbytes(ev.name);
+            note_selftest(&name);
             let filename = if ev.filename.is_null() {
                 Vec::new()
             } else {
@@ -109,10 +112,39 @@ unsafe fn process(event: c_uint, event_data: *mut c_void) -> bool {
     }
 }
 
+/// The glue sees real field names (the core only sees lengths), so the
+/// self-test marker is matched here and reported through the core. Idempotent
+/// per request (the core stashes one Log line; repeated markers add nothing).
+unsafe fn note_selftest(name: &[u8]) {
+    if !SELFTEST_SEEN && howdah_core::limits::is_selftest_name(name) {
+        SELFTEST_SEEN = true;
+        core::howdah_selftest(module::CTX);
+    }
+}
+
+/// On a non-blocked self-test request, expose the request id as a response
+/// header so `howdah-check web` can print it. Best-effort; never fatal.
+unsafe fn add_selftest_header(request_id: &str) {
+    if request_id.is_empty() {
+        return;
+    }
+    let mut line = format!("X-Howdah-Selftest: {request_id}").into_bytes();
+    let mut hl = sys::sapi_header_line {
+        line: line.as_mut_ptr() as *mut c_char,
+        line_len: line.len() as _,
+        response_code: 0,
+    };
+    sys::sapi_header_op(
+        sys::sapi_header_op_enum_SAPI_HEADER_REPLACE,
+        &mut hl as *mut _ as *mut c_void,
+    );
+}
+
 /// Begin a request: reset state, build a RequestMeta from the SAPI globals, and
 /// open the core request with our fixed internal boundary.
 unsafe fn start() {
     BLOCKED = false;
+    SELFTEST_SEEN = false;
     ptr::addr_of_mut!(FEEDER).write(Some(Feeder::new()));
 
     let ri = (*ptr::addr_of!(sys::sapi_globals)).request_info;
@@ -151,6 +183,12 @@ unsafe fn end_request() -> Option<(c_int, String)> {
     }
 
     if !BLOCKED && end_action != core::HOWDAH_BLOCK {
+        if SELFTEST_SEEN {
+            let (rule, id) = line.as_deref().map(parse_line).unwrap_or_default();
+            if rule == "self_test" {
+                add_selftest_header(&id);
+            }
+        }
         return None;
     }
     let (rule, request_id) = line.as_deref().map(parse_line).unwrap_or_default();

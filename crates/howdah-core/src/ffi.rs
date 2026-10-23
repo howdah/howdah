@@ -153,6 +153,19 @@ impl howdah_ctx {
         }
     }
 
+    /// Record the self-test marker: always a Log event, NEVER a block. A
+    /// Standard hit would block in `mode = block`, so clamp Block to Log. Off
+    /// (global or per-rule) stays silent. Never masks an already-decided Block.
+    fn selftest(&mut self) {
+        let hit = crate::limits::selftest_hit();
+        let a = decide(Some(&hit), self.config.mode, &self.config.rule_modes);
+        if a == Action::Allow || self.worst == Action::Block {
+            return;
+        }
+        self.worst = Action::Log;
+        self.stash(RuleId::SelfTest, Action::Log, describe(RuleId::SelfTest));
+    }
+
     fn malformed(&mut self) {
         let hit = LimitHit {
             rule: RuleId::MalformedMultipart,
@@ -364,6 +377,28 @@ pub unsafe extern "C" fn howdah_take_log_line(ctx: *mut howdah_ctx) -> *mut c_ch
     .unwrap_or(std::ptr::null_mut())
 }
 
+/// Report that the request carried the self-test marker (see
+/// `limits::SELFTEST_FIELD`): stashes one `self_test` Log line, never a block.
+/// Returns the resulting action code (Log=1; 0 if Howdah is off, the ctx is
+/// NULL or a panic occurred; 2 if the request was already blocked).
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_selftest(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        (*ctx).selftest();
+        code((*ctx).worst)
+    }));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
 /// Free a string from `howdah_take_log_line`. NULL is a no-op.
 ///
 /// # Safety
@@ -426,6 +461,42 @@ mod tests {
             howdah_free_str(p);
             Some(s)
         }
+    }
+
+    #[test]
+    fn selftest_logs_in_detect_and_never_blocks_even_in_block_mode() {
+        for mode in ["detect", "block"] {
+            let c = init(&format!("mode = \"{mode}\""));
+            begin(c);
+            feed(c, BODY);
+            assert_eq!(unsafe { howdah_selftest(c) }, HOWDAH_LOG, "{mode}");
+            let line = take(c).expect("self_test line");
+            assert!(line.contains("\"rule\":\"self_test\""), "{line}");
+            assert!(line.contains("\"action\":\"log\""), "{line}");
+            assert_eq!(unsafe { howdah_request_end(c) }, HOWDAH_LOG);
+            unsafe { howdah_free(c) };
+        }
+    }
+
+    #[test]
+    fn selftest_silent_when_off_and_null_safe() {
+        let c = init("mode = \"off\"");
+        begin(c);
+        assert_eq!(unsafe { howdah_selftest(c) }, HOWDAH_ALLOW);
+        assert!(take(c).is_none());
+        unsafe { howdah_free(c) };
+        assert_eq!(unsafe { howdah_selftest(std::ptr::null_mut()) }, HOWDAH_ALLOW);
+    }
+
+    #[test]
+    fn selftest_does_not_mask_a_block() {
+        let c = init("mode = \"detect\"\n[limits]\nmax_parts = 1");
+        begin(c);
+        let two = b"--B\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nx\r\n--B\r\nContent-Disposition: form-data; name=\"b\"\r\n\r\nx\r\n";
+        assert_eq!(feed(c, two), HOWDAH_BLOCK);
+        assert_eq!(unsafe { howdah_selftest(c) }, HOWDAH_BLOCK);
+        assert!(take(c).unwrap().contains("max_parts"));
+        unsafe { howdah_free(c) };
     }
 
     #[test]

@@ -147,6 +147,31 @@ impl Default for Limits {
     }
 }
 
+/// The fixed, benign self-test marker: a multipart FIELD NAME. Any request
+/// carrying a part with exactly this name produces one `SelfTest` Log event
+/// (never a block), so a sysadmin can prove Howdah is live in the web SAPI.
+/// The name starts and ends with `__` and contains `howdah_selftest`, so it
+/// cannot collide with a real form field. Matching is exact (case-sensitive).
+///
+/// The core analyzer is fed only name LENGTHS, so the glue (which sees real
+/// names via the rfc1867 callback) matches with [`is_selftest_name`] and then
+/// reports it through the core's `howdah_selftest` entrypoint.
+pub const SELFTEST_FIELD: &[u8] = b"__howdah_selftest__";
+
+/// Does this field name equal the self-test marker?
+pub fn is_selftest_name(name: &[u8]) -> bool {
+    name == SELFTEST_FIELD
+}
+
+/// The hit recorded for the self-test marker (always `Standard`, never critical).
+pub fn selftest_hit() -> LimitHit {
+    LimitHit {
+        rule: RuleId::SelfTest,
+        severity: RuleId::SelfTest.severity(),
+        detail: "howdah self-test marker".to_string(),
+    }
+}
+
 /// Identifier of a detection rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -327,6 +352,32 @@ mod tests {
         assert_eq!(RuleId::MaxParts.severity(), Severity::Critical);
         assert_eq!(RuleId::MaxFiles.severity(), Severity::Critical);
         assert_eq!(RuleId::MaxPartHeaders.severity(), Severity::Critical);
+    }
+
+    #[test]
+    fn selftest_marker_is_exact_and_never_ordinary() {
+        assert!(is_selftest_name(b"__howdah_selftest__"));
+        for n in ["", "a", "username", "file", "howdah_selftest", "__howdah_selftest_",
+                  "__HOWDAH_SELFTEST__", "__howdah_selftest__x", "x__howdah_selftest__"] {
+            assert!(!is_selftest_name(n.as_bytes()), "{n}");
+        }
+    }
+
+    #[test]
+    fn selftest_is_standard_and_logs_in_detect_never_critical() {
+        use crate::config::Mode;
+        use crate::rules::{decide, Action};
+        let h = selftest_hit();
+        assert_eq!((h.rule, h.severity), (RuleId::SelfTest, Severity::Standard));
+        let none = std::collections::BTreeMap::new();
+        assert_eq!(decide(Some(&h), Mode::Detect, &none), Action::Log);
+    }
+
+    #[test]
+    fn ordinary_traffic_never_produces_selftest() {
+        assert_ne!(feed(&Limits::defaults(), part("ok").as_bytes()).map(|h| h.rule), Some(RuleId::SelfTest));
+        let body: String = (0..5000).map(|i| part(&format!("f{i}"))).collect();
+        assert_ne!(feed(&Limits::defaults(), body.as_bytes()).unwrap().rule, RuleId::SelfTest);
     }
 
     #[test]

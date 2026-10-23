@@ -2,6 +2,7 @@
 # howdah-check - read-only helper for installing/verifying Howdah.
 #
 #   howdah-check detect     list every PHP install on this box
+#   howdah-check web <url>  EICAR-style self-test over HTTP (see cmd_web)
 #
 # For each install, detect prints: version, PHP API number, NTS/ZTS,
 # extension_dir, the SAPIs present (cli/fpm/apache) and whether the `howdah`
@@ -22,8 +23,9 @@ NL='
 say() { printf '%s\n' "$*"; }
 
 usage() {
-  say "usage: $PROG detect" >&2
+  say "usage: $PROG detect | web <url>" >&2
   say "  detect   find every PHP install and report what Howdah needs (read-only)" >&2
+  say "  web URL  send two harmless self-test requests; confirms Howdah is live in the web SAPI" >&2
 }
 
 # --- small helpers ----------------------------------------------------------
@@ -336,8 +338,71 @@ cmd_detect() {
   return 0
 }
 
+# --- web self-test -----------------------------------------------------------
+# Sends two HARMLESS requests (HTTP only; nothing on this box is touched):
+#   1. a multipart body carrying the fixed marker field `__howdah_selftest__`
+#      -> Howdah logs a self_test event and adds `X-Howdah-Selftest: <id>`
+#      -> reported "flagged"
+#   2. a multipart body of HOWDAH_CHECK_PARTS (default 2001, one over Howdah's
+#      default max_parts of 2000) EMPTY fields: structure only, no payload
+#      -> a critical limit, always blocked (403/413) -> reported "BLOCKED"
+# If PHP's max_input_vars / max_file_uploads (or a raised Howdah limit) stops
+# parsing before the limit is crossed, result 2 can read "not blocked": raise
+# HOWDAH_CHECK_PARTS. HOWDAH_CHECK_INSECURE=1 passes -k to curl (self-signed).
+cmd_web() {
+  _url=${1:-}
+  [ -n "$_url" ] || { usage; exit 2; }
+  command -v curl >/dev/null 2>&1 || { say "$PROG: web needs curl" >&2; exit 2; }
+  _n=${HOWDAH_CHECK_PARTS:-2001}
+  case "$_n" in ''|*[!0-9]*) say "$PROG: HOWDAH_CHECK_PARTS must be a number" >&2; exit 2 ;; esac
+  _k=""; [ "${HOWDAH_CHECK_INSECURE:-0}" = 1 ] && _k="-k"
+  _t=$(mktemp -d 2>/dev/null) || { say "$PROG: cannot create temp dir" >&2; exit 2; }
+  trap 'rm -rf "$_t"' EXIT INT TERM
+  _rc=0
+
+  # 1. self-test marker
+  _b=HowdahSelfTestB0
+  printf -- '--%s\r\nContent-Disposition: form-data; name="__howdah_selftest__"\r\n\r\n1\r\n--%s--\r\n' "$_b" "$_b" > "$_t/marker.bin"
+  _code=$(curl -s $_k -m 30 -o "$_t/m.body" -D "$_t/m.hdr" -w '%{http_code}' -X POST \
+    -H "Content-Type: multipart/form-data; boundary=$_b" --data-binary @"$_t/marker.bin" "$_url" 2>/dev/null) || _code=000
+  _id=$(tr -d '\r' < "$_t/m.hdr" 2>/dev/null | sed -n 's/^[Xx]-[Hh]owdah-[Ss]elftest:[[:space:]]*//p' | head -n 1)
+  if [ -n "$_id" ] && [ "$_code" = 200 ]; then
+    say "selftest marker:   flagged  (HTTP $_code, request id $_id)"
+  elif [ "$_code" = 000 ]; then
+    say "selftest marker:   NO RESPONSE from $_url"; _rc=1
+  else
+    say "selftest marker:   NOT flagged (HTTP $_code): Howdah is not active in this web SAPI (or mode=off)"; _rc=1
+  fi
+
+  # 2. just over the part limit: structure only, many empty fields
+  _b=HowdahLimitB0
+  _i=0
+  while [ "$_i" -lt "$_n" ]; do
+    printf -- '--%s\r\nContent-Disposition: form-data; name="p%s"\r\n\r\n\r\n' "$_b" "$_i"
+    _i=$((_i + 1))
+  done > "$_t/over.bin"
+  printf -- '--%s--\r\n' "$_b" >> "$_t/over.bin"
+  _code=$(curl -s $_k -m 60 -o "$_t/o.body" -w '%{http_code}' -X POST \
+    -H "Content-Type: multipart/form-data; boundary=$_b" --data-binary @"$_t/over.bin" "$_url" 2>/dev/null) || _code=000
+  _id=$(sed -n 's/^request_id:[[:space:]]*//p' "$_t/o.body" 2>/dev/null | tr -d '\r' | head -n 1)
+  case "$_code" in
+    403|413)
+      if grep -q 'Howdah blocked' "$_t/o.body" 2>/dev/null; then
+        say "over-limit parts:  BLOCKED  (HTTP $_code, request id ${_id:-unknown}, $_n parts)"
+      else
+        say "over-limit parts:  refused (HTTP $_code) but not by Howdah ($_n parts)"; _rc=1
+      fi ;;
+    000) say "over-limit parts:  NO RESPONSE from $_url"; _rc=1 ;;
+    *)   say "over-limit parts:  not blocked (HTTP $_code, $_n parts): Layer-1 limits not enforced here"; _rc=1 ;;
+  esac
+
+  if [ "$_rc" -eq 0 ]; then say "Howdah is active in the web SAPI at $_url"; fi
+  return "$_rc"
+}
+
 case "${1:-}" in
   detect) cmd_detect ;;
+  web) shift; cmd_web "${1:-}"; exit $? ;;
   "") usage; exit 2 ;;
   -h|--help|help) usage ;;
   *) say "$PROG: unknown command '$1'" >&2; usage; exit 2 ;;

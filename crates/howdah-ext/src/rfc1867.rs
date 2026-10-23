@@ -129,11 +129,13 @@ unsafe fn add_selftest_header(request_id: &str) {
         return;
     }
     let mut line = format!("X-Howdah-Selftest: {request_id}").into_bytes();
-    let mut hl = sys::sapi_header_line {
-        line: line.as_mut_ptr() as *mut c_char,
-        line_len: line.len() as _,
-        response_code: 0,
-    };
+    // Zero-init then set fields by name: PHP 8.5 removed `sapi_header_line`'s
+    // `response_code` field, so a struct literal naming it fails to compile on
+    // 8.5. We only need `line`/`line_len` for a header op; zeroed() fills any
+    // remaining field (present or not) with 0, portably across 5/7/8.x.
+    let mut hl: sys::sapi_header_line = std::mem::zeroed();
+    hl.line = line.as_mut_ptr() as *mut c_char;
+    hl.line_len = line.len() as _;
     sys::sapi_header_op(
         sys::sapi_header_op_enum_SAPI_HEADER_REPLACE,
         &mut hl as *mut _ as *mut c_void,

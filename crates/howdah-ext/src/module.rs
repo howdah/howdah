@@ -116,8 +116,11 @@ const fn def(name: &'static [u8], value: &'static [u8]) -> sys::zend_ini_entry_d
         mh_arg3: ptr::null_mut(),
         value: value.as_ptr() as *const c_char,
         displayer: None,
-        value_length: (value.len() - 1) as u32, // strlen (drop trailing NUL)
-        name_length: (name.len() - 1) as u16,
+        // `as _`: the width of these fields varies by PHP generation
+        // (name_length is u32 on 7.0-7.2, u16 on 7.3+), so let the compiler
+        // infer the field's actual type per generation.
+        value_length: (value.len() - 1) as _, // strlen (drop trailing NUL)
+        name_length: (name.len() - 1) as _,
         modifiable: 7, // ZEND_INI_ALL (SYSTEM|PERDIR|USER)
     }
 }

@@ -1,0 +1,205 @@
+name: publish-repos
+
+# MANUAL publish of the signed apt + yum repositories to pkg.howdah.org
+# (Cloudflare R2). Run it deliberately from the Actions tab:
+#   Actions -> publish-repos -> Run workflow.
+# See packaging/repo/GO-LIVE.md for the owner checklist (secrets, key.asc,
+# Cloudflare cache rules, post-publish verification).
+#
+# Safety rails:
+#   * workflow_dispatch only; nothing runs on push/tag.
+#   * `publish` defaults to false: the run builds, signs, assembles and
+#     dry-runs the upload but writes NOTHING to R2 until you tick it.
+#   * Upload is rclone `copy` (never `sync`), in dependency order, with
+#     --immutable on packages: superseded packages are never deleted.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Howdah version to package (e.g. 1.0.0). Empty = Cargo.toml version."
+        required: false
+        default: ""
+      publish:
+        description: "Actually upload to R2 (false = build + sign + dry-run only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ---- .deb + .rpm per PHP minor, x86_64 (gating) --------------------------
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        minor: ["5.4", "5.5", "5.6", "7.0", "7.1", "7.2", "7.3", "7.4", "8.0", "8.1", "8.2", "8.3", "8.4", "8.5"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build glibc-2.17 tarball, .deb (amd64) and .rpm (x86_64) for PHP ${{ matrix.minor }}
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then export HOWDAH_VERSION="$INPUT_VERSION"; fi
+          # build-deb.sh / build-rpm.sh build the release tarball themselves
+          # (packaging/build-release.sh) when it is absent from packaging/out.
+          packaging/deb/build-deb.sh "${{ matrix.minor }}" amd64
+          packaging/rpm/build-rpm.sh "${{ matrix.minor }}" x86_64
+          ls -l packaging/out
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: pkgs-php${{ matrix.minor }}-x86_64
+          path: |
+            packaging/out/*.deb
+            packaging/out/*.rpm
+          if-no-files-found: error
+
+  # ---- arm64/aarch64 packages: BEST-EFFORT, never blocks the publish -------
+  # Same policy as release.yml: native arm64 runner; a failed cell just means
+  # no arm64/aarch64 package for that minor.
+  build-aarch64:
+    runs-on: ubuntu-24.04-arm
+    continue-on-error: true
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        minor: ["5.4", "5.5", "5.6", "7.0", "7.1", "7.2", "7.3", "7.4", "8.0", "8.1", "8.2", "8.3", "8.4", "8.5"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build glibc-2.17 tarball, .deb (arm64) and .rpm (aarch64) for PHP ${{ matrix.minor }}
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then export HOWDAH_VERSION="$INPUT_VERSION"; fi
+          packaging/deb/build-deb.sh "${{ matrix.minor }}" arm64
+          packaging/rpm/build-rpm.sh "${{ matrix.minor }}" aarch64
+          ls -l packaging/out
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: pkgs-php${{ matrix.minor }}-aarch64
+          path: |
+            packaging/out/*.deb
+            packaging/out/*.rpm
+          if-no-files-found: error
+
+  # ---- sign + assemble both repos, then (optionally) upload to R2 ----------
+  publish:
+    needs: [build, build-aarch64]
+    if: ${{ always() && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Collect all packages
+        uses: actions/download-artifact@v4
+        with:
+          path: dl
+          merge-multiple: true
+
+      - name: Gather packages into packaging/out
+        run: |
+          mkdir -p packaging/out
+          find dl \( -name '*.deb' -o -name '*.rpm' \) -exec cp {} packaging/out/ \;
+          ls -l packaging/out
+
+      # Same import as release.yml: the passphraseless RSA signing SUBKEY,
+      # loopback pinentry, never the offline primary key.
+      - name: Import CI signing subkey (passphraseless, non-interactive)
+        env:
+          HOWDAH_GPG_SIGNING_KEY: ${{ secrets.HOWDAH_GPG_SIGNING_KEY }}
+        run: |
+          mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
+          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
+          gpgconf --kill gpg-agent || true
+          printf '%s\n' "$HOWDAH_GPG_SIGNING_KEY" | gpg --batch --import
+          gpg --list-secret-keys --keyid-format=long
+
+      - name: Assemble + sign the apt repo (reprepro)
+        env:
+          # Pin the exact signing subkey, same value release.yml's sign.sh uses.
+          HOWDAH_GPG_KEYID: "9A104FB0A073065B2C2631FC1E8D725D31BD5DC9!"
+          HOWDAH_GNUPGHOME: ${{ github.workspace }}/.gnupg-home
+        run: |
+          rm -rf "$HOWDAH_GNUPGHOME"; cp -a "$HOME/.gnupg" "$HOWDAH_GNUPGHOME"
+          packaging/repo/build-apt-repo.sh
+
+      - name: Assemble + sign the yum repo (createrepo_c, rpmsign)
+        env:
+          HOWDAH_GPG_KEYID: "9A104FB0A073065B2C2631FC1E8D725D31BD5DC9!"
+          HOWDAH_GNUPGHOME: ${{ github.workspace }}/.gnupg-home
+        run: packaging/repo/build-yum-repo.sh
+
+      - name: Verify the signatures against the COMMITTED public key (clean keyring)
+        run: |
+          tmp="$(mktemp -d)"
+          export GNUPGHOME="$tmp"
+          gpg --batch --import packaging/howdah-release-signing.asc
+          r=packaging/out/repo
+          gpg --batch --verify "$r/apt/dists/stable/InRelease"
+          gpg --batch --verify "$r/apt/dists/stable/Release.gpg" "$r/apt/dists/stable/Release"
+          gpg --batch --verify "$r/yum/repodata/repomd.xml.asc" "$r/yum/repodata/repomd.xml"
+          find "$r" -type f | sort | head -100
+          rm -rf "$tmp"
+
+      - name: Install rclone
+        run: |
+          set -euo pipefail
+          v=v1.75.2
+          cd "$(mktemp -d)"
+          curl -fsSLO "https://downloads.rclone.org/$v/rclone-$v-linux-amd64.zip"
+          # sha256 of rclone-v1.75.2-linux-amd64.zip (from downloads.rclone.org/v1.75.2/SHA256SUMS)
+          echo "349ac8fba6ff65d6247043f1750cdcb518ec5d500ef91463a10d37c0ccdf3702  rclone-$v-linux-amd64.zip" | sha256sum -c -
+          unzip -q "rclone-$v-linux-amd64.zip"
+          sudo install -m 0755 "rclone-$v-linux-amd64/rclone" /usr/local/bin/rclone
+          rclone version | head -1
+
+      # Owner-set repo secrets (NOT created by this change; see GO-LIVE.md):
+      #   HOWDAH_R2_ACCESS_KEY_ID, HOWDAH_R2_SECRET_ACCESS_KEY,
+      #   HOWDAH_R2_ENDPOINT (https://<acct>.r2.cloudflarestorage.com),
+      #   HOWDAH_R2_BUCKET.
+      # They are mapped to rclone's env-var remote named `R2`.
+      #
+      # Upload order is enforced by packaging/repo/publish-r2.sh:
+      #   packages (pool/, *.rpm)  ->  Packages*/repodata  ->  Release/Release.gpg/
+      #   InRelease + repomd.xml/.asc LAST. Copy only, no deletes.
+      #
+      # Cloudflare cache expectations (rules live in the dashboard; see GO-LIVE.md).
+      # The script also stamps Cache-Control on each object so origin headers agree:
+      #   pool/** and *.rpm      long (1y, immutable)  - version-named
+      #   dists/** and repodata/**  short (5 min)      - mutable indexes
+      - name: Upload to R2 (dependency order)
+        env:
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.HOWDAH_R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.HOWDAH_R2_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_ENDPOINT: ${{ secrets.HOWDAH_R2_ENDPOINT }}
+          RCLONE_CONFIG_R2_NO_CHECK_BUCKET: "true"
+          HOWDAH_R2_BUCKET: ${{ secrets.HOWDAH_R2_BUCKET }}
+          HOWDAH_R2_DRY_RUN: ${{ inputs.publish && '0' || '1' }}
+        run: |
+          if [ "$HOWDAH_R2_DRY_RUN" = 1 ]; then
+            echo "::notice::publish=false: DRY RUN, nothing is written to R2"
+          fi
+          if [ -z "$HOWDAH_R2_BUCKET" ]; then
+            echo "::error::secret HOWDAH_R2_BUCKET is not set (see packaging/repo/GO-LIVE.md)"
+            exit 1
+          fi
+          packaging/repo/publish-r2.sh "$HOWDAH_R2_BUCKET"
+
+      - name: Summary
+        run: |
+          {
+            echo "### publish-repos"
+            echo "- published to R2: \`${{ inputs.publish }}\` (false = dry run)"
+            echo "- next: verify against https://pkg.howdah.org (GO-LIVE.md step 4)"
+            echo "- Cloudflare: long cache for \`pool/\`+\`*.rpm\`, short/bypass for \`dists/\`+\`repodata/\`"
+          } >> "$GITHUB_STEP_SUMMARY"

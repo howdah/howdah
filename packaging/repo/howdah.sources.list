@@ -1,0 +1,11 @@
+# /etc/apt/sources.list.d/howdah.list  (Debian / Ubuntu, incl. xenial)
+# Prerequisite on pre-2018 apt (xenial): apt-get install -y apt-transport-https ca-certificates curl
+#
+# Modern apt (>= 1.4: bullseye, bookworm, jammy, noble), key pinned to this repo only:
+#   sudo install -d -m 0755 /etc/apt/keyrings
+#   curl -fsSL https://howdah.org/key.asc | sudo tee /etc/apt/keyrings/howdah.asc >/dev/null
+deb [signed-by=/etc/apt/keyrings/howdah.asc] https://pkg.howdah.org/apt stable main
+#
+# Legacy apt (xenial, apt 1.2: no signed-by support) - use this line instead and add the key globally:
+#   curl -fsSL https://howdah.org/key.asc | sudo apt-key add -
+# deb https://pkg.howdah.org/apt stable main

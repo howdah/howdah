@@ -1,0 +1,9 @@
+# /etc/yum.repos.d/howdah.repo  (CentOS 7 / Alma / Rocky / RHEL; yum or dnf)
+# Import the signing key first:  sudo rpm --import https://howdah.org/key.asc
+[howdah]
+name=Howdah (defensive WAF for PHP)
+baseurl=https://pkg.howdah.org/yum
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://howdah.org/key.asc

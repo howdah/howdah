@@ -18,3 +18,5 @@
 /lab/spike/measure.sh
 /lab/spike/*gen*
 /private/
+/.gnupg-home
+/.superpowers/

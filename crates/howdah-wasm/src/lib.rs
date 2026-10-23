@@ -138,8 +138,16 @@ fn analyze(cfg: &[u8], body: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    // The result buffer + RESULT_LEN are process-global (correct for the
+    // single-threaded wasm/JS runtime). cargo runs these HOST tests on
+    // parallel threads, so two analyze() calls would race on that global and
+    // one would read a mismatched ptr/len. Serialize the analyze→read→free
+    // sequence across tests; production (single-threaded) never contends.
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Full alloc/copy/analyze/read/free dance, as the JS glue does it.
     fn run(cfg: &str, body: &[u8]) -> serde_json::Value {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             let c = howdah_wasm_alloc(cfg.len());
             std::slice::from_raw_parts_mut(c, cfg.len()).copy_from_slice(cfg.as_bytes());
@@ -207,6 +215,7 @@ mod tests {
 
     #[test]
     fn empty_inputs_are_safe() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             let r = howdah_wasm_analyze(std::ptr::null(), 0, std::ptr::null(), 0);
             let n = howdah_wasm_result_len();

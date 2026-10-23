@@ -1,0 +1,58 @@
+# Howdah RPM for one PHP minor, Remi SCL layout. Rendered by build-rpm.sh
+# (@TOKENS@ substituted); not a standalone spec.
+#
+# Remi layout (el7 SCL, and the "safe" SCL packages on el8/el9):
+#   extension_dir  /opt/remi/php@XY@/root/usr/lib64/php/modules
+#   scan dir       /etc/opt/remi/php@XY@/php.d     (NN-name.ini, autoloaded)
+# Stock distro / Remi non-SCL (e.g. php:remi-7.4 module stream, EL stock PHP)
+# would instead be /usr/lib64/php/modules + /etc/php.d (package php-howdah);
+# not built here.
+%global scl_prefix php@XY@
+%global moddir /opt/remi/%{scl_prefix}/root/usr/lib64/php/modules
+%global inidir /etc/opt/remi/%{scl_prefix}/php.d
+
+# Prebuilt binary (glibc-2.17 build): no debuginfo/strip, gzip payload for old rpm.
+%global debug_package %{nil}
+%global __strip /bin/true
+%global _binary_payload w9.gzdio
+%global _build_id_links none
+
+Name:           @SCL@-howdah
+Version:        @VERSION@
+Release:        @REL@
+Summary:        Howdah defensive WAF extension for PHP @MINOR@ (Remi SCL)
+License:        MIT OR Apache-2.0
+URL:            https://github.com/howdah/howdah
+Packager:       Howdah Maintainers <packages@howdah.org>
+Source0:        howdah.so
+Source1:        howdah.ini
+# Install only against a PHP with this exact Zend module API (ABI) from Remi.
+Requires:       @SCL@-php(zend-abi) = @API@-64
+Requires:       @SCL@-php-common
+
+%description
+Howdah is an open-source defensive web application firewall for PHP, loaded as
+a PHP extension. It refuses abusive multipart/form-data requests before PHP
+allocates per-part memory. This package is built for PHP @MINOR@ (Zend module
+API @API@, NTS) and installs into the Remi %{scl_prefix} collection. It is
+enabled by default in DETECT mode (logs only); edit %{inidir}/40-howdah.ini
+and set howdah.mode = block once you have reviewed the logs.
+
+%prep
+%build
+
+%install
+install -D -m 0755 %{SOURCE0} %{buildroot}%{moddir}/howdah.so
+install -D -m 0644 %{SOURCE1} %{buildroot}%{inidir}/40-howdah.ini
+
+# Enabling == dropping the autoloaded 40-howdah.ini (PHP scans php.d), so there
+# is nothing to run in %post/%postun and nothing that can wedge PHP or the
+# transaction. The .ini is %config(noreplace): local edits survive upgrades
+# and removal (saved as .rpmsave).
+%files
+%{moddir}/howdah.so
+%config(noreplace) %{inidir}/40-howdah.ini
+
+%changelog
+* Fri Oct 23 2026 Howdah Maintainers <packages@howdah.org> - @VERSION@-@REL@
+- Remi SCL package for PHP @MINOR@ wrapping the glibc-2.17 howdah.so

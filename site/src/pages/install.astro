@@ -39,7 +39,7 @@ const MINORS = ['5.4','5.5','5.6','7.0','7.1','7.2','7.3','7.4','8.0','8.1','8.2
         </fieldset>
 
         <fieldset>
-          <legend><span data-os-step>2</span>. PHP version</legend>
+          <legend><span data-os-step>3</span>. PHP version</legend>
           <label for="minor">PHP minor version (from <code>php -v</code>)</label>
           <select id="minor" name="minor">
             {MINORS.map((m) => <option value={m} selected={m === '8.1'}>{m}</option>)}
@@ -47,7 +47,7 @@ const MINORS = ['5.4','5.5','5.6','7.0','7.1','7.2','7.3','7.4','8.0','8.1','8.2
         </fieldset>
 
         <fieldset>
-          <legend><span data-os-step2>3</span>. Server type (SAPI)</legend>
+          <legend><span data-os-step2>4</span>. Server type (SAPI)</legend>
           <label><input type="radio" name="sapi" value="fpm" checked /> PHP-FPM <small>The common setup behind Nginx or Apache</small></label>
           <label><input type="radio" name="sapi" value="apache" /> Apache mod_php <small>prefork mpm</small></label>
           <label><input type="radio" name="sapi" value="cgi" /> php-cgi / FastCGI <small>See the note about CVE-2012-1823 below</small></label>
@@ -88,6 +88,8 @@ sudo systemctl reload php8.1-fpm</code></pre>
         </ol>
       </div>
 
+      <p id="distro-note" class="legend" hidden>Your PHP comes from the distribution, not Surý. The package targets the Surý/Debian module layout and the matching ABI (<code>phpapi-N</code>). If <code>apt</code> reports no installation candidate for your version, your distribution's PHP has no matching build — switch to <b>Other / stock PHP</b> above and use the signed tarball.</p>
+
       <div class="note" id="cgi-note" hidden>
         <h3>A note for php-cgi / FastCGI</h3>
         <p>Howdah protects the request-parsing path the same way under CGI. It cannot cover <strong>CVE-2012-1823</strong> (php-cgi argument injection): that query string is consumed by php-cgi during its own startup, <em>before</em> any PHP extension loads, so no in-PHP firewall can act on it. Use a web-server or front-proxy rule, or a patched php-cgi, for that one. See the <a href="/coverage/">coverage page</a>.</p>
@@ -102,6 +104,7 @@ sudo systemctl reload php8.1-fpm</code></pre>
   const form = document.getElementById('picker');
   const result = document.getElementById('result-steps');
   const cgiNote = document.getElementById('cgi-note');
+  const distroNote = document.getElementById('distro-note');
   const jsNote = document.querySelector('[data-nojs]');
   if (jsNote) jsNote.textContent = 'These commands update as you change the choices above. One build per PHP minor version.';
 
@@ -126,6 +129,7 @@ sudo systemctl reload php8.1-fpm</code></pre>
     const xy = minor.replace('.', '');    // e.g. 81
     const sapi = val('sapi');
     cgiNote.hidden = sapi !== 'cgi';
+    distroNote.hidden = !(os === 'debian' && val('src_deb') === 'distro');
 
     // show/hide os-conditional fieldsets + the xenial question
     form.querySelectorAll('[data-when-os]').forEach((fs) => {

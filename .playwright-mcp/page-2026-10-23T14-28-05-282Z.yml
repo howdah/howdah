@@ -1,0 +1,128 @@
+- generic [active] [ref=e1]:
+  - link "Skip to content" [ref=e2] [cursor=pointer]:
+    - /url: "#main"
+  - banner [ref=e3]:
+    - note "Project status" [ref=e4]:
+      - generic [ref=e5]:
+        - strong [ref=e6]: Released
+        - paragraph [ref=e7]:
+          - link "Howdah 1.0.0 is released." [ref=e8] [cursor=pointer]:
+            - /url: https://github.com/howdah/howdah/releases/tag/v1.0.0
+          - text: Install from the apt/yum repository or a signed tarball. Howdah starts in
+          - code [ref=e9]: detect
+          - text: "mode: the critical limits block, everything else only logs. Read the"
+          - link "coverage table" [ref=e10] [cursor=pointer]:
+            - /url: /coverage/
+          - text: for exactly what has been tested on your PHP version before you switch rules to block.
+    - generic [ref=e12]:
+      - link "Howdah, home" [ref=e13] [cursor=pointer]:
+        - /url: /
+        - text: Howdah
+      - navigation "Primary" [ref=e17]:
+        - list [ref=e18]:
+          - listitem [ref=e19]:
+            - link "Home" [ref=e20] [cursor=pointer]:
+              - /url: /
+          - listitem [ref=e21]:
+            - link "Install" [ref=e22] [cursor=pointer]:
+              - /url: /install/
+          - listitem [ref=e23]:
+            - link "Coverage" [ref=e24] [cursor=pointer]:
+              - /url: /coverage/
+          - listitem [ref=e25]:
+            - link "Demo" [ref=e26] [cursor=pointer]:
+              - /url: /demo/
+          - listitem [ref=e27]:
+            - link "Docs" [ref=e28] [cursor=pointer]:
+              - /url: /docs/
+          - listitem [ref=e29]:
+            - link "Blog" [ref=e30] [cursor=pointer]:
+              - /url: /blog/
+          - listitem [ref=e31]:
+            - link "Community" [ref=e32] [cursor=pointer]:
+              - /url: /community/
+          - listitem [ref=e33]:
+            - link "GitHub" [ref=e34] [cursor=pointer]:
+              - /url: https://github.com/howdah/howdah
+  - main [ref=e35]:
+    - generic [ref=e37]:
+      - paragraph [ref=e38]:
+        - link "Home" [ref=e39] [cursor=pointer]:
+          - /url: /
+        - text: / Demo
+      - heading "Try Howdah in your browser" [level=1] [ref=e40]
+      - paragraph [ref=e41]:
+        - text: Pick a sample request and see Howdah's verdict. This runs the
+        - strong [ref=e42]: real
+        - text: Howdah core, compiled to WebAssembly, right here in your browser — nothing is sent to any server, and this is not a scan of your site.
+    - generic [ref=e44]:
+      - generic [ref=e45]:
+        - generic [ref=e46]:
+          - form "Choose a sample request" [ref=e47]:
+            - group "Sample request (benign; shape only)" [ref=e48]:
+              - generic [ref=e50] [cursor=pointer]:
+                - 'radio "Normal upload form Three text fields and one small file. — expected: Allow" [checked] [ref=e51]'
+                - text: Normal upload form
+                - generic [ref=e52]: "Three text fields and one small file. — expected: Allow"
+              - generic [ref=e53] [cursor=pointer]:
+                - 'radio "Part flood (PHP2Shell-shaped) About 2,500 tiny empty parts — structure only, no payload. — expected: Block · max_parts" [ref=e54]'
+                - text: Part flood (PHP2Shell-shaped)
+                - generic [ref=e55]: "About 2,500 tiny empty parts — structure only, no payload. — expected: Block · max_parts"
+              - generic [ref=e56] [cursor=pointer]:
+                - 'radio "Malformed multipart A part with no Content-Disposition header. — expected: Block · malformed_multipart" [ref=e57]'
+                - text: Malformed multipart
+                - generic [ref=e58]: "A part with no Content-Disposition header. — expected: Block · malformed_multipart"
+              - generic [ref=e59] [cursor=pointer]:
+                - 'radio "Oversized filename A filename 600 characters long (limit: 512 bytes). — expected: Block · max_filename_len" [ref=e60]'
+                - text: Oversized filename
+                - generic [ref=e61]: "A filename 600 characters long (limit: 512 bytes). — expected: Block · max_filename_len"
+            - paragraph [ref=e62]:
+              - button "Run in your browser" [ref=e63]
+          - paragraph [ref=e64]: "The WebAssembly core (~430 KB) loads when you first run a sample. Default configuration: block mode."
+        - generic [ref=e66]:
+          - heading "Verdict" [level=2] [ref=e67]
+          - paragraph [ref=e68]:
+            - text: Choose a sample and select
+            - strong [ref=e69]: Run
+            - text: to see what Howdah does.
+      - paragraph [ref=e70]:
+        - text: The samples recreate only the harmless
+        - emphasis [ref=e71]: structure
+        - text: of each request — counts and sizes, never a working exploit. The verdict, rule name and reason come straight from the same core that ships in the extension.
+  - contentinfo [ref=e72]:
+    - generic [ref=e73]:
+      - generic [ref=e74]:
+        - heading "Howdah" [level=2] [ref=e75]
+        - paragraph [ref=e76]: An independent, open-source, defensive web application firewall for PHP. This site has no trackers, no cookies, no third-party requests and no JavaScript except the install picker and the in-browser demo. Fonts are served from this site.
+        - paragraph [ref=e77]: Howdah is not affiliated with or endorsed by the PHP project or The PHP Group.
+      - generic [ref=e78]:
+        - heading "Project" [level=2] [ref=e79]
+        - list [ref=e80]:
+          - listitem [ref=e81]:
+            - link "Install" [ref=e82] [cursor=pointer]:
+              - /url: /install/
+          - listitem [ref=e83]:
+            - link "Coverage" [ref=e84] [cursor=pointer]:
+              - /url: /coverage/
+          - listitem [ref=e85]:
+            - link "Documentation" [ref=e86] [cursor=pointer]:
+              - /url: /docs/
+          - listitem [ref=e87]:
+            - link "Community" [ref=e88] [cursor=pointer]:
+              - /url: /community/
+          - listitem [ref=e89]:
+            - link "Source on GitHub" [ref=e90] [cursor=pointer]:
+              - /url: https://github.com/howdah/howdah
+          - listitem [ref=e91]:
+            - link "Security policy" [ref=e92] [cursor=pointer]:
+              - /url: https://github.com/howdah/howdah/security/policy
+      - generic [ref=e93]:
+        - heading "License" [level=2] [ref=e94]
+        - list [ref=e95]:
+          - listitem [ref=e96]:
+            - link "MIT" [ref=e97] [cursor=pointer]:
+              - /url: https://github.com/howdah/howdah/blob/main/LICENSE-MIT
+          - listitem [ref=e98]:
+            - link "Apache-2.0" [ref=e99] [cursor=pointer]:
+              - /url: https://github.com/howdah/howdah/blob/main/LICENSE-APACHE
+        - paragraph [ref=e100]: "Dual-licensed: use either, at your option."

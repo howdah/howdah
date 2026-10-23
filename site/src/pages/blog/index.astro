@@ -22,6 +22,7 @@ const fmt = (d: string) => new Date(d + 'T00:00:00Z').toLocaleDateString('en-GB'
 
   <section>
     <div class="wrap">
+      <h2 class="sr-only">Posts</h2>
       <ul class="cardgrid">
         {posts.map((p) => (
           <li>

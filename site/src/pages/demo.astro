@@ -38,7 +38,7 @@ const samples = [
                 </label>
               ))}
             </fieldset>
-            <p><button type="button" id="run" class="btn primary" disabled>Loading core&hellip;</button></p>
+            <p><button type="button" id="run" class="btn primary" disabled hidden>Loading core&hellip;</button></p>
           </form>
           <p class="legend" id="load-note">The WebAssembly core (~430&nbsp;KB) loads when you first run a sample. Default configuration: block mode.</p>
         </div>
@@ -81,6 +81,7 @@ const samples = [
       return (r && (r.value || (r[0] && Array.prototype.filter.call(r, function (x) { return x.checked; })[0].value))) || 'normal';
     }
 
+    runBtn.hidden = false; // JS is on: reveal the control (no-JS keeps it hidden; noscript explains)
     if (!H || !samples.length) {
       runBtn.textContent = 'Demo unavailable';
       return;

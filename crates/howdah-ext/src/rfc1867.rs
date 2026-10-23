@@ -18,7 +18,7 @@ use std::ptr;
 use howdah_core::ffi as core;
 use howdah_sys as sys;
 
-use crate::feeder::{self, Feeder};
+use crate::feeder::Feeder;
 use crate::module;
 use crate::response;
 
@@ -142,34 +142,19 @@ unsafe fn add_selftest_header(request_id: &str) {
     );
 }
 
-/// Begin a request: reset state, build a RequestMeta from the SAPI globals, and
-/// open the core request with our fixed internal boundary.
+/// Begin a request: reset the multipart feeder state, then open the core
+/// request through the shared, idempotent [`module::maybe_begin`]. For a
+/// multipart request this START is normally the first glue hook to fire, so it
+/// still effectively begins the request exactly as in 0.1; if the input_filter
+/// already began it this call is a no-op begin and we share the same ctx.
 unsafe fn start() {
     BLOCKED = false;
     SELFTEST_SEEN = false;
     ptr::addr_of_mut!(FEEDER).write(Some(Feeder::new()));
-
-    let ri = (*ptr::addr_of!(sys::sapi_globals)).request_info;
-    let method = cbytes(ri.request_method);
-    let uri_full = cbytes(ri.request_uri);
-    let uri = strip_query(&uri_full); // path only: query strings can carry secrets
-    let ip = remote_addr();
-
-    let meta = core::RequestMeta {
-        client_ip: ip.as_ptr() as *const c_char,
-        client_ip_len: ip.len(),
-        method: method.as_ptr() as *const c_char,
-        method_len: method.len(),
-        uri: uri.as_ptr() as *const c_char,
-        uri_len: uri.len(),
-    };
-    core::howdah_request_begin(
-        module::CTX,
-        feeder::INTERNAL_BOUNDARY.as_ptr() as *const c_char,
-        feeder::INTERNAL_BOUNDARY.len(),
-        &meta,
-    );
-    // ip/method/uri outlive this call's request_begin, which copies them.
+    // Mark this a multipart request: fires before any field is registered, so
+    // the input_filter skips the POST fields (counted here as parts instead).
+    module::MULTIPART = true;
+    module::maybe_begin();
 }
 
 /// End of body: feed the closing delimiter, end the core request, write any log
@@ -179,6 +164,9 @@ unsafe fn end_request() -> Option<(c_int, String)> {
         feed(&close);
     }
     let end_action = core::howdah_request_end(module::CTX);
+    // Mark the request ended so RSHUTDOWN does not end (or respond) a second
+    // time for this multipart request.
+    module::ENDED = true;
     let line = take_log_line();
     if let Some(l) = line.as_deref() {
         response::write_log_line(l);
@@ -214,7 +202,7 @@ unsafe fn feeder_mut() -> Option<&'static mut Feeder> {
     (*ptr::addr_of_mut!(FEEDER)).as_mut()
 }
 
-unsafe fn take_log_line() -> Option<String> {
+pub(crate) unsafe fn take_log_line() -> Option<String> {
     let p = core::howdah_take_log_line(module::CTX);
     if p.is_null() {
         return None;
@@ -224,7 +212,7 @@ unsafe fn take_log_line() -> Option<String> {
     Some(s)
 }
 
-fn parse_line(line: &str) -> (String, String) {
+pub(crate) fn parse_line(line: &str) -> (String, String) {
     match serde_json::from_str::<serde_json::Value>(line) {
         Ok(v) => (
             v["rule"].as_str().unwrap_or("").to_string(),
@@ -234,27 +222,9 @@ fn parse_line(line: &str) -> (String, String) {
     }
 }
 
-/// Bytes of a NUL-terminated C string (empty for NULL).
-unsafe fn cbytes(p: *const c_char) -> Vec<u8> {
-    if p.is_null() {
-        Vec::new()
-    } else {
-        CStr::from_ptr(p).to_bytes().to_vec()
-    }
-}
-
-/// Everything up to the first `?` (log the path, never the query string).
-fn strip_query(uri: &[u8]) -> Vec<u8> {
-    match uri.iter().position(|&b| b == b'?') {
-        Some(i) => uri[..i].to_vec(),
-        None => uri.to_vec(),
-    }
-}
-
-/// Best-effort client IP from the SAPI environment.
-unsafe fn remote_addr() -> Vec<u8> {
-    let key = b"REMOTE_ADDR\0";
-    let p = sys::sapi_getenv(key.as_ptr() as _, key.len() - 1);
+/// Bytes of a NUL-terminated C string (empty for NULL). Shared with
+/// `module::maybe_begin` for building the request metadata.
+pub(crate) unsafe fn cbytes(p: *const c_char) -> Vec<u8> {
     if p.is_null() {
         Vec::new()
     } else {

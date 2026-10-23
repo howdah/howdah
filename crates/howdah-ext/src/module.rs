@@ -5,11 +5,14 @@
 
 use std::ffi::{c_char, c_int, c_uint, c_void, CStr, CString};
 use std::mem::size_of;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
 use howdah_core::ffi as core;
 use howdah_sys as sys;
 
+use crate::feeder;
+use crate::input_filter;
 use crate::response;
 use crate::rfc1867;
 
@@ -20,6 +23,24 @@ pub(crate) type Prior =
 // ---- process-global state (NTS: no concurrent access) -----------------------
 pub(crate) static mut CTX: *mut core::howdah_ctx = ptr::null_mut();
 pub(crate) static mut PRIOR: Prior = None;
+/// The prior `sapi_module.input_filter` (PHP's own var filter, or another
+/// extension's). Saved at MINIT, chained by `input_filter::filter`, restored at
+/// MSHUTDOWN.
+pub(crate) static mut PRIOR_INPUT_FILTER: input_filter::InputFilter = None;
+/// Unified per-request lifecycle (NTS: process-global, no concurrency, like
+/// `FEEDER`/`BLOCKED`). The first glue hook to fire in a request (multipart
+/// START or the input_filter — which runs before RINIT) begins the core
+/// request via `maybe_begin`; RSHUTDOWN ends it. `ENDED` guards against the
+/// multipart END path and RSHUTDOWN both ending the same request.
+pub(crate) static mut BEGUN: bool = false;
+pub(crate) static mut ENDED: bool = false;
+/// True once the multipart (rfc1867) path has begun this request. The input
+/// filter then skips `PARSE_POST` variables (they ARE the multipart fields,
+/// already counted by the part limits — double-counting them would both
+/// mis-attribute a flood and diverge from 0.1), and RSHUTDOWN leaves the
+/// (real, frame-fed) multipart state to its own truncation detection rather
+/// than force-closing it. GET/COOKIE on a multipart request are still counted.
+pub(crate) static mut MULTIPART: bool = false;
 /// Log destination file; `None` => stderr fallback.
 pub(crate) static mut LOG_PATH: Option<CString> = None;
 static mut MODULE_NUMBER: c_int = 0;
@@ -84,6 +105,7 @@ pub unsafe extern "C" fn get_module() -> *mut sys::zend_module_entry {
         name: NAME.as_ptr() as *const c_char,
         module_startup_func: Some(minit),
         module_shutdown_func: Some(mshutdown),
+        request_shutdown_func: Some(rshutdown),
         info_func: Some(minfo),
         version: VERSION.as_ptr() as *const c_char,
         type_: 1, // MODULE_PERSISTENT
@@ -93,6 +115,107 @@ pub unsafe extern "C" fn get_module() -> *mut sys::zend_module_entry {
     let slot = ptr::addr_of_mut!(MODULE);
     slot.write(m);
     slot
+}
+
+// ---- unified per-request lifecycle -----------------------------------------
+
+/// Open the core request exactly once per PHP request, regardless of which glue
+/// hook fires first (the multipart START, or the input_filter which runs before
+/// RINIT). Builds the RequestMeta from the SAPI globals with our fixed internal
+/// boundary. Idempotent: later callers in the same request see `BEGUN` and skip,
+/// so the multipart and input paths share one ctx / request id. `BEGUN` is
+/// cleared in RSHUTDOWN (never in RINIT — the input_filter fires before RINIT,
+/// so resetting there would erase counts; see the Task-1 findings).
+///
+/// # Safety
+/// Called from the glue hooks during an active request; `CTX` is live.
+pub(crate) unsafe fn maybe_begin() {
+    if *ptr::addr_of!(BEGUN) {
+        return;
+    }
+    let ri = (*ptr::addr_of!(sys::sapi_globals)).request_info;
+    let method = rfc1867::cbytes(ri.request_method);
+    let uri_full = rfc1867::cbytes(ri.request_uri);
+    let uri = strip_query(&uri_full); // path only: query strings can carry secrets
+    let ip = remote_addr();
+
+    let meta = core::RequestMeta {
+        client_ip: ip.as_ptr() as *const c_char,
+        client_ip_len: ip.len(),
+        method: method.as_ptr() as *const c_char,
+        method_len: method.len(),
+        uri: uri.as_ptr() as *const c_char,
+        uri_len: uri.len(),
+    };
+    core::howdah_request_begin(
+        CTX,
+        feeder::INTERNAL_BOUNDARY.as_ptr() as *const c_char,
+        feeder::INTERNAL_BOUNDARY.len(),
+        &meta,
+    );
+    // ip/method/uri outlive this call's request_begin, which copies them.
+    BEGUN = true;
+}
+
+/// Request shutdown (RSHUTDOWN): the unified end-of-request. Runs after every
+/// request. If the request was begun (by either glue hook) and NOT already
+/// ended by the multipart END path, end the core request, write any pending log
+/// line, and — if the input path latched a block (or the core's final verdict
+/// is Block) — emit the block response. We do NOT `zend_bailout` here: the
+/// input_filter already dropped the offending variables (the real DoS
+/// mitigation), and by RSHUTDOWN the script has run, so this response/status is
+/// best-effort. Always reset the lifecycle flags + input latch for the next
+/// request.
+///
+/// # Safety
+/// Called by PHP once per request at shutdown.
+unsafe extern "C" fn rshutdown(_type: c_int, _module_number: c_int) -> c_int {
+    if *ptr::addr_of!(BEGUN) && !*ptr::addr_of!(ENDED) {
+        // Input-only request (no multipart body): close the synthetic multipart
+        // state cleanly so request_end's truncation check does not false-positive
+        // on a never-fed state. Mirrors rfc1867::end_request's closing feed. A
+        // real multipart request reaches RSHUTDOWN unended only on a hard abort;
+        // leave its partially-fed state to genuine truncation detection.
+        if !*ptr::addr_of!(MULTIPART) {
+            let closing = feeder::Feeder::new().closing();
+            core::howdah_feed(CTX, closing.as_ptr() as *const c_char, closing.len());
+        }
+        let end_action = core::howdah_request_end(CTX);
+        let line = rfc1867::take_log_line();
+        if let Some(l) = line.as_deref() {
+            response::write_log_line(l);
+        }
+        if *ptr::addr_of!(input_filter::INPUT_BLOCKED) || end_action == core::HOWDAH_BLOCK {
+            let (rule, request_id) = line.as_deref().map(rfc1867::parse_line).unwrap_or_default();
+            let status = if rule.is_empty() { 403 } else { response::status_for_rule(&rule) };
+            // Best-effort: headers may already be sent; emit_block never bails.
+            let _ = catch_unwind(AssertUnwindSafe(|| response::emit_block(status, &request_id)));
+        }
+    }
+    BEGUN = false;
+    ENDED = false;
+    MULTIPART = false;
+    input_filter::INPUT_BLOCKED = false;
+    SUCCESS
+}
+
+/// Everything up to the first `?` (log the path, never the query string).
+fn strip_query(uri: &[u8]) -> Vec<u8> {
+    match uri.iter().position(|&b| b == b'?') {
+        Some(i) => uri[..i].to_vec(),
+        None => uri.to_vec(),
+    }
+}
+
+/// Best-effort client IP from the SAPI environment.
+unsafe fn remote_addr() -> Vec<u8> {
+    let key = b"REMOTE_ADDR\0";
+    let p = sys::sapi_getenv(key.as_ptr() as _, key.len() - 1);
+    if p.is_null() {
+        Vec::new()
+    } else {
+        CStr::from_ptr(p).to_bytes().to_vec()
+    }
 }
 
 // ---- ini entries ------------------------------------------------------------
@@ -276,6 +399,13 @@ unsafe extern "C" fn minit(_type: c_int, module_number: c_int) -> c_int {
     let slot = ptr::addr_of_mut!(sys::php_rfc1867_callback);
     slot.write(Some(rfc1867::callback));
 
+    // Chain the input_filter the same way: save the current filter (PHP's own,
+    // or another extension's) and install ours above it. Ours counts
+    // GET/POST/COOKIE variables through the core, then always chains the prior
+    // filter and returns its verdict (so PHP's filtering is unaffected).
+    PRIOR_INPUT_FILTER = (*ptr::addr_of!(sys::sapi_module)).input_filter;
+    (*ptr::addr_of_mut!(sys::sapi_module)).input_filter = Some(input_filter::filter);
+
     SUCCESS
 }
 
@@ -293,6 +423,9 @@ unsafe extern "C" fn mshutdown(_type: c_int, _module_number: c_int) -> c_int {
     let slot = ptr::addr_of_mut!(sys::php_rfc1867_callback);
     slot.write(PRIOR);
     PRIOR = None;
+    // Restore the prior input_filter.
+    (*ptr::addr_of_mut!(sys::sapi_module)).input_filter = PRIOR_INPUT_FILTER;
+    PRIOR_INPUT_FILTER = None;
     core::howdah_free(CTX);
     CTX = ptr::null_mut();
     sys::zend_unregister_ini_entries(MODULE_NUMBER);

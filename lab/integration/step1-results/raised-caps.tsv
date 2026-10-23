@@ -1,0 +1,17 @@
+phpver	label	def	kind	count	bodybytes	http	seen_n	hwm0kb	hwm1kb	rule	action
+8.4.27	raised_base_field	0	field	20000	1208902	200	20000	28556	35676	none	none
+8.4.27	raised_base_field	0	field	50000	3038902	200	50000	28476	39292	none	none
+8.4.27	raised_base_field	0	field	90000	5478902	200	90000	28532	52036	none	none
+8.4.27	raised_base_file	0	file	20000	1657792	200	20000	28528	52540	none	none
+8.4.27	raised_base_file	0	file	50000	4177792	200	50000	28480	83148	none	none
+8.4.27	raised_base_file	0	file	90000	7537792	200	90000	28608	127080	none	none
+8.4.27	raised_def_field	1	field	90000	5478902	403	NA	29164	52708	max_parts	block
+8.4.27	raised_def_file	1	file	90000	7537792	403	NA	29196	36316	max_files	block
+5.6.40	raised_base_field	0	field	20000	1208902	200	20000	19396	27312	none	none
+5.6.40	raised_base_field	0	field	50000	3038902	200	50000	19468	39036	none	none
+5.6.40	raised_base_field	0	field	90000	5478902	200	90000	19664	55484	none	none
+5.6.40	raised_base_file	0	file	20000	1657792	200	20000	19692	53588	none	none
+5.6.40	raised_base_file	0	file	50000	4177792	200	50000	19688	104912	none	none
+5.6.40	raised_base_file	0	file	90000	7537792	200	90000	19540	173632	none	none
+5.6.40	raised_def_field	1	field	90000	5478902	403	NA	20320	56104	max_parts	block
+5.6.40	raised_def_file	1	file	90000	7537792	403	NA	20044	27796	max_files	block

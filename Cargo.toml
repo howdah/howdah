@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["crates/howdah-core", "crates/howdah-sys", "crates/howdah-ext"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+# REQUIRED: the FFI boundary relies on catch_unwind; panic="abort" would void it.
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"

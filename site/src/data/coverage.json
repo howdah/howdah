@@ -1,0 +1,325 @@
+{
+  "generated": "2026-10-23T02:10:17Z",
+  "source": "lab/integration/matrix-results.tsv",
+  "totals": {
+    "pass": 182,
+    "fail": 0,
+    "skip": 7
+  },
+  "corpusFalsePositives": 0,
+  "rows": [
+    {
+      "minor": "5.4",
+      "version": "5.4.16",
+      "status": "run",
+      "sapis": {
+        "cli": {
+          "state": "pass",
+          "pass": 14,
+          "fail": 0,
+          "skip": 0,
+          "total": 14,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        },
+        "fpm": {
+          "state": "skip",
+          "pass": 0,
+          "fail": 0,
+          "skip": 7,
+          "total": 7,
+          "files": "SKIP",
+          "fields": "SKIP",
+          "note": "php-fpm/cgi-fcgi unavailable"
+        },
+        "apache": {
+          "state": "none",
+          "pass": 0,
+          "fail": 0,
+          "skip": 0,
+          "total": 0,
+          "note": "no php:5.4-apache image (PHP 5.4 predates official images); real-world 5.4 is mod_php under CentOS 7 httpd"
+        }
+      },
+      "tested": [
+        "cli"
+      ]
+    },
+    {
+      "minor": "5.5",
+      "version": null,
+      "status": "not-run",
+      "why": "Not tested yet: no test image could be built for 5.5.",
+      "sapis": {},
+      "tested": []
+    },
+    {
+      "minor": "5.6",
+      "version": "5.6.40",
+      "status": "run",
+      "sapis": {
+        "cli": {
+          "state": "pass",
+          "pass": 14,
+          "fail": 0,
+          "skip": 0,
+          "total": 14,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        },
+        "fpm": {
+          "state": "pass",
+          "pass": 14,
+          "fail": 0,
+          "skip": 0,
+          "total": 14,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        },
+        "apache": {
+          "state": "none",
+          "pass": 0,
+          "fail": 0,
+          "skip": 0,
+          "total": 0,
+          "note": "apache mod_php not run this pass (fpm already exercises the non-CLI SAPI; mechanical repeat of 7.4/8.1)"
+        }
+      },
+      "tested": [
+        "cli",
+        "fpm"
+      ]
+    },
+    {
+      "minor": "7.0",
+      "version": null,
+      "status": "not-run",
+      "why": "Not tested yet: no test environment built.",
+      "sapis": {},
+      "tested": []
+    },
+    {
+      "minor": "7.1",
+      "version": null,
+      "status": "not-run",
+      "why": "Not tested yet: no test environment built.",
+      "sapis": {},
+      "tested": []
+    },
+    {
+      "minor": "7.2",
+      "version": null,
+      "status": "not-run",
+      "why": "Not tested yet: no test environment built.",
+      "sapis": {},
+      "tested": []
+    },
+    {
+      "minor": "7.3",
+      "version": "7.3.33",
+      "status": "run",
+      "sapis": {
+        "cli": {
+          "state": "pass",
+          "pass": 14,
+          "fail": 0,
+          "skip": 0,
+          "total": 14,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        },
+        "fpm": {
+          "state": "pass",
+          "pass": 14,
+          "fail": 0,
+          "skip": 0,
+          "total": 14,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        },
+        "apache": {
+          "state": "none",
+          "pass": 0,
+          "fail": 0,
+          "skip": 0,
+          "total": 0,
+          "note": "apache mod_php not run this pass (fpm already exercises the non-CLI SAPI; mechanical repeat of 7.4/8.1)"
+        }
+      },
+      "tested": [
+        "cli",
+        "fpm"
+      ]
+    },
+    {
+      "minor": "7.4",
+      "version": "7.4.33",
+      "status": "run",
+      "sapis": {
+        "cli": {
+          "state": "pass",
+          "pass": 14,
+          "fail": 0,
+          "skip": 0,
+          "total": 14,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        },
+        "fpm": {
+          "state": "pass",
+          "pass": 14,
+          "fail": 0,
+          "skip": 0,
+          "total": 14,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        },
+        "apache": {
+          "state": "pass",
+          "pass": 14,
+          "fail": 0,
+          "skip": 0,
+          "total": 14,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        }
+      },
+      "tested": [
+        "cli",
+        "fpm",
+        "apache"
+      ]
+    },
+    {
+      "minor": "8.0",
+      "version": null,
+      "status": "not-run",
+      "why": "Not tested yet: no test environment built.",
+      "sapis": {},
+      "tested": []
+    },
+    {
+      "minor": "8.1",
+      "version": "8.1.34",
+      "status": "run",
+      "sapis": {
+        "cli": {
+          "state": "pass",
+          "pass": 14,
+          "fail": 0,
+          "skip": 0,
+          "total": 14,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        },
+        "fpm": {
+          "state": "pass",
+          "pass": 14,
+          "fail": 0,
+          "skip": 0,
+          "total": 14,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        },
+        "apache": {
+          "state": "pass",
+          "pass": 14,
+          "fail": 0,
+          "skip": 0,
+          "total": 14,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        }
+      },
+      "tested": [
+        "cli",
+        "fpm",
+        "apache"
+      ]
+    },
+    {
+      "minor": "8.2",
+      "version": null,
+      "status": "not-run",
+      "why": "Not tested yet: no test environment built.",
+      "sapis": {},
+      "tested": []
+    },
+    {
+      "minor": "8.3",
+      "version": null,
+      "status": "not-run",
+      "why": "Not tested yet: no test environment built.",
+      "sapis": {},
+      "tested": []
+    },
+    {
+      "minor": "8.4",
+      "version": "8.4.27",
+      "status": "run",
+      "sapis": {
+        "cli": {
+          "state": "pass",
+          "pass": 14,
+          "fail": 0,
+          "skip": 0,
+          "total": 14,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        },
+        "fpm": {
+          "state": "pass",
+          "pass": 14,
+          "fail": 0,
+          "skip": 0,
+          "total": 14,
+          "files": "PASS",
+          "fields": "PASS",
+          "note": ""
+        },
+        "apache": {
+          "state": "none",
+          "pass": 0,
+          "fail": 0,
+          "skip": 0,
+          "total": 0,
+          "note": "apache mod_php not run this pass (fpm already exercises the non-CLI SAPI; mechanical repeat of 7.4/8.1)"
+        }
+      },
+      "tested": [
+        "cli",
+        "fpm"
+      ]
+    },
+    {
+      "minor": "8.5",
+      "version": null,
+      "status": "not-run",
+      "why": "Not tested yet: no test environment built.",
+      "sapis": {},
+      "tested": []
+    }
+  ],
+  "notRunMinors": [
+    "5.5",
+    "7.0",
+    "7.1",
+    "7.2",
+    "8.0",
+    "8.2",
+    "8.3",
+    "8.5"
+  ]
+}

@@ -1,0 +1,418 @@
+#!/bin/sh
+# howdah-check - read-only helper for installing/verifying Howdah.
+#
+#   howdah-check detect     list every PHP install on this box
+#   howdah-check web <url>  EICAR-style self-test over HTTP (see cmd_web)
+#
+# For each install, detect prints: version, PHP API number, NTS/ZTS,
+# extension_dir, the SAPIs present (cli/fpm/apache) and whether the `howdah`
+# extension is loaded in each. It NEVER modifies anything: it only runs
+# `php -v/-i/-m`, `php-fpm -m`, `php-config`, and reads config files.
+#
+# POSIX sh only (dash/ash/old bash; CentOS 7, Ubuntu 16.04, busybox). Every
+# probe degrades gracefully: a missing/failed probe prints "unknown" for that
+# field and never aborts the run.
+#
+# Env: HOWDAH_CHECK_ROOT  prefix prepended to the fixed discovery paths (tests).
+
+PROG=howdah-check
+ROOT=${HOWDAH_CHECK_ROOT:-}
+NL='
+'
+
+say() { printf '%s\n' "$*"; }
+
+usage() {
+  say "usage: $PROG detect | web <url>" >&2
+  say "  detect   find every PHP install and report what Howdah needs (read-only)" >&2
+  say "  web URL  send two harmless self-test requests; confirms Howdah is live in the web SAPI" >&2
+}
+
+# --- small helpers ----------------------------------------------------------
+
+# run a command with a timeout when one is available (never hang the run)
+HAVE_TMO=0
+if command -v timeout >/dev/null 2>&1 && timeout 1 true >/dev/null 2>&1; then HAVE_TMO=1; fi
+tmo() {
+  if [ "$HAVE_TMO" = 1 ]; then
+    timeout 15 "$@"
+  else
+    "$@"
+  fi
+}
+
+realp() {
+  _r=$(readlink -f "$1" 2>/dev/null)
+  if [ -n "$_r" ]; then printf '%s\n' "$_r"; else printf '%s\n' "$1"; fi
+}
+
+# "7.4.33-1+ubuntu" -> 7.4
+mm_of() { printf '%s\n' "$1" | sed -n 's/^\([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p'; }
+
+# is there an *active* extension=howdah line in any of the given files?
+ini_has_howdah() {
+  for _f in "$@"; do
+    [ -f "$_f" ] || continue
+    if grep -Eq '^[[:space:]]*(zend_)?extension[[:space:]]*=[[:space:]]*["'"'"']?([^"'"'"';]*/)?howdah(\.so)?["'"'"']?[[:space:]]*(;.*)?$' "$_f" 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# scan a SAPI config dir (php.ini + conf.d/*.ini + php.d/*.ini): loaded|not-loaded|unknown
+scan_dir_state() {
+  _d=$1
+  [ -d "$_d" ] || { echo unknown; return; }
+  if ini_has_howdah "$_d"/php.ini "$_d"/conf.d/*.ini "$_d"/php.d/*.ini ${2:+"$2"}; then
+    echo loaded
+  else
+    echo not-loaded
+  fi
+}
+
+# --- candidate discovery ----------------------------------------------------
+
+CANDS=""     # newline-separated php binaries
+CONFIGS=""   # newline-separated php-config binaries
+
+is_php_name() {
+  case "$1" in
+    *config*|*fpm*|*cgi*|*dbg*|*ize*) return 1 ;;
+    php|php[0-9]*|php-[0-9]*) return 0 ;;
+  esac
+  return 1
+}
+
+add_cand() {
+  [ -f "$1" ] && [ -x "$1" ] || return 0
+  is_php_name "$(basename "$1")" || return 0
+  CANDS="$CANDS$1$NL"
+}
+
+add_config() {
+  [ -f "$1" ] && [ -x "$1" ] || return 0
+  case "$(basename "$1")" in php-config*) CONFIGS="$CONFIGS$1$NL" ;; esac
+}
+
+discover() {
+  # 1. PATH
+  _oifs=$IFS; IFS=:
+  for _d in $PATH; do
+    IFS=$_oifs
+    if [ -n "$_d" ]; then
+      for _f in "$_d"/php "$_d"/php[0-9]* "$_d"/php-[0-9]*; do add_cand "$_f"; done
+      for _f in "$_d"/php-config*; do add_config "$_f"; done
+    fi
+    IFS=:
+  done
+  IFS=$_oifs
+
+  # 2. well-known fixed layouts (distro, Remi, cPanel EA, CloudLinux alt, Plesk, /opt)
+  for _f in \
+    "$ROOT"/usr/bin/php "$ROOT"/usr/bin/php[0-9]* "$ROOT"/usr/local/bin/php "$ROOT"/usr/local/bin/php[0-9]* \
+    "$ROOT"/usr/local/php*/bin/php "$ROOT"/opt/php*/bin/php "$ROOT"/opt/php*/usr/bin/php \
+    "$ROOT"/opt/remi/php*/root/usr/bin/php "$ROOT"/opt/cpanel/ea-php*/root/usr/bin/php \
+    "$ROOT"/opt/alt/php*/usr/bin/php "$ROOT"/opt/plesk/php/*/bin/php \
+    "$ROOT"/usr/local/lsws/lsphp*/bin/php
+  do add_cand "$_f"; done
+  for _f in \
+    "$ROOT"/usr/bin/php-config* "$ROOT"/usr/local/bin/php-config* "$ROOT"/opt/php*/bin/php-config* \
+    "$ROOT"/opt/remi/php*/root/usr/bin/php-config "$ROOT"/opt/cpanel/ea-php*/root/usr/bin/php-config \
+    "$ROOT"/opt/alt/php*/usr/bin/php-config "$ROOT"/opt/plesk/php/*/bin/php-config
+  do add_config "$_f"; done
+
+  # 3. whatever php-config says the binary is
+  _oifs=$IFS; IFS=$NL
+  for _c in $CONFIGS; do
+    IFS=$_oifs
+    _b=$(tmo "$_c" --php-binary 2>/dev/null | head -1)
+    [ -n "$_b" ] && add_cand "$_b"
+    IFS=$NL
+  done
+  IFS=$_oifs
+}
+
+# --- per-install probing ----------------------------------------------------
+
+SEEN_REAL=""
+SEEN_MM=""
+FOUND=0
+
+# $1=php binary $2=MAJ.MIN -> prints the matching php-fpm path, or nothing
+find_fpm() {
+  _bd=$(dirname "$1")
+  _fm=$2
+  [ -n "$_fm" ] || return 0
+  for _p in "$ROOT/usr/sbin/php-fpm$_fm" "$_bd/php-fpm" "$_bd/../sbin/php-fpm" "$_bd/../../sbin/php-fpm" \
+            "$ROOT/usr/sbin/php-fpm"; do
+    [ -f "$_p" ] && [ -x "$_p" ] || continue
+    # a version-named php-fpm is trusted; EVERY unversioned one must report the same MAJ.MIN
+    case "$_p" in
+      */php-fpm"$_fm") ;;
+      *)
+        _fv=$(tmo "$_p" -v 2>/dev/null | sed -n '/^PHP [0-9]/{s/^PHP \([0-9][0-9.]*\).*/\1/p;q;}')
+        [ "$(mm_of "$_fv")" = "$_fm" ] || continue ;;
+    esac
+    printf '%s\n' "$_p"
+    return 0
+  done
+}
+
+# $1=MAJ.MIN $2=MMnodot $3=php binary -> prints a mod_php path, or nothing
+find_apache() {
+  [ -n "$1" ] || return 0
+  # version-named modules in the shared system dirs (never a bare libphp*.so glob there)
+  for _p in \
+    "$ROOT/usr/lib/apache2/modules/libphp$1.so" "$ROOT/usr/lib64/httpd/modules/libphp$1.so" \
+    "$ROOT/usr/lib/httpd/modules/libphp$1.so" "$ROOT/usr/lib64/apache2/modules/libphp$1.so" \
+    "$ROOT/opt/cpanel/ea-php$2/root/usr/lib64/httpd/modules/libphp"*.so
+  do
+    [ -f "$_p" ] && { printf '%s\n' "$_p"; return 0; }
+  done
+  # a private prefix (/opt/phpNN/...) owns any libphp*.so under it; /usr and /usr/local do not
+  _pre=$(realp "$(dirname "$3")/..")
+  case "$_pre" in
+    /|/usr|/usr/local|"$ROOT"|"$ROOT/usr"|"$ROOT/usr/local") return 0 ;;
+  esac
+  for _p in "$_pre"/lib64/httpd/modules/libphp*.so "$_pre"/lib/httpd/modules/libphp*.so \
+            "$_pre"/lib/apache2/modules/libphp*.so "$_pre"/usr/lib64/httpd/modules/libphp*.so; do
+    [ -f "$_p" ] && { printf '%s\n' "$_p"; return 0; }
+  done
+}
+
+report_install() {
+  _bin=$1
+  _real=$(realp "$_bin")
+  case "$SEEN_REAL" in *"$NL$_real$NL"*|"$_real$NL"*) return 0 ;; esac
+
+  # find the banner anywhere in the output (startup warnings may precede it)
+  _vline=$(tmo "$_bin" -v 2>/dev/null | sed -n '/^PHP [0-9]/{p;q;}')
+  _info=$(tmo "$_bin" -i 2>/dev/null)
+  if [ -z "$_vline" ]; then
+    # No banner: still an install if it demonstrably runs as PHP. Never omit one silently.
+    case "$_info" in
+      *"PHP Version =>"*) ;;
+      *) tmo "$_bin" -m 2>/dev/null | grep -q '^\[PHP Modules\]' || return 0 ;;
+    esac
+  fi
+  SEEN_REAL="$SEEN_REAL$_real$NL"
+  FOUND=$((FOUND + 1))
+
+  _ver=$(printf '%s\n' "$_info" | sed -n 's/^PHP Version => \(.*[^ ]\) *$/\1/p' | head -1)
+  [ -n "$_ver" ] || _ver=$(printf '%s\n' "$_vline" | sed -n 's/^PHP \([^ ]*\).*/\1/p')
+  _api=$(printf '%s\n' "$_info" | sed -n 's/^PHP API => \([0-9][0-9]*\).*/\1/p' | head -1)
+  _ts=$(printf '%s\n' "$_info" | sed -n 's/^Thread Safety => \([a-z]*\).*/\1/p' | head -1)
+  _ext=$(printf '%s\n' "$_info" | sed -n 's/^extension_dir => \([^ ][^=]*[^ =]\) *=>.*/\1/p' | head -1)
+  [ -n "$_ext" ] || _ext=$(printf '%s\n' "$_info" | sed -n 's/^extension_dir => \([^ ][^=]*[^ =]\) *$/\1/p' | head -1)
+  _ini=$(printf '%s\n' "$_info" | sed -n 's/^Loaded Configuration File => \(.*[^ ]\) *$/\1/p' | head -1)
+  _scan=$(printf '%s\n' "$_info" | sed -n 's/^Scan this dir for additional \.ini files => \(.*[^ ]\) *$/\1/p' | head -1)
+
+  _mm=$(mm_of "$_ver")
+  _mmn=$(printf '%s' "$_mm" | tr -d .)
+
+  # fallback 1: the sibling php-config
+  _pc=""
+  for _c in "$(dirname "$_bin")/php-config" "$(dirname "$_bin")/php-config$_mm"; do
+    [ -x "$_c" ] && { _pc=$_c; break; }
+  done
+  if [ -n "$_pc" ]; then
+    [ -n "$_ext" ] || _ext=$(tmo "$_pc" --extension-dir 2>/dev/null | head -1)
+  fi
+  # fallback 2: the extension_dir suffix, e.g. .../no-debug-non-zts-20190902 or .../20190902
+  if [ -z "$_api" ] && [ -n "$_ext" ]; then
+    _api=$(printf '%s\n' "$_ext" | sed -n 's/.*[^0-9]\([0-9]\{8\}\)[^0-9]*$/\1/p')
+  fi
+  if [ -z "$_ts" ]; then
+    case "$_ext" in
+      *non-zts*) _ts=disabled ;;
+      *zts*) _ts=enabled ;;
+    esac
+  fi
+  case "$_ts" in
+    disabled) _tsl=NTS ;;
+    enabled) _tsl=ZTS ;;
+    *) _tsl=unknown ;;
+  esac
+
+  say "php: $_bin"
+  [ "$_real" = "$_bin" ] || say "  realpath: $_real"
+  say "  version: ${_ver:-unknown}"
+  say "  api: ${_api:-unknown}"
+  say "  thread_safety: $_tsl"
+  say "  extension_dir: ${_ext:-unknown}"
+  say "  php_ini: ${_ini:-(none)}"
+  if [ -n "$_scan" ] && [ "$_scan" != "(none)" ]; then say "  ini_scan_dir: $_scan"; fi
+
+  # --- cli: ask PHP itself
+  if tmo "$_bin" -m 2>/dev/null | grep -qix howdah; then _cs=loaded
+  elif tmo "$_bin" -m >/dev/null 2>&1; then _cs=not-loaded
+  else _cs=unknown; fi
+  say "  sapi cli: present  howdah=$_cs"
+
+  # --- fpm: ask php-fpm -m, else scan its config dir
+  _fpm=$(find_fpm "$_bin" "$_mm")
+  # Debian /etc/php/<ver>/* belongs only to the distro binary /usr/bin/php<ver>,
+  # not to a custom build that merely shares MAJ.MIN.
+  _debdir=""
+  if [ -n "$_mm" ] && [ "$_real" = "$(realp "$ROOT/usr/bin/php$_mm")" ] && [ -d "$ROOT/etc/php/$_mm" ]; then
+    _debdir="$ROOT/etc/php/$_mm"
+    SEEN_MM="$SEEN_MM $_mm "   # only the distro binary accounts for /etc/php/<ver>
+  fi
+  _fdir=""
+  if [ -n "$_mmn" ]; then
+    for _d in ${_debdir:+"$_debdir/fpm"} "$ROOT/etc/opt/remi/php$_mmn" "$ROOT/opt/cpanel/ea-php$_mmn/root/etc" \
+              "$ROOT/opt/alt/php$_mmn/etc"; do
+      [ -d "$_d" ] && { _fdir=$_d; break; }
+    done
+  fi
+  if [ -n "$_fpm" ]; then
+    if tmo "$_fpm" -m 2>/dev/null | grep -qix howdah; then _fs=loaded
+    elif tmo "$_fpm" -m >/dev/null 2>&1; then _fs=not-loaded
+    elif [ -n "$_fdir" ]; then _fs=$(scan_dir_state "$_fdir")
+    else _fs=unknown; fi
+    say "  sapi fpm: present ($_fpm)  howdah=$_fs"
+  elif [ -n "$_debdir" ] && [ -d "$_debdir/fpm" ]; then
+    say "  sapi fpm: present (config only: $_debdir/fpm)  howdah=$(scan_dir_state "$_debdir/fpm")"
+  else
+    say "  sapi fpm: absent"
+  fi
+
+  # --- apache (mod_php): not runnable, so config files are scanned
+  _ap=$(find_apache "$_mm" "$_mmn" "$_bin")
+  if [ -n "$_debdir" ] && [ -d "$_debdir/apache2" ]; then
+    # Debian: scan apache2's own php.ini + conf.d (contents, not mere directory existence)
+    say "  sapi apache: present ($_debdir/apache2)  howdah=$(scan_dir_state "$_debdir/apache2")"
+  elif [ -n "$_ap" ]; then
+    # non-Debian: assume mod_php reads the CLI's main php.ini + scan dir; unknown if neither is known
+    _as=unknown
+    _sd=""
+    if [ -n "$_scan" ] && [ "$_scan" != "(none)" ]; then _sd=$_scan; fi
+    if [ -n "$_sd" ] || { [ -n "$_ini" ] && [ "$_ini" != "(none)" ]; }; then
+      if ini_has_howdah ${_ini:+"$_ini"} ${_sd:+"$_sd"/*.ini}; then _as=loaded; else _as=not-loaded; fi
+    fi
+    say "  sapi apache: present ($_ap)  howdah=$_as"
+  else
+    say "  sapi apache: absent"
+  fi
+}
+
+# Debian-style /etc/php/<ver> dirs whose version had no runnable binary
+report_config_only() {
+  for _d in "$ROOT"/etc/php/[0-9]*; do
+    [ -d "$_d" ] || continue
+    _v=$(basename "$_d")
+    case "$SEEN_MM" in *" $_v "*) continue ;; esac
+    FOUND=$((FOUND + 1))
+    say "php: (no runnable binary found)"
+    say "  version: $_v (from $_d)"
+    say "  api: unknown"
+    say "  thread_safety: unknown"
+    say "  extension_dir: unknown"
+    for _s in cli fpm apache2; do
+      _n=$_s; [ "$_s" = apache2 ] && _n=apache
+      if [ -d "$_d/$_s" ]; then
+        say "  sapi $_n: present (config only)  howdah=$(scan_dir_state "$_d/$_s")"
+      else
+        say "  sapi $_n: absent"
+      fi
+    done
+  done
+}
+
+cmd_detect() {
+  discover
+  _oifs=$IFS; IFS=$NL
+  for _b in $CANDS; do
+    IFS=$_oifs
+    [ -n "$_b" ] && report_install "$_b"
+    IFS=$NL
+  done
+  IFS=$_oifs
+  report_config_only
+  if [ "$FOUND" -eq 0 ]; then
+    say "no PHP installs found"
+  else
+    say "found $FOUND PHP install(s)"
+  fi
+  return 0
+}
+
+# --- web self-test -----------------------------------------------------------
+# Sends two HARMLESS requests (HTTP only; nothing on this box is touched):
+#   1. a multipart body carrying the fixed marker field `__howdah_selftest__`
+#      -> Howdah logs a self_test event and adds `X-Howdah-Selftest: <id>`
+#      -> reported "flagged"
+#   2. a multipart body of HOWDAH_CHECK_PARTS (default 2001, one over Howdah's
+#      default max_parts of 2000) EMPTY fields: structure only, no payload
+#      -> a critical limit, always blocked (403/413) -> reported "BLOCKED"
+# If PHP's max_input_vars / max_file_uploads (or a raised Howdah limit) stops
+# parsing before the limit is crossed, result 2 can read "not blocked": raise
+# HOWDAH_CHECK_PARTS. HOWDAH_CHECK_INSECURE=1 passes -k to curl (self-signed).
+cmd_web() {
+  _url=${1:-}
+  [ -n "$_url" ] || { usage; exit 2; }
+  command -v curl >/dev/null 2>&1 || { say "$PROG: web needs curl" >&2; exit 2; }
+  _n=${HOWDAH_CHECK_PARTS:-2001}
+  case "$_n" in ''|*[!0-9]*) say "$PROG: HOWDAH_CHECK_PARTS must be a number" >&2; exit 2 ;; esac
+  _k=""; [ "${HOWDAH_CHECK_INSECURE:-0}" = 1 ] && _k="-k"
+  _t=$(mktemp -d 2>/dev/null) || { say "$PROG: cannot create temp dir" >&2; exit 2; }
+  # cmd_web writes only to its own mktemp dir (otherwise read-only); clean up
+  # on exit, and exit (not just clean up) on INT/TERM.
+  trap 'rm -rf "$_t"' EXIT
+  trap 'rm -rf "$_t"; exit 130' INT
+  trap 'rm -rf "$_t"; exit 143' TERM
+  _rc=0
+
+  # 1. self-test marker
+  _b=HowdahSelfTestB0
+  printf -- '--%s\r\nContent-Disposition: form-data; name="__howdah_selftest__"\r\n\r\n1\r\n--%s--\r\n' "$_b" "$_b" > "$_t/marker.bin"
+  _code=$(curl -s $_k -m 30 -o "$_t/m.body" -D "$_t/m.hdr" -w '%{http_code}' -X POST \
+    -H "Content-Type: multipart/form-data; boundary=$_b" --data-binary @"$_t/marker.bin" "$_url" 2>/dev/null) || _code=000
+  _id=$(tr -d '\r' < "$_t/m.hdr" 2>/dev/null | sed -n 's/^[Xx]-[Hh]owdah-[Ss]elftest:[[:space:]]*//p' | head -n 1)
+  if [ -n "$_id" ]; then
+    # The header proves Howdah is live whatever the app answered.
+    if [ "$_code" = 200 ]; then
+      say "selftest marker:   flagged  (HTTP $_code, request id $_id)"
+    else
+      say "selftest marker:   flagged  (HTTP $_code, request id $_id) [warning: app did not answer 200; Howdah is live regardless]"
+    fi
+  elif [ "$_code" = 000 ]; then
+    say "selftest marker:   NO RESPONSE from $_url"; _rc=1
+  else
+    say "selftest marker:   NOT flagged (HTTP $_code): Howdah is not active in this web SAPI (or mode=off)"; _rc=1
+  fi
+
+  # 2. just over the part limit: structure only, many empty fields
+  _b=HowdahLimitB0
+  _i=0
+  while [ "$_i" -lt "$_n" ]; do
+    printf -- '--%s\r\nContent-Disposition: form-data; name="p%s"\r\n\r\n\r\n' "$_b" "$_i"
+    _i=$((_i + 1))
+  done > "$_t/over.bin"
+  printf -- '--%s--\r\n' "$_b" >> "$_t/over.bin"
+  _code=$(curl -s $_k -m 60 -o "$_t/o.body" -w '%{http_code}' -X POST \
+    -H "Content-Type: multipart/form-data; boundary=$_b" --data-binary @"$_t/over.bin" "$_url" 2>/dev/null) || _code=000
+  _id=$(sed -n 's/^request_id:[[:space:]]*//p' "$_t/o.body" 2>/dev/null | tr -d '\r' | head -n 1)
+  case "$_code" in
+    403|413)
+      if grep -q 'Howdah blocked' "$_t/o.body" 2>/dev/null; then
+        say "over-limit parts:  BLOCKED  (HTTP $_code, request id ${_id:-unknown}, $_n parts)"
+      else
+        say "over-limit parts:  refused (HTTP $_code) but not by Howdah ($_n parts)"; _rc=1
+      fi ;;
+    000) say "over-limit parts:  NO RESPONSE from $_url"; _rc=1 ;;
+    *)   say "over-limit parts:  not blocked (HTTP $_code, $_n parts): Layer-1 limits not enforced here"; _rc=1 ;;
+  esac
+
+  if [ "$_rc" -eq 0 ]; then say "Howdah is active in the web SAPI at $_url"; fi
+  return "$_rc"
+}
+
+case "${1:-}" in
+  detect) cmd_detect ;;
+  web) shift; cmd_web "${1:-}"; exit $? ;;
+  "") usage; exit 2 ;;
+  -h|--help|help) usage ;;
+  *) say "$PROG: unknown command '$1'" >&2; usage; exit 2 ;;
+esac

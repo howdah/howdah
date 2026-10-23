@@ -1,0 +1,15 @@
+{
+  "name": "howdah-site",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "coverage": "node scripts/gen-coverage.mjs",
+    "dev": "astro dev",
+    "build": "node scripts/gen-coverage.mjs && astro build",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "astro": "^5.0.0"
+  }
+}

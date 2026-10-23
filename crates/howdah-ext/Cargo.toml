@@ -1,0 +1,29 @@
+[package]
+name = "howdah-ext"
+description = "The Howdah PHP extension: chains rfc1867, feeds the core, refuses abusive uploads"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# No default feature: a plain `cargo build` / `cargo test` builds the pure-Rust
+# parts only (the event->bytes reconstructor and its tests) and needs no PHP
+# headers. Enable exactly one phpN to build the loadable extension; it forwards
+# to the matching howdah-sys generation.
+php5 = ["howdah-sys/php5"]
+php7 = ["howdah-sys/php7"]
+php8 = ["howdah-sys/php8"]
+
+[dependencies]
+howdah-core = { path = "../howdah-core" }
+howdah-sys = { path = "../howdah-sys" }
+serde_json = "1"
+
+[lib]
+# cdylib: the loadable `howdah.so`. rlib: lets the pure-Rust reconstructor be
+# unit-tested on the host without PHP.
+crate-type = ["cdylib", "rlib"]
+
+# panic = "unwind" is inherited from the workspace profiles (both dev and
+# release set it). The core's catch_unwind safety is VOID under panic="abort",
+# so this crate must never be built with abort. See lib.rs `panic_unwinds`.

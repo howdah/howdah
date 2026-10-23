@@ -1,0 +1,205 @@
+## Howdah cross-version block matrix -- generated 2026-10-23T02:10:17Z
+## columns: phpver\tsapi\tscenario\tresult\tdetail
+5.4.16	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
+5.4.16	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
+5.4.16	cli	selftest	PASS	http=200 self_test logged
+5.4.16	cli	corpus_bare_lf_headers	PASS	http=200 no block
+5.4.16	cli	corpus_data_line_dashdash	PASS	http=200 no block
+5.4.16	cli	corpus_folded_headers	PASS	http=200 no block
+5.4.16	cli	corpus_gallery_upload	PASS	http=200 no block
+5.4.16	cli	corpus_nested_array	PASS	http=200 no block
+5.4.16	cli	corpus_non_form_data_disposition	PASS	http=200 no block
+5.4.16	cli	corpus_settings_form	PASS	http=200 no block
+5.4.16	cli	up_progress_on	PASS	http=403
+5.4.16	cli	up_progress_off	PASS	http=403
+5.4.16	cli	detect_standard	PASS	http=200 action=log
+5.4.16	cli	detect_critical	PASS	http=403
+5.4.16	fpm	shaped_block_files	SKIP	php-fpm/cgi-fcgi unavailable
+5.4.16	fpm	shaped_block_fields	SKIP	php-fpm/cgi-fcgi unavailable
+5.4.16	fpm	selftest	SKIP	php-fpm/cgi-fcgi unavailable
+5.4.16	fpm	up_progress_on	SKIP	php-fpm/cgi-fcgi unavailable
+5.4.16	fpm	up_progress_off	SKIP	php-fpm/cgi-fcgi unavailable
+5.4.16	fpm	detect_standard	SKIP	php-fpm/cgi-fcgi unavailable
+5.4.16	fpm	detect_critical	SKIP	php-fpm/cgi-fcgi unavailable
+5.6.40	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
+5.6.40	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
+5.6.40	cli	selftest	PASS	http=200 self_test logged
+5.6.40	cli	corpus_bare_lf_headers	PASS	http=200 no block
+5.6.40	cli	corpus_data_line_dashdash	PASS	http=200 no block
+5.6.40	cli	corpus_folded_headers	PASS	http=200 no block
+5.6.40	cli	corpus_gallery_upload	PASS	http=200 no block
+5.6.40	cli	corpus_nested_array	PASS	http=200 no block
+5.6.40	cli	corpus_non_form_data_disposition	PASS	http=200 no block
+5.6.40	cli	corpus_settings_form	PASS	http=200 no block
+5.6.40	cli	up_progress_on	PASS	http=403
+5.6.40	cli	up_progress_off	PASS	http=403
+5.6.40	cli	detect_standard	PASS	http=200 action=log
+5.6.40	cli	detect_critical	PASS	http=403
+5.6.40	fpm	shaped_block_files	PASS	http=403 rule=max_files ip=203.0.113.9
+5.6.40	fpm	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
+5.6.40	fpm	selftest	PASS	http=200
+5.6.40	fpm	corpus_bare_lf_headers	PASS	http=200 no block
+5.6.40	fpm	corpus_data_line_dashdash	PASS	http=200 no block
+5.6.40	fpm	corpus_folded_headers	PASS	http=200 no block
+5.6.40	fpm	corpus_gallery_upload	PASS	http=200 no block
+5.6.40	fpm	corpus_nested_array	PASS	http=200 no block
+5.6.40	fpm	corpus_non_form_data_disposition	PASS	http=200 no block
+5.6.40	fpm	corpus_settings_form	PASS	http=200 no block
+5.6.40	fpm	up_progress_on	PASS	http=403
+5.6.40	fpm	up_progress_off	PASS	http=403
+5.6.40	fpm	detect_standard	PASS	http=200 log
+5.6.40	fpm	detect_critical	PASS	http=403
+7.3.33	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
+7.3.33	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
+7.3.33	cli	selftest	PASS	http=200 self_test logged
+7.3.33	cli	corpus_bare_lf_headers	PASS	http=200 no block
+7.3.33	cli	corpus_data_line_dashdash	PASS	http=200 no block
+7.3.33	cli	corpus_folded_headers	PASS	http=200 no block
+7.3.33	cli	corpus_gallery_upload	PASS	http=200 no block
+7.3.33	cli	corpus_nested_array	PASS	http=200 no block
+7.3.33	cli	corpus_non_form_data_disposition	PASS	http=200 no block
+7.3.33	cli	corpus_settings_form	PASS	http=200 no block
+7.3.33	cli	up_progress_on	PASS	http=403
+7.3.33	cli	up_progress_off	PASS	http=403
+7.3.33	cli	detect_standard	PASS	http=200 action=log
+7.3.33	cli	detect_critical	PASS	http=403
+7.3.33	fpm	shaped_block_files	PASS	http=403 rule=max_files ip=203.0.113.9
+7.3.33	fpm	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
+7.3.33	fpm	selftest	PASS	http=200
+7.3.33	fpm	corpus_bare_lf_headers	PASS	http=200 no block
+7.3.33	fpm	corpus_data_line_dashdash	PASS	http=200 no block
+7.3.33	fpm	corpus_folded_headers	PASS	http=200 no block
+7.3.33	fpm	corpus_gallery_upload	PASS	http=200 no block
+7.3.33	fpm	corpus_nested_array	PASS	http=200 no block
+7.3.33	fpm	corpus_non_form_data_disposition	PASS	http=200 no block
+7.3.33	fpm	corpus_settings_form	PASS	http=200 no block
+7.3.33	fpm	up_progress_on	PASS	http=403
+7.3.33	fpm	up_progress_off	PASS	http=403
+7.3.33	fpm	detect_standard	PASS	http=200 log
+7.3.33	fpm	detect_critical	PASS	http=403
+7.4.33	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
+7.4.33	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
+7.4.33	cli	selftest	PASS	http=200 self_test logged
+7.4.33	cli	corpus_bare_lf_headers	PASS	http=200 no block
+7.4.33	cli	corpus_data_line_dashdash	PASS	http=200 no block
+7.4.33	cli	corpus_folded_headers	PASS	http=200 no block
+7.4.33	cli	corpus_gallery_upload	PASS	http=200 no block
+7.4.33	cli	corpus_nested_array	PASS	http=200 no block
+7.4.33	cli	corpus_non_form_data_disposition	PASS	http=200 no block
+7.4.33	cli	corpus_settings_form	PASS	http=200 no block
+7.4.33	cli	up_progress_on	PASS	http=403
+7.4.33	cli	up_progress_off	PASS	http=403
+7.4.33	cli	detect_standard	PASS	http=200 action=log
+7.4.33	cli	detect_critical	PASS	http=403
+7.4.33	fpm	shaped_block_files	PASS	http=403 rule=max_files ip=203.0.113.9
+7.4.33	fpm	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
+7.4.33	fpm	selftest	PASS	http=200
+7.4.33	fpm	corpus_bare_lf_headers	PASS	http=200 no block
+7.4.33	fpm	corpus_data_line_dashdash	PASS	http=200 no block
+7.4.33	fpm	corpus_folded_headers	PASS	http=200 no block
+7.4.33	fpm	corpus_gallery_upload	PASS	http=200 no block
+7.4.33	fpm	corpus_nested_array	PASS	http=200 no block
+7.4.33	fpm	corpus_non_form_data_disposition	PASS	http=200 no block
+7.4.33	fpm	corpus_settings_form	PASS	http=200 no block
+7.4.33	fpm	up_progress_on	PASS	http=403
+7.4.33	fpm	up_progress_off	PASS	http=403
+7.4.33	fpm	detect_standard	PASS	http=200 log
+7.4.33	fpm	detect_critical	PASS	http=403
+8.1.34	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
+8.1.34	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
+8.1.34	cli	selftest	PASS	http=200 self_test logged
+8.1.34	cli	corpus_bare_lf_headers	PASS	http=200 no block
+8.1.34	cli	corpus_data_line_dashdash	PASS	http=200 no block
+8.1.34	cli	corpus_folded_headers	PASS	http=200 no block
+8.1.34	cli	corpus_gallery_upload	PASS	http=200 no block
+8.1.34	cli	corpus_nested_array	PASS	http=200 no block
+8.1.34	cli	corpus_non_form_data_disposition	PASS	http=200 no block
+8.1.34	cli	corpus_settings_form	PASS	http=200 no block
+8.1.34	cli	up_progress_on	PASS	http=403
+8.1.34	cli	up_progress_off	PASS	http=403
+8.1.34	cli	detect_standard	PASS	http=200 action=log
+8.1.34	cli	detect_critical	PASS	http=403
+8.1.34	fpm	shaped_block_files	PASS	http=403 rule=max_files ip=203.0.113.9
+8.1.34	fpm	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
+8.1.34	fpm	selftest	PASS	http=200
+8.1.34	fpm	corpus_bare_lf_headers	PASS	http=200 no block
+8.1.34	fpm	corpus_data_line_dashdash	PASS	http=200 no block
+8.1.34	fpm	corpus_folded_headers	PASS	http=200 no block
+8.1.34	fpm	corpus_gallery_upload	PASS	http=200 no block
+8.1.34	fpm	corpus_nested_array	PASS	http=200 no block
+8.1.34	fpm	corpus_non_form_data_disposition	PASS	http=200 no block
+8.1.34	fpm	corpus_settings_form	PASS	http=200 no block
+8.1.34	fpm	up_progress_on	PASS	http=403
+8.1.34	fpm	up_progress_off	PASS	http=403
+8.1.34	fpm	detect_standard	PASS	http=200 log
+8.1.34	fpm	detect_critical	PASS	http=403
+8.4.27	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
+8.4.27	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
+8.4.27	cli	selftest	PASS	http=200 self_test logged
+8.4.27	cli	corpus_bare_lf_headers	PASS	http=200 no block
+8.4.27	cli	corpus_data_line_dashdash	PASS	http=200 no block
+8.4.27	cli	corpus_folded_headers	PASS	http=200 no block
+8.4.27	cli	corpus_gallery_upload	PASS	http=200 no block
+8.4.27	cli	corpus_nested_array	PASS	http=200 no block
+8.4.27	cli	corpus_non_form_data_disposition	PASS	http=200 no block
+8.4.27	cli	corpus_settings_form	PASS	http=200 no block
+8.4.27	cli	up_progress_on	PASS	http=403
+8.4.27	cli	up_progress_off	PASS	http=403
+8.4.27	cli	detect_standard	PASS	http=200 action=log
+8.4.27	cli	detect_critical	PASS	http=403
+8.4.27	fpm	shaped_block_files	PASS	http=403 rule=max_files ip=203.0.113.9
+8.4.27	fpm	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
+8.4.27	fpm	selftest	PASS	http=200
+8.4.27	fpm	corpus_bare_lf_headers	PASS	http=200 no block
+8.4.27	fpm	corpus_data_line_dashdash	PASS	http=200 no block
+8.4.27	fpm	corpus_folded_headers	PASS	http=200 no block
+8.4.27	fpm	corpus_gallery_upload	PASS	http=200 no block
+8.4.27	fpm	corpus_nested_array	PASS	http=200 no block
+8.4.27	fpm	corpus_non_form_data_disposition	PASS	http=200 no block
+8.4.27	fpm	corpus_settings_form	PASS	http=200 no block
+8.4.27	fpm	up_progress_on	PASS	http=403
+8.4.27	fpm	up_progress_off	PASS	http=403
+8.4.27	fpm	detect_standard	PASS	http=200 log
+8.4.27	fpm	detect_critical	PASS	http=403
+7.4.33	apache	shaped_block_files	PASS	http=403 rule=max_files ip=127.0.0.1
+7.4.33	apache	shaped_block_fields	PASS	http=403
+7.4.33	apache	selftest	PASS	http=200
+7.4.33	apache	corpus_bare_lf_headers	PASS	http=200 no block
+7.4.33	apache	corpus_data_line_dashdash	PASS	http=200 no block
+7.4.33	apache	corpus_folded_headers	PASS	http=200 no block
+7.4.33	apache	corpus_gallery_upload	PASS	http=200 no block
+7.4.33	apache	corpus_nested_array	PASS	http=200 no block
+7.4.33	apache	corpus_non_form_data_disposition	PASS	http=200 no block
+7.4.33	apache	corpus_settings_form	PASS	http=200 no block
+7.4.33	apache	up_progress_on	PASS	http=403
+7.4.33	apache	up_progress_off	PASS	http=403
+7.4.33	apache	detect_standard	PASS	http=200 log
+7.4.33	apache	detect_critical	PASS	http=403
+8.1.34	apache	shaped_block_files	PASS	http=403 rule=max_files ip=127.0.0.1
+8.1.34	apache	shaped_block_fields	PASS	http=403
+8.1.34	apache	selftest	PASS	http=200
+8.1.34	apache	corpus_bare_lf_headers	PASS	http=200 no block
+8.1.34	apache	corpus_data_line_dashdash	PASS	http=200 no block
+8.1.34	apache	corpus_folded_headers	PASS	http=200 no block
+8.1.34	apache	corpus_gallery_upload	PASS	http=200 no block
+8.1.34	apache	corpus_nested_array	PASS	http=200 no block
+8.1.34	apache	corpus_non_form_data_disposition	PASS	http=200 no block
+8.1.34	apache	corpus_settings_form	PASS	http=200 no block
+8.1.34	apache	up_progress_on	PASS	http=403
+8.1.34	apache	up_progress_off	PASS	http=403
+8.1.34	apache	detect_standard	PASS	http=200 log
+8.1.34	apache	detect_critical	PASS	http=403
+## --- not-run (recorded, NOT claimed as passing) ---
+## NOT-RUN 5.6 apache: apache mod_php not run this pass (fpm already exercises the non-CLI SAPI; mechanical repeat of 7.4/8.1)
+## NOT-RUN 7.3 apache: apache mod_php not run this pass (fpm already exercises the non-CLI SAPI; mechanical repeat of 7.4/8.1)
+## NOT-RUN 8.4 apache: apache mod_php not run this pass (fpm already exercises the non-CLI SAPI; mechanical repeat of 7.4/8.1)
+## NOT-RUN 5.4 apache: no php:5.4-apache image (PHP 5.4 predates official images); real-world 5.4 is mod_php under CentOS 7 httpd
+## NOT-RUN 5.5 cli fpm apache: upstream php:5.5-fpm image pull broken (milestone-0 finding); no lab base image
+## NOT-RUN 7.0 cli fpm apache: no lab base image yet (build php:7.0-fpm + lab/images/php-7.0.Dockerfile)
+## NOT-RUN 7.1 cli fpm apache: no lab base image yet (build php:7.1-fpm + lab/images/php-7.1.Dockerfile)
+## NOT-RUN 7.2 cli fpm apache: no lab base image yet (build php:7.2-fpm + lab/images/php-7.2.Dockerfile)
+## NOT-RUN 8.0 cli fpm apache: no lab base image yet (build php:8.0-fpm + lab/images/php-8.0.Dockerfile)
+## NOT-RUN 8.2 cli fpm apache: no lab base image yet (build php:8.2-fpm + lab/images/php-8.2.Dockerfile)
+## NOT-RUN 8.3 cli fpm apache: no lab base image yet (build php:8.3-fpm + lab/images/php-8.3.Dockerfile)
+## NOT-RUN 8.5 cli fpm apache: no lab base image yet (build php:8.5-fpm + lab/images/php-8.5.Dockerfile)
+## per-generation bindings (php5/php7/php8): each not-run minor repeats an already-passing generation, pending its base image

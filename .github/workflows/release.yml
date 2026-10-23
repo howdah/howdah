@@ -3,32 +3,55 @@ name: release
 # Tag-triggered. Pushing a version tag (e.g. v0.1.0) builds the glibc-2.17
 # howdah.so for every supported PHP minor, signs the set with the CI signing
 # subkey, and publishes a GitHub Release with the tarballs + SHA256SUMS +
-# detached signature + the public signing key.
+# detached signature + the public signing key. Pre-release tags (v1.2.3-rc1)
+# are published as DRAFT pre-releases, never full public releases.
 on:
   push:
     tags:
       - "v*"
 
+# Least privilege by default: only the release job may write releases.
 permissions:
-  contents: write   # create the release and upload assets
+  contents: read
 
 jobs:
+  # ---- fail fast if the tag and the crate version disagree -----------------
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag must match the Cargo package version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          base="${tag%%-*}"   # strip any pre-release suffix (-rc1, -beta, ...)
+          cargo_ver="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          echo "tag=$GITHUB_REF_NAME base=$base cargo=$cargo_ver"
+          if [ "$base" != "$cargo_ver" ]; then
+            echo "::error::tag $GITHUB_REF_NAME ($base) does not match Cargo version $cargo_ver"
+            exit 1
+          fi
+
   # ---- one glibc-2.17 tarball per PHP minor --------------------------------
   build:
+    needs: check
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         # Full supported matrix. build-release.sh builds <= 8.1 from Remi EL7
-        # headers and 8.2-8.5 from PHP source, both on a glibc-2.17 (CentOS 7)
-        # base, and asserts via objdump that no glibc symbol newer than 2.17 is
-        # referenced (the build fails otherwise).
+        # headers and 8.2-8.5 from pinned+verified PHP source, both on a
+        # glibc-2.17 (CentOS 7) base, and asserts via objdump that no glibc
+        # symbol newer than 2.17 is referenced (the build fails otherwise).
         minor: ["5.4", "5.5", "5.6", "7.0", "7.1", "7.2", "7.3", "7.4", "8.0", "8.1", "8.2", "8.3", "8.4", "8.5"]
     steps:
       - uses: actions/checkout@v4
 
       - name: Build glibc-2.17 tarball for PHP ${{ matrix.minor }}
-        run: packaging/build-release.sh "${{ matrix.minor }}"
+        run: |
+          # Name assets from the tag (keeps any -rc suffix), not Cargo.toml.
+          HOWDAH_VERSION="${GITHUB_REF_NAME#v}"
+          export HOWDAH_VERSION
+          packaging/build-release.sh "${{ matrix.minor }}"
 
       - name: Upload tarball artifact
         uses: actions/upload-artifact@v4
@@ -41,6 +64,8 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # only this job creates the release + uploads assets
     steps:
       - uses: actions/checkout@v4
 
@@ -72,6 +97,17 @@ jobs:
           HOWDAH_SIGN_PASSPHRASE: ""      # the CI subkey is passphraseless
         run: packaging/sign.sh packaging/out
 
+      - name: Verify signature against the COMMITTED public key (clean keyring)
+        run: |
+          # Catch a key mismatch: verify with ONLY the public key users get
+          # (packaging/howdah-release-signing.asc), in a throwaway GNUPGHOME,
+          # not the signing key we just imported above.
+          tmp="$(mktemp -d)"
+          GNUPGHOME="$tmp" gpg --batch --import packaging/howdah-release-signing.asc
+          GNUPGHOME="$tmp" gpg --batch --verify packaging/out/SHA256SUMS.asc packaging/out/SHA256SUMS
+          ( cd packaging/out && sha256sum -c SHA256SUMS )
+          rm -rf "$tmp"
+
       - name: Ship the public key alongside the signature
         run: cp packaging/howdah-release-signing.asc packaging/out/
 
@@ -79,10 +115,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # A pre-release tag (v1.2.3-rc1) publishes a DRAFT pre-release, never a
+          # full public release.
+          extra=""
+          case "$GITHUB_REF_NAME" in
+            *-*) extra="--draft --prerelease"; echo "pre-release tag -> draft pre-release" ;;
+          esac
           gh release create "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "Howdah ${GITHUB_REF_NAME}" \
             --notes "Signed release. Verify: \`gpg --import howdah-release-signing.asc && gpg --verify SHA256SUMS.asc SHA256SUMS && sha256sum -c SHA256SUMS\`" \
+            $extra \
             packaging/out/*.tar.gz \
             packaging/out/SHA256SUMS \
             packaging/out/SHA256SUMS.asc \

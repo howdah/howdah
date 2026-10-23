@@ -27,8 +27,22 @@ IMAGE="${HOWDAH_RELEASE_IMAGE:-howdah-release}"
 
 # Full supported matrix (PHP 5.4 .. 8.5). Default build set when none given.
 ALL_MINORS=(5.4 5.5 5.6 7.0 7.1 7.2 7.3 7.4 8.0 8.1 8.2 8.3 8.4 8.5)
-# Minors whose headers Remi EL7 does not carry (PHP > 8.1): built from source.
-FROM_SOURCE_MINORS=" 8.2 8.3 8.4 8.5 "
+
+# Minors Remi EL7 does not carry (PHP > 8.1): built from source headers on the
+# same glibc-2.17 base. PINNED to a REAL current patch + its sha256 (never a
+# `.0`, which php.net drops -> 404). build-one.sh fetches from
+# www.php.net/distributions with a museum.php.net fallback and enforces this
+# hash. Refresh these as new patches land (any resolving patch works; the hash
+# is what matters). `BRANCH -> "<version> <sha256>"`.
+php_src_pin() {
+  case "$1" in
+    8.2) echo "8.2.35 9db4204f0a2d1911277ae832185e07bb4c3b3559772753a70d2968ca346d6910" ;;
+    8.3) echo "8.3.36 c93f3441f87f6ab156bef4432db215d7e61ca2c0183bb3a2aa28d9886ab59f53" ;;
+    8.4) echo "8.4.27 5bafed9994c1a49796b25b5f61c22c9183bfe046b6acc7b363842d03c77f972f" ;;
+    8.5) echo "8.5.12 81a0f450349e84b08eb43faa85f8a4c835684f3cc1c50471775d1317a046c525" ;;
+    *)   return 1 ;;
+  esac
+}
 
 MINORS=("$@")
 [ ${#MINORS[@]} -eq 0 ] && MINORS=("${ALL_MINORS[@]}")
@@ -56,14 +70,19 @@ for minor in "${MINORS[@]}"; do
   echo "======================================================================"
   echo "==  building PHP $minor"
   echo "======================================================================"
-  src_flag=""
-  case "$FROM_SOURCE_MINORS" in *" $minor "*) src_flag="--from-source" ;; esac
+  src_flag=""; src_env=()
+  if pin="$(php_src_pin "$minor")"; then
+    src_flag="--from-source"
+    src_env=(-e "HOWDAH_PHP_SRC_VERSION=${pin%% *}" -e "HOWDAH_PHP_SRC_SHA256=${pin##* }")
+    echo "   (from-source headers: PHP ${pin%% *})"
+  fi
 
   stage="$(mktemp -d)"
   if docker run --rm \
         -v "$REPO_ROOT":/src:ro \
         -v "$stage":/out \
         -w /src \
+        ${src_env[@]+"${src_env[@]}"} \
         "$IMAGE" sh /src/packaging/build-one.sh "$minor" $src_flag
   then
     so="$(ls "$stage"/howdah-"$minor"-*.so 2>/dev/null | head -1 || true)"

@@ -22,6 +22,12 @@ pub(crate) unsafe extern "C" fn decide(
     arg_len: usize,
 ) -> c_int {
     catch_unwind(AssertUnwindSafe(|| {
+        // Defense in depth: if there is no live core context (e.g. a trampoline
+        // fires after MSHUTDOWN freed+nulled CTX), chain the call unguarded. The
+        // core entry points are null-safe too, but guarding here makes it local.
+        if module::CTX.is_null() {
+            return core::HOWDAH_ALLOW;
+        }
         module::maybe_begin();
         let action = core::howdah_sink_check(module::CTX, sink, name, name_len, arg, arg_len);
         // Emit this hit's line immediately (per-hit, at the call site), then

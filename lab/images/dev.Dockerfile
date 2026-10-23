@@ -19,15 +19,33 @@ COPY lab/images/libclang-modern.sh /tmp/libclang-modern.sh
 RUN set -e; . /etc/os-release; \
     APT="-o Acquire::Check-Valid-Until=false"; \
     mkdir -p /opt/libclang; \
-    if [ "$VERSION_ID" = 9 ]; then \
+    if [ "${ID:-}" = centos ] || [ "${ID:-}" = rhel ]; then \
+      # PHP 5.4 target: CentOS 7 (yum). gcc 4.8 + fcgi (cgi-fcgi for the fpm SAPI
+      # matrix); its ancient clang is unusable for bindgen, so libclang 18 comes
+      # from the manylinux2010 wheel (glibc 2.17 on CentOS 7 satisfies it).
+      yum install -y gcc make curl unzip which >/dev/null \
+      && (yum install -y fcgi >/dev/null 2>&1 || true) \
+      && /tmp/libclang-modern.sh; \
+    elif [ "$VERSION_ID" = 9 ]; then \
       printf 'deb http://archive.debian.org/debian stretch main\ndeb http://archive.debian.org/debian-security stretch/updates main\n' > /etc/apt/sources.list; \
       apt-get $APT update \
-      && apt-get $APT install -y --no-install-recommends --allow-unauthenticated ca-certificates curl gcc libc-dev unzip \
+      && apt-get $APT install -y --no-install-recommends --allow-unauthenticated ca-certificates curl gcc libc-dev unzip libfcgi-bin \
       && /tmp/libclang-modern.sh; \
     else \
-      apt-get $APT update \
-      && apt-get $APT install -y --no-install-recommends --allow-unauthenticated ca-certificates curl gcc libc-dev clang libclang-dev \
-      && mkdir -p /opt/libclang/include /opt/libclang/include-fixed && ln -s "$(ls /usr/lib/llvm-*/lib/libclang.so* | head -1)" /opt/libclang/libclang.so; \
+      # Non-stretch Debian (bullseye/bookworm, PHP 7.x/8.x): use the distro clang
+      # (its libclang ships matching builtin headers, unlike the manylinux wheel
+      # which clashes with gcc-10 intrinsics here). Some lab bases pin an apt
+      # snapshot that is internally inconsistent for clang's deps (libc6 vs
+      # libc6-i386) or whose security .debs have 404'd, so point apt at the live
+      # Debian mirror for this base's codename, where the set is consistent.
+      printf 'deb http://deb.debian.org/debian %s main\n' "$VERSION_CODENAME" > /etc/apt/sources.list \
+      && apt-get $APT update \
+      && apt-get $APT install -y --no-install-recommends --allow-unauthenticated ca-certificates curl gcc libc-dev clang libclang-dev libfcgi-bin unzip \
+      && lc="$(find /usr/lib -path '*/llvm-*/lib/libclang.so' 2>/dev/null | sort | head -1)" \
+      && [ -n "$lc" ] || lc="$(find /usr/lib -name 'libclang-*.so.*' 2>/dev/null | sort | head -1)" \
+      && test -n "$lc" \
+      && mkdir -p /opt/libclang/include /opt/libclang/include-fixed \
+      && ln -s "$lc" /opt/libclang/libclang.so; \
     fi; \
     rm -rf /var/lib/apt/lists/* /tmp/libclang-modern.sh
 

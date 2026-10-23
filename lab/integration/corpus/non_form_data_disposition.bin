@@ -1,0 +1,6 @@
+--CorpusB0
+Content-Disposition: attachment; name="z"; filename="a.bin"
+Content-Type: application/octet-stream
+
+attachment-bytes
+--CorpusB0--

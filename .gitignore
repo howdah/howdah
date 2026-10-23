@@ -1,6 +1,7 @@
 /target
 **/target
-Cargo.lock
+# Cargo.lock IS committed: clean-checkout container builds (lab/integration/matrix.sh)
+# need a pinned dependency set to build the extension reproducibly per PHP minor.
 *.so
 *.o
 *.rlib

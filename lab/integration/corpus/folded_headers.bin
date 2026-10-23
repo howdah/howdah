@@ -1,0 +1,7 @@
+--CorpusB0
+Content-Disposition: form-data; name="y";
+	filename="folded.txt"
+Content-Type: text/plain
+
+folded body
+--CorpusB0--

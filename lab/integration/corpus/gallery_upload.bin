@@ -1,0 +1,80 @@
+--CorpusB0
+Content-Disposition: form-data; name="album"
+
+Holidays
+--CorpusB0
+Content-Disposition: form-data; name="photos[]"; filename="img_0.jpg"
+Content-Type: image/jpeg
+
+JPEGDATA-0-binaryish-\xff\xd8\xff\xe0-payload
+--CorpusB0
+Content-Disposition: form-data; name="photos[]"; filename="img_1.jpg"
+Content-Type: image/jpeg
+
+JPEGDATA-1-binaryish-\xff\xd8\xff\xe0-payload
+--CorpusB0
+Content-Disposition: form-data; name="photos[]"; filename="img_2.jpg"
+Content-Type: image/jpeg
+
+JPEGDATA-2-binaryish-\xff\xd8\xff\xe0-payload
+--CorpusB0
+Content-Disposition: form-data; name="photos[]"; filename="img_3.jpg"
+Content-Type: image/jpeg
+
+JPEGDATA-3-binaryish-\xff\xd8\xff\xe0-payload
+--CorpusB0
+Content-Disposition: form-data; name="photos[]"; filename="img_4.jpg"
+Content-Type: image/jpeg
+
+JPEGDATA-4-binaryish-\xff\xd8\xff\xe0-payload
+--CorpusB0
+Content-Disposition: form-data; name="photos[]"; filename="img_5.jpg"
+Content-Type: image/jpeg
+
+JPEGDATA-5-binaryish-\xff\xd8\xff\xe0-payload
+--CorpusB0
+Content-Disposition: form-data; name="photos[]"; filename="img_6.jpg"
+Content-Type: image/jpeg
+
+JPEGDATA-6-binaryish-\xff\xd8\xff\xe0-payload
+--CorpusB0
+Content-Disposition: form-data; name="photos[]"; filename="img_7.jpg"
+Content-Type: image/jpeg
+
+JPEGDATA-7-binaryish-\xff\xd8\xff\xe0-payload
+--CorpusB0
+Content-Disposition: form-data; name="photos[]"; filename="img_8.jpg"
+Content-Type: image/jpeg
+
+JPEGDATA-8-binaryish-\xff\xd8\xff\xe0-payload
+--CorpusB0
+Content-Disposition: form-data; name="photos[]"; filename="img_9.jpg"
+Content-Type: image/jpeg
+
+JPEGDATA-9-binaryish-\xff\xd8\xff\xe0-payload
+--CorpusB0
+Content-Disposition: form-data; name="photos[]"; filename="img_10.jpg"
+Content-Type: image/jpeg
+
+JPEGDATA-10-binaryish-\xff\xd8\xff\xe0-payload
+--CorpusB0
+Content-Disposition: form-data; name="photos[]"; filename="img_11.jpg"
+Content-Type: image/jpeg
+
+JPEGDATA-11-binaryish-\xff\xd8\xff\xe0-payload
+--CorpusB0
+Content-Disposition: form-data; name="photos[]"; filename="img_12.jpg"
+Content-Type: image/jpeg
+
+JPEGDATA-12-binaryish-\xff\xd8\xff\xe0-payload
+--CorpusB0
+Content-Disposition: form-data; name="photos[]"; filename="img_13.jpg"
+Content-Type: image/jpeg
+
+JPEGDATA-13-binaryish-\xff\xd8\xff\xe0-payload
+--CorpusB0
+Content-Disposition: form-data; name="photos[]"; filename="img_14.jpg"
+Content-Type: image/jpeg
+
+JPEGDATA-14-binaryish-\xff\xd8\xff\xe0-payload
+--CorpusB0--

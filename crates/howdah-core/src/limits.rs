@@ -36,14 +36,36 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// Starting values; tuned against the false-positive corpus in Task 12.
+    /// Default limits, VALIDATED by the Task-12 cross-version gate (not merely
+    /// starting points). Measured on a stock box (memory_limit=128M,
+    /// post_max_size=8M) across PHP 5.6/7.3/8.4:
+    ///
+    /// * On stock config PHP's OWN caps (max_file_uploads=20, max_input_vars=1000)
+    ///   hold the shaped flood's peak worker RSS flat at ~20-33 MiB and, on PHP
+    ///   8.x, gate the rfc1867 callback entirely -- so the flood is already
+    ///   contained and there is nothing for Howdah to block.
+    /// * The real exposure is a box with those caps RAISED. There the callback
+    ///   fires unbounded and, within the stock 8 MiB post body, the undefended
+    ///   flood drives peak RSS to ~127 MiB (8.4) / ~173 MiB (5.6) -- a genuine
+    ///   memory-exhaustion DoS. With these defaults Howdah BLOCKS every such
+    ///   flood (max_files at 201, max_parts at 2001), holding defended peak to
+    ///   ~28-56 MiB, well under 128M.
+    /// * The attack needs ~90000 parts to approach 128M -- ~45x more than
+    ///   max_parts -- so the count-based critical limits fire with a huge margin
+    ///   and no lowering is warranted. The full false-positive corpus (a 500-field
+    ///   form, a 15-file gallery, deep nested arrays, the strict-parser cases)
+    ///   produces zero blocks at these values. See lab/integration/matrix.sh and
+    ///   docs/coverage-data.md.
     pub fn defaults() -> Limits {
         Limits {
-            // PHP's own max_input_vars is 1000; real forms rarely exceed a few
-            // hundred fields. 2000 leaves headroom, yet PHP2Shell uses tens of
-            // thousands of parts.
+            // Stock PHP max_input_vars is 1000, so a stock-config form can carry
+            // at most 1000 fields: 2000 never false-positives there, yet a raised-
+            // cap flood (the threat) needs tens of thousands of parts to exhaust
+            // memory, so max_parts fires ~45x before 128M. See the doc-comment above.
             max_parts: 2000,
-            // No legitimate form uploads hundreds of files at once.
+            // No legitimate form uploads hundreds of files at once; a raised
+            // max_file_uploads flood is capped here before the per-file temp-file
+            // allocation (the dominant cost: 127 MiB undefended -> 36 MiB blocked).
             max_files: 200,
             // Browsers send 1-3 headers per part (Content-Disposition, Content-Type).
             max_part_headers: 16,

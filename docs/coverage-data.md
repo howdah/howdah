@@ -185,3 +185,120 @@ Every version actually run BLOCKS both shapes on every SAPI run, with zero
 false positives across the 7-item benign corpus. No run produced PARTIAL or
 NOT-COVERED; the only gaps are the NOT-RUN minors above, which lack a committed
 base image and are honestly not claimed as passing.
+
+---
+
+# Howdah 1.0 Layer-1 coverage data (Task 9)
+
+Validation of the new input-shape, request-header, and CGI rules across the same
+version/SAPI matrix, plus the extended false-positive corpus. Reproduced by
+`lab/integration/matrix.sh` (cli+fpm) and `SAPIS=apache ... APPEND=1` (apache);
+raw rows in `lab/integration/matrix-results.tsv`.
+
+**Full-matrix totals this pass: 358 rows — 339 PASS / 0 FAIL / 19 SKIP.** (The
+7 former CGI rows were dropped — see "CVE-2012-1823" below — so this pass is 7
+rows fewer than the previous one.) The 19 SKIPs are all expected and documented
+(not failures): the 5.4 php-fpm column (no `cgi-fcgi` in the 5.4 image, 7 rows)
+and the CLI header scenarios (2 per version × 6 = 12, deliberately asserted only
+under fpm/apache).
+
+## New scenarios (per SAPI)
+
+- `input_vars_flood` → 60 urlencoded POST vars at `max_input_vars=50`: block +
+  `max_input_vars` log. **Critical**, so `input_vars_flood_detect` (global
+  `mode=detect`) still blocks.
+- `nesting_depth` → `a[b][c][d][e]=1` at `max_input_nesting_depth=3`: block +
+  `max_input_nesting_depth`. Critical.
+- `request_headers_flood` → 15 real `HTTP_*` headers at `max_request_headers=5`:
+  block (block mode) / log (`request_headers_flood_detect`, detect mode) +
+  `max_request_headers`. **Standard.** Driven over REAL headers on php-fpm (via
+  the fcgi `HTTP_*` env) and Apache (via `curl -H`) — closing the Task-8 gap.
+
+## Enforcement timing — best-effort response (measured)
+
+The input-shape and header rules run on the GET/POST/cookie/`$_SERVER` variable
+stream through the chained `sapi_module.input_filter`. The **guaranteed**
+mitigation is the **variable DROP** (the filter returns 0 for the offending var,
+bounding the symbol table) plus the event log. The 403 **response** is
+best-effort and SAPI/timing-dependent:
+
+- A urlencoded POST flood (`input_vars`/`nesting`) typically yields a clean 403
+  on cli-server, php-fpm and Apache (measured).
+- A GET header flood commonly yields HTTP 200 with the block notice appended to
+  the body (the script's output had already committed the headers) while the log
+  line still records `action:block` — e.g. php-fpm 8.4 returns `H=…` then
+  `Howdah blocked this request. status: 403`. The matrix therefore asserts the
+  **log line**, not the HTTP code, for these rules and records the observed code
+  in the detail column.
+
+This is the "var-drop + best-effort 403 on JIT-globals SAPIs" lifecycle recorded
+in the plan (Ruling 7c), now observed in the lab.
+
+### Request-header counting depends on `$_SERVER` materialization
+
+With `auto_globals_jit=On` (PHP default), the `HTTP_*` server vars are built only
+when the app first touches `$_SERVER`; the chained `input_filter` can only count
+what PHP registers. The lab app reads `$_SERVER` (as every real framework does),
+and then header counting fires on fpm/Apache (and on php8 cli-server). An app
+that never reads `$_SERVER` on a JIT-globals SAPI leaves the header limit
+unexercised. This is why the CLI header scenarios are SKIP (not asserted) and the
+header rules are validated on fpm + Apache.
+
+## CVE-2012-1823 (php-cgi argument injection) — out of reach; NOT protected
+
+Howdah does **not** protect against CVE-2012-1823, and no rule for it ships. Lab
+testing proved the defense **cannot** work from inside a PHP extension:
+
+- For every argv-injection query shape (no literal `=`, leading `-`), php-cgi
+  consumes the query string as command-line arguments **during its own SAPI
+  startup, before any PHP extension, module, or request-startup (RINIT) hook
+  loads** — so any check from inside an extension is **never reached** (confirmed
+  by instrumentation: RINIT fired for a benign `?x=1` query but not for `?-s`).
+- The only php-cgi in the lab images, PHP **5.4.16**, is itself **already
+  patched** against the CVE, so no vulnerable build was available to test a fire
+  path against in any case.
+
+Because a configurable rule that can never fire is a false promise (Howdah's
+no-overclaim rule), the earlier RINIT virtual patch was **removed**. CVE-2012-1823
+belongs with CVE-2019-11043: both are triggered before any extension code runs
+and are outside what Howdah, as a PHP extension, can defend. Cover this CVE at
+the web server / front proxy, or run a patched php-cgi.
+
+## Regression caught by the matrix: CLI-server block-state leak (fixed)
+
+The full matrix surfaced a HEAD regression from the Task 7/8 unified lifecycle:
+on the persistent CLI built-in server, once any request blocked, **every
+subsequent request on that worker returned a stale 403 with no new log line**.
+Root cause: `module::BEGUN` was reset only in RSHUTDOWN, but the block path's
+`zend_bailout` (longjmp) skips RSHUTDOWN on the cli-server SAPI, so `BEGUN`
+stayed set, `maybe_begin` no-op'd, and the core request was never re-opened.
+php-fpm/Apache run RSHUTDOWN after the bailout and did not leak. Fix:
+`emit_and_bail` now clears the per-request lifecycle (`BEGUN`/`ENDED`/
+`MULTIPART`/`INPUT_BLOCKED`, and the rfc1867 `BLOCKED`/`SELFTEST_SEEN` flags)
+immediately before the longjmp, so a skipped RSHUTDOWN cannot poison the next
+request. After the fix the matrix is green and the Ruling-8 gate
+(`shaped_block_fields` → `max_parts`) holds across sequential requests.
+
+## Extended false-positive corpus — zero blocks at shipped defaults
+
+Added under `lab/integration/corpus/input/` and driven on every SAPI at the
+DEFAULT limits:
+
+| fixture | shape | under default |
+|---|---|---|
+| `large_form.urlencoded` | 1500 urlencoded fields | `max_input_vars=2000` |
+| `nested_form.urlencoded` | survey/matrix fields, max depth 5 | `max_input_nesting_depth=64` |
+| `ordinary_headers.txt` | 50 normal request headers | `max_request_headers=200` |
+| `safe_queries.txt` | `sort=-price`, `q=a-b-c`, `filter=a-b&order=-date`, … | ordinary queries; no query-string rule exists |
+
+All produced HTTP 200 with zero `action:block` lines on every SAPI run. The
+defaults in `crates/howdah-core/src/limits.rs` are therefore **kept unchanged**;
+no default blocked a legitimate request, so none was raised.
+
+## Ruling-8 gate result
+
+`shaped_block_fields` → **403 `max_parts`** on every SAPI/version actually run:
+cli-server (5.4, 5.6, 7.3, 7.4, 8.1, 8.4), php-fpm (5.6, 7.3, 7.4, 8.1, 8.4), and
+Apache mod_php (7.4, 8.1). 5.4 php-fpm is SKIP (no `cgi-fcgi` in the image, as in
+0.1). The START-ordering dependence (MULTIPART set before the first PARSE_POST)
+is confirmed sound; the contingency (Content-Type-based detection) was not needed.

@@ -1,15 +1,20 @@
-//! Resource limits and the critical-limit checks that stop PHP2Shell-shaped
-//! uploads (very many parts/files/headers) before the backend allocates
-//! per-part memory.
+//! Resource limits and the limit checks that stop resource-exhaustion shapes
+//! before PHP allocates for them:
+//!   * multipart bodies — very many parts/files, oversized part headers/names
+//!     (the PHP2Shell shape), checked while the body is parsed;
+//!   * request inputs — too many GET/POST/cookie variables (hash-collision /
+//!     variable floods), over-deep array nesting, oversized keys;
+//!   * request headers — too many headers, or an oversized header line.
 //!
 //! Zero policy: a limit of 0 is rejected by [`Limits::validate`] (called from
-//! `Config::from_toml`), because 0 would silently block every multipart body.
+//! `Config::from_toml`), because 0 would silently block every request.
 //! There is no "unlimited" value; set a large number instead. A `Limits`
 //! built by hand (bypassing `from_toml`) can still contain zeros; `check` then
 //! blocks everything but never panics.
 
 use serde::Deserialize;
 
+use crate::input::InputState;
 use crate::multipart::{Event, MultipartState};
 
 /// Resource limits applied to multipart bodies.
@@ -33,6 +38,16 @@ pub struct Limits {
     /// (PHP default 8 MiB) so it never fires before PHP's own limit on normal
     /// uploads; the 256 MiB default is far above typical `post_max_size`.
     pub max_parse_memory_bytes: usize,
+    /// Maximum number of request input variables (GET/POST/cookie names).
+    pub max_input_vars: usize,
+    /// Maximum array nesting depth of any one variable name (`a[b][c]` = 2).
+    pub max_input_nesting_depth: usize,
+    /// Maximum bytes of any single variable name or array key.
+    pub max_input_key_bytes: usize,
+    /// Maximum number of request headers.
+    pub max_request_headers: usize,
+    /// Maximum bytes (name + value) of any single request header.
+    pub max_request_header_bytes: usize,
 }
 
 impl Limits {
@@ -65,6 +80,8 @@ impl Limits {
             // at most 1000 fields: 2000 never false-positives there, yet a raised-
             // cap flood (the threat) needs tens of thousands of parts to exhaust
             // memory, so max_parts fires ~45x before 128M. See the doc-comment above.
+            // Kept at 2000 after the Task-9 cross-version matrix + corpus: zero
+            // false positives at this value on every SAPI/version run.
             max_parts: 2000,
             // No legitimate form uploads hundreds of files at once; a raised
             // max_file_uploads flood is capped here before the per-file temp-file
@@ -81,6 +98,24 @@ impl Limits {
             // 256 MiB total body: well above PHP's default post_max_size (8 MiB)
             // and common raised values, below host memory exhaustion.
             max_parse_memory_bytes: 256 * 1024 * 1024,
+            // Double stock PHP max_input_vars (1000), so stock-config forms never
+            // trip it. Confirmed by the Task-9 corpus: a legitimate 1500-field
+            // form is zero-block at this value (a hash-collision / variable flood
+            // is var-dropped + logged well before the symbol table is stressed).
+            max_input_vars: 2000,
+            // Real forms nest a handful of levels (the legit corpus peaks at 5);
+            // 64 is far beyond legitimate use yet well below depths that stress
+            // recursive array handling. Zero-block on the corpus.
+            max_input_nesting_depth: 64,
+            // Same generous bound as field names: keys are identifiers.
+            max_input_key_bytes: 1024,
+            // Browsers send ~10-30 headers and proxies add a few more; 200 is far
+            // beyond legitimate use. Confirmed by the corpus: a 50-header request
+            // is zero-block at this value.
+            max_request_headers: 200,
+            // 16 KiB tolerates large cookies and auth tokens in one header line
+            // (servers commonly cap a header line at 8-16 KiB).
+            max_request_header_bytes: 16384,
         }
     }
 
@@ -94,6 +129,11 @@ impl Limits {
             ("max_field_name_bytes", self.max_field_name_bytes),
             ("max_filename_bytes", self.max_filename_bytes),
             ("max_parse_memory_bytes", self.max_parse_memory_bytes),
+            ("max_input_vars", self.max_input_vars),
+            ("max_input_nesting_depth", self.max_input_nesting_depth),
+            ("max_input_key_bytes", self.max_input_key_bytes),
+            ("max_request_headers", self.max_request_headers),
+            ("max_request_header_bytes", self.max_request_header_bytes),
         ];
         for (name, v) in fields {
             if v == 0 {
@@ -155,6 +195,58 @@ impl Limits {
         self.check_fed_bytes(state.max_part_data_seen().max(state.total_fed_bytes()))
     }
 
+    /// Check request input-shape high-water marks against the limits, in
+    /// field order (var count, nesting depth, key bytes, header count, header
+    /// bytes); first hit wins.
+    pub fn check_input(&self, st: &InputState) -> Option<LimitHit> {
+        let hit = |rule: RuleId, detail: String| {
+            Some(LimitHit { rule, severity: rule.severity(), detail })
+        };
+        if st.vars() > self.max_input_vars as u64 {
+            return hit(
+                RuleId::MaxInputVars,
+                format!("{} input variables exceeds limit {}", st.vars(), self.max_input_vars),
+            );
+        }
+        if st.max_depth() > self.max_input_nesting_depth {
+            return hit(
+                RuleId::MaxInputNestingDepth,
+                format!(
+                    "array nesting depth {} exceeds limit {}",
+                    st.max_depth(),
+                    self.max_input_nesting_depth
+                ),
+            );
+        }
+        if st.max_key_bytes() > self.max_input_key_bytes {
+            return hit(
+                RuleId::MaxInputKeyBytes,
+                format!(
+                    "input key of {} bytes exceeds limit {}",
+                    st.max_key_bytes(),
+                    self.max_input_key_bytes
+                ),
+            );
+        }
+        if st.headers() > self.max_request_headers as u64 {
+            return hit(
+                RuleId::MaxRequestHeaders,
+                format!("{} request headers exceeds limit {}", st.headers(), self.max_request_headers),
+            );
+        }
+        if st.max_header_bytes() > self.max_request_header_bytes {
+            return hit(
+                RuleId::MaxRequestHeaderBytes,
+                format!(
+                    "request header of {} bytes exceeds limit {}",
+                    st.max_header_bytes(),
+                    self.max_request_header_bytes
+                ),
+            );
+        }
+        None
+    }
+
     /// Check a byte total against `max_parse_memory_bytes` (total body bytes
     /// processed). `check` already applies this using the state's totals.
     pub fn check_fed_bytes(&self, total_fed: u64) -> Option<LimitHit> {
@@ -211,6 +303,11 @@ pub enum RuleId {
     MalformedMultipart,
     UploadProgressAbuse,
     SelfTest,
+    MaxInputVars,
+    MaxInputNestingDepth,
+    MaxInputKeyBytes,
+    MaxRequestHeaders,
+    MaxRequestHeaderBytes,
 }
 
 impl RuleId {
@@ -218,9 +315,12 @@ impl RuleId {
     /// parser disagreeing with an unusual legit client must not block by default.
     pub fn severity(self) -> Severity {
         match self {
-            RuleId::MalformedMultipart | RuleId::UploadProgressAbuse | RuleId::SelfTest => {
-                Severity::Standard
-            }
+            RuleId::MalformedMultipart
+            | RuleId::UploadProgressAbuse
+            | RuleId::SelfTest
+            | RuleId::MaxInputKeyBytes
+            | RuleId::MaxRequestHeaders
+            | RuleId::MaxRequestHeaderBytes => Severity::Standard,
             _ => Severity::Critical,
         }
     }

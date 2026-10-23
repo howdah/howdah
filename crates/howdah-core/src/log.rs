@@ -34,6 +34,11 @@ fn rule_name(r: RuleId) -> &'static str {
         RuleId::MalformedMultipart => "malformed_multipart",
         RuleId::UploadProgressAbuse => "upload_progress_abuse",
         RuleId::SelfTest => "self_test",
+        RuleId::MaxInputVars => "max_input_vars",
+        RuleId::MaxInputNestingDepth => "max_input_nesting_depth",
+        RuleId::MaxInputKeyBytes => "max_input_key_bytes",
+        RuleId::MaxRequestHeaders => "max_request_headers",
+        RuleId::MaxRequestHeaderBytes => "max_request_header_bytes",
     }
 }
 

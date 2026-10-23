@@ -58,6 +58,8 @@ fn main() {
         .allowlist_type("_?sapi_module_struct|sapi_request_info|_?sapi_globals_struct|_?sapi_header_struct|sapi_header_line")
         .allowlist_var("sapi_module|sapi_globals")
         .allowlist_function("sapi_.*")
+        // input_filter `arg` discriminants (PARSE_GET/POST/COOKIE/SERVER).
+        .allowlist_var("PARSE_.*")
         // Module-entry constants the glue must fill in (macros; absent ones are ignored).
         .allowlist_var("ZEND_MODULE_API_NO|ZEND_MODULE_BUILD_ID|PHP_VERSION_ID|ZEND_DEBUG|USING_ZTS|PHP_API_VERSION")
         .generate()

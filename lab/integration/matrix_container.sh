@@ -45,7 +45,11 @@ if ! cargo build -p howdah-ext --features "$FEATURE" --release 2>"$WORK/build.er
   exit 1
 fi
 cp /tmp/t/release/libhowdah_ext.so "$WORK/howdah.so"
-printf '<?php $n=count($_FILES)+count($_POST); echo "OK n=$n\\n";' > "$WORK/index.php"
+# The app reads $_SERVER (as every real framework does): PHP's auto_globals_jit
+# (On by default) materializes $_SERVER -- and thus the HTTP_* request-header
+# vars our chained input_filter counts -- only on first access, so a script that
+# never touches $_SERVER would hide the request-header limit entirely.
+printf '<?php $n=count($_FILES)+count($_POST)+count($_SERVER); echo "OK n=$n\\n";' > "$WORK/index.php"
 
 # shaped body generator: $1 out $2 boundary $3 count $4 file|field
 gen() {
@@ -65,6 +69,18 @@ PHP
 php "$WORK/mk_marker.php" "$WORK/marker.bin" MarkerB0
 gen "$WORK/flood_files.bin"  FloodB0 3000 file
 gen "$WORK/flood_fields.bin" FloodB0 3000 field
+
+# ---- Task 9: input-shape / header / CGI fixtures --------------------------
+# urlencoded bodies + small-limit config TOMLs for the per-rule BLOCK cases.
+INCORPUS=/src/lab/integration/corpus/input
+php -r 'for($i=0;$i<60;$i++){echo($i?"&":"")."v$i=$i";}' > "$WORK/iv.body"      # 60 input vars
+printf 'a[b][c][d][e]=1' > "$WORK/nd.body"                                      # nesting depth 4
+printf 'mode="block"\n[limits]\nmax_input_vars=50\n'            > "$WORK/iv.toml"
+printf 'mode="detect"\n[limits]\nmax_input_vars=50\n'           > "$WORK/ivd.toml"
+printf 'mode="block"\n[limits]\nmax_input_nesting_depth=3\n'    > "$WORK/nd.toml"
+printf 'mode="block"\n[limits]\nmax_request_headers=5\n'        > "$WORK/rh.toml"
+printf 'mode="detect"\n[limits]\nmax_request_headers=5\n'       > "$WORK/rhd.toml"
+: > "$WORK/flood_hdr.txt"; i=0; while [ "$i" -lt 15 ]; do printf 'X-Flood-%s: v%s\n' "$i" "$i" >> "$WORK/flood_hdr.txt"; i=$((i+1)); done
 
 # Raised PHP caps so the rfc1867 callback fires past PHP's own max_input_vars/
 # max_file_uploads on EVERY version (that is the real-exposure config; stock
@@ -128,6 +144,55 @@ fpm_post() { # $1 boundary $2 body $3 remote_addr -> echoes "HTTP|bodyfile"
   echo "$_code|$_o"
 }
 
+# fpm_send <method> <ct-or-empty> <bodyfile-or-empty> <remote_addr> -> "HTTP|bodyfile"
+fpm_send() {
+  _o="$WORK/fresp.txt"
+  if [ -n "$3" ]; then _cl=$(wc -c < "$3"); _in="$3"; else _cl=0; _in=/dev/null; fi
+  if [ -n "$2" ]; then
+    env -i SCRIPT_FILENAME="$WORK/index.php" SCRIPT_NAME=/index.php REQUEST_URI=/ \
+      REQUEST_METHOD="$1" CONTENT_TYPE="$2" CONTENT_LENGTH="$_cl" REMOTE_ADDR="$4" \
+      SERVER_PROTOCOL=HTTP/1.1 GATEWAY_INTERFACE=CGI/1.1 \
+      cgi-fcgi -bind -connect 127.0.0.1:9000 < "$_in" > "$WORK/fcgi.raw" 2>/dev/null
+  else
+    env -i SCRIPT_FILENAME="$WORK/index.php" SCRIPT_NAME=/index.php REQUEST_URI=/ \
+      REQUEST_METHOD="$1" CONTENT_LENGTH="$_cl" REMOTE_ADDR="$4" \
+      SERVER_PROTOCOL=HTTP/1.1 GATEWAY_INTERFACE=CGI/1.1 \
+      cgi-fcgi -bind -connect 127.0.0.1:9000 < "$_in" > "$WORK/fcgi.raw" 2>/dev/null
+  fi
+  _code=$(sed -n 's/^Status: *\([0-9][0-9][0-9]\).*/\1/p' "$WORK/fcgi.raw" | head -1); [ -z "$_code" ] && _code=200
+  awk 'f{print} /^\r?$/{f=1}' "$WORK/fcgi.raw" > "$_o"
+  echo "$_code|$_o"
+}
+# fpm_get_query <querystring> <remote_addr> -> "HTTP|bodyfile"
+fpm_get_query() {
+  _o="$WORK/fresp.txt"
+  env -i SCRIPT_FILENAME="$WORK/index.php" SCRIPT_NAME=/index.php REQUEST_URI="/?$1" QUERY_STRING="$1" \
+    REQUEST_METHOD=GET REMOTE_ADDR="$2" SERVER_PROTOCOL=HTTP/1.1 GATEWAY_INTERFACE=CGI/1.1 \
+    cgi-fcgi -bind -connect 127.0.0.1:9000 < /dev/null > "$WORK/fcgi.raw" 2>/dev/null
+  _code=$(sed -n 's/^Status: *\([0-9][0-9][0-9]\).*/\1/p' "$WORK/fcgi.raw" | head -1); [ -z "$_code" ] && _code=200
+  awk 'f{print} /^\r?$/{f=1}' "$WORK/fcgi.raw" > "$_o"
+  echo "$_code|$_o"
+}
+# fpm_get_hdrs <headerfile> <remote_addr> -> "HTTP|bodyfile"
+# Each "Name: value" line becomes a real HTTP_* server var (what every SAPI sees
+# for a request header), so the chained input_filter's PARSE_SERVER calls count
+# them -- the production path the CLI built-in server cannot exercise portably.
+fpm_get_hdrs() {
+  _o="$WORK/fresp.txt"; _hf=$1; _ra=$2   # save before `set --` clobbers $1/$2
+  set -- SCRIPT_FILENAME="$WORK/index.php" SCRIPT_NAME=/index.php REQUEST_URI=/ \
+    REQUEST_METHOD=GET REMOTE_ADDR="$_ra" SERVER_PROTOCOL=HTTP/1.1 GATEWAY_INTERFACE=CGI/1.1
+  while IFS= read -r _l || [ -n "$_l" ]; do
+    [ -z "$_l" ] && continue
+    _n=${_l%%:*}; _v=${_l#*:}; _v=${_v# }
+    _k=HTTP_$(echo "$_n" | tr 'a-z-' 'A-Z_')
+    set -- "$@" "$_k=$_v"
+  done < "$_hf"
+  env -i "$@" cgi-fcgi -bind -connect 127.0.0.1:9000 < /dev/null > "$WORK/fcgi.raw" 2>/dev/null
+  _code=$(sed -n 's/^Status: *\([0-9][0-9][0-9]\).*/\1/p' "$WORK/fcgi.raw" | head -1); [ -z "$_code" ] && _code=200
+  awk 'f{print} /^\r?$/{f=1}' "$WORK/fcgi.raw" > "$_o"
+  echo "$_code|$_o"
+}
+
 ensure_fpm_tools() {
   command -v php-fpm >/dev/null 2>&1 || { echo "no php-fpm" >&2; return 1; }
   command -v cgi-fcgi >/dev/null 2>&1 && return 0
@@ -150,6 +215,55 @@ assert_block() {
     grep -q "\"client_ip\":\"$_ip\"" "$LOG" || { record "$_s" "$_sc" FAIL "client_ip != $_ip ($(sed -n 's/.*\("client_ip":"[^"]*"\).*/\1/p' "$LOG" | head -1))"; return; }
   fi
   record "$_s" "$_sc" PASS "http=$_http rule=$_rule ip=${_ip:-skip}"
+}
+
+# ---- Task 9 assertions ----------------------------------------------------
+# The input/header path mitigates by DROPPING excess variables and emitting the
+# block at RSHUTDOWN, so the HTTP 403 is best-effort (headers may already be
+# sent once the script has produced output). The RELIABLE signal is the log
+# line; assertions key off it and record the observed HTTP code in the detail.
+# assert_logblock <sapi> <scenario> <http> <bodyfile> <rule>
+assert_logblock() {
+  _s=$1; _sc=$2; _http=$3; _rule=$5
+  grep -q '"action":"block"' "$LOG" || { record "$_s" "$_sc" FAIL "no block line (http=$_http)"; return; }
+  grep -q "\"rule\":\"$_rule\"" "$LOG" || { record "$_s" "$_sc" FAIL "rule != $_rule ($(tr -d '\n' <"$LOG"|head -c 120))"; return; }
+  record "$_s" "$_sc" PASS "blocked rule=$_rule http=$_http (403 best-effort on input path)"
+}
+# assert_logdetect <sapi> <scenario> <http> <rule>: detect mode must LOG, not block.
+assert_logdetect() {
+  _s=$1; _sc=$2; _http=$3; _rule=$4
+  if grep -q '"action":"block"' "$LOG"; then record "$_s" "$_sc" FAIL "blocked in detect mode (http=$_http)"; return; fi
+  { grep -q '"action":"log"' "$LOG" && grep -q "\"rule\":\"$_rule\"" "$LOG"; } \
+    || { record "$_s" "$_sc" FAIL "no log line rule=$_rule (http=$_http)"; return; }
+  record "$_s" "$_sc" PASS "logged rule=$_rule http=$_http (detect)"
+}
+# assert_nofp <sapi> <name> <http>: a legit request must be 200 with zero blocks.
+assert_nofp() {
+  _s=$1; _n=$2; _http=$3
+  if [ "$_http" = 200 ] && ! grep -q '"action":"block"' "$LOG"; then
+    record "$_s" "fp_$_n" PASS "http=200 no block"
+  else
+    record "$_s" "fp_$_n" FAIL "http=$_http blocks=$(grep -c '"action":"block"' "$LOG")"
+  fi
+}
+# cli_send <port> <method> <ct-or-empty> <bodyfile-or-empty> -> "HTTP|bodyfile"
+cli_send() {
+  _o="$WORK/resp.txt"
+  if [ -n "$3" ]; then
+    _c=$(curl -s -o "$_o" -w '%{http_code}' -X "$2" -H "Content-Type: $3" --data-binary @"$4" \
+        "http://127.0.0.1:$1/" 2>/dev/null || echo 000)
+  else
+    _c=$(curl -s -o "$_o" -w '%{http_code}' -X "$2" "http://127.0.0.1:$1/" 2>/dev/null || echo 000)
+  fi
+  echo "$_c|$_o"
+}
+# cli_get_hdrs <port> <headerfile> -> "HTTP|bodyfile" (one "Name: value" per line)
+cli_get_hdrs() {
+  _o="$WORK/resp.txt"; _port=$1; _hf=$2
+  set --
+  while IFS= read -r _l || [ -n "$_l" ]; do [ -n "$_l" ] && set -- "$@" -H "$_l"; done < "$_hf"
+  _c=$(curl -s -o "$_o" -w '%{http_code}' "$@" "http://127.0.0.1:$_port/" 2>/dev/null || echo 000)
+  echo "$_c|$_o"
 }
 
 # ===========================================================================
@@ -199,6 +313,36 @@ run_cli() {
   if echo "$c" | grep -qE '^(403|413)$' && grep -q '"action":"block"' "$LOG"; then record $S detect_critical PASS "http=$c";
   else record $S detect_critical FAIL "http=$c"; fi
   cli_stop
+
+  # --- Task 9: input-shape rules (urlencoded POST; reachable on every SAPI) ---
+  # input_vars_flood (Critical): blocks in block mode AND detect mode.
+  : > "$LOG"; cli_start 8110 -d extension="$WORK/howdah.so" -d howdah.config="$WORK/iv.toml" -d howdah.log="$LOG" || { record $S input_vars_flood FAIL "down"; return; }
+  r=$(cli_send 8110 POST application/x-www-form-urlencoded "$WORK/iv.body"); assert_logblock $S input_vars_flood "${r%%|*}" "${r#*|}" max_input_vars
+  cli_stop
+  : > "$LOG"; cli_start 8111 -d extension="$WORK/howdah.so" -d howdah.config="$WORK/ivd.toml" -d howdah.log="$LOG" || { record $S input_vars_flood_detect FAIL "down"; return; }
+  r=$(cli_send 8111 POST application/x-www-form-urlencoded "$WORK/iv.body"); assert_logblock $S input_vars_flood_detect "${r%%|*}" "${r#*|}" max_input_vars
+  cli_stop
+  # nesting_depth (Critical).
+  : > "$LOG"; cli_start 8112 -d extension="$WORK/howdah.so" -d howdah.config="$WORK/nd.toml" -d howdah.log="$LOG" || { record $S nesting_depth FAIL "down"; return; }
+  r=$(cli_send 8112 POST application/x-www-form-urlencoded "$WORK/nd.body"); assert_logblock $S nesting_depth "${r%%|*}" "${r#*|}" max_input_nesting_depth
+  cli_stop
+  # request_headers_flood: the CLI built-in server's HTTP_* -> input_filter
+  # routing is version-dependent (php8 populates it, php5 does not), so the
+  # header limit is asserted under fpm + apache (real PARSE_SERVER), not here.
+  record $S request_headers_flood SKIP "header counting asserted under fpm/apache (cli HTTP_* routing is version-dependent)"
+  record $S request_headers_flood_detect SKIP "header counting asserted under fpm/apache"
+
+  # --- Task 9: false-positive corpus (default limits, must be 200 + no block) ---
+  : > "$LOG"; cli_start 8113 -d extension="$WORK/howdah.so" -d howdah.log="$LOG" || { record $S fp_setup FAIL "down"; return; }
+  r=$(cli_send 8113 POST application/x-www-form-urlencoded "$INCORPUS/large_form.urlencoded"); assert_nofp $S large_form "${r%%|*}"
+  : > "$LOG"; r=$(cli_send 8113 POST application/x-www-form-urlencoded "$INCORPUS/nested_form.urlencoded"); assert_nofp $S nested_form "${r%%|*}"
+  : > "$LOG"; r=$(cli_get_hdrs 8113 "$INCORPUS/ordinary_headers.txt"); assert_nofp $S ordinary_headers "${r%%|*}"
+  while IFS= read -r q || [ -n "$q" ]; do
+    [ -z "$q" ] && continue; : > "$LOG"
+    c=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8113/?$q" 2>/dev/null || echo 000)
+    assert_nofp $S "query_$(echo "$q" | tr -c 'a-zA-Z0-9' _ | cut -c1-16)" "$c"
+  done < "$INCORPUS/safe_queries.txt"
+  cli_stop
 }
 
 run_fpm() {
@@ -230,6 +374,37 @@ run_fpm() {
   fpm_start -d extension="$WORK/howdah.so" -d howdah.config="$WORK/dc.toml" -d howdah.log="$LOG" || { record $S detect_critical FAIL down; return; }
   r=$(fpm_post FloodB0 "$WORK/flood_fields.bin" 203.0.113.9); c=${r%%|*}
   if echo "$c" | grep -qE '^(403|413)$' && grep -q '"action":"block"' "$LOG"; then record $S detect_critical PASS "http=$c"; else record $S detect_critical FAIL "http=$c"; fi
+  fpm_stop
+
+  # --- Task 9: input-shape rules over real php-fpm ---------------------------
+  : > "$LOG"; fpm_start -d extension="$WORK/howdah.so" -d howdah.config="$WORK/iv.toml" -d howdah.log="$LOG" || { record $S input_vars_flood FAIL down; return; }
+  r=$(fpm_send POST application/x-www-form-urlencoded "$WORK/iv.body" 203.0.113.9); assert_logblock $S input_vars_flood "${r%%|*}" "${r#*|}" max_input_vars
+  fpm_stop
+  : > "$LOG"; fpm_start -d extension="$WORK/howdah.so" -d howdah.config="$WORK/ivd.toml" -d howdah.log="$LOG" || { record $S input_vars_flood_detect FAIL down; return; }
+  r=$(fpm_send POST application/x-www-form-urlencoded "$WORK/iv.body" 203.0.113.9); assert_logblock $S input_vars_flood_detect "${r%%|*}" "${r#*|}" max_input_vars
+  fpm_stop
+  : > "$LOG"; fpm_start -d extension="$WORK/howdah.so" -d howdah.config="$WORK/nd.toml" -d howdah.log="$LOG" || { record $S nesting_depth FAIL down; return; }
+  r=$(fpm_send POST application/x-www-form-urlencoded "$WORK/nd.body" 203.0.113.9); assert_logblock $S nesting_depth "${r%%|*}" "${r#*|}" max_input_nesting_depth
+  fpm_stop
+
+  # --- Task 9: request-header count over real HTTP_* server vars (Standard:
+  #     blocks in block mode, logs in detect mode) ---
+  : > "$LOG"; fpm_start -d extension="$WORK/howdah.so" -d howdah.config="$WORK/rh.toml" -d howdah.log="$LOG" || { record $S request_headers_flood FAIL down; return; }
+  r=$(fpm_get_hdrs "$WORK/flood_hdr.txt" 203.0.113.9); assert_logblock $S request_headers_flood "${r%%|*}" "${r#*|}" max_request_headers
+  fpm_stop
+  : > "$LOG"; fpm_start -d extension="$WORK/howdah.so" -d howdah.config="$WORK/rhd.toml" -d howdah.log="$LOG" || { record $S request_headers_flood_detect FAIL down; return; }
+  r=$(fpm_get_hdrs "$WORK/flood_hdr.txt" 203.0.113.9); assert_logdetect $S request_headers_flood_detect "${r%%|*}" max_request_headers
+  fpm_stop
+
+  # --- Task 9: false-positive corpus at default limits -----------------------
+  : > "$LOG"; fpm_start -d extension="$WORK/howdah.so" -d howdah.log="$LOG" || { record $S fp_setup FAIL down; return; }
+  r=$(fpm_send POST application/x-www-form-urlencoded "$INCORPUS/large_form.urlencoded" 203.0.113.9); assert_nofp $S large_form "${r%%|*}"
+  : > "$LOG"; r=$(fpm_send POST application/x-www-form-urlencoded "$INCORPUS/nested_form.urlencoded" 203.0.113.9); assert_nofp $S nested_form "${r%%|*}"
+  : > "$LOG"; r=$(fpm_get_hdrs "$INCORPUS/ordinary_headers.txt" 203.0.113.9); assert_nofp $S ordinary_headers "${r%%|*}"
+  while IFS= read -r q || [ -n "$q" ]; do
+    [ -z "$q" ] && continue; : > "$LOG"
+    r=$(fpm_get_query "$q" 203.0.113.9); assert_nofp $S "query_$(echo "$q" | tr -c 'a-zA-Z0-9' _ | cut -c1-16)" "${r%%|*}"
+  done < "$INCORPUS/safe_queries.txt"
   fpm_stop
 }
 

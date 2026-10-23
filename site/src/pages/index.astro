@@ -1,284 +1,146 @@
 ---
-import '../styles/global.css';
+import Layout from '../layouts/Layout.astro';
 import coverage from '../data/coverage.json';
+import { REPO, RELEASES } from '../lib/site';
 
-const REPO = 'https://github.com/howdah/howdah';
 const rows = coverage.rows;
 const SAPI_LABEL: Record<string, string> = { cli: 'cli-server', fpm: 'php-fpm', apache: 'Apache mod_php' };
 const tested = (r: any) => (r.tested as string[]).map((s) => SAPI_LABEL[s]);
 const untested = (r: any) => ['cli', 'fpm', 'apache'].filter((s) => !r.tested.includes(s)).map((s) => SAPI_LABEL[s]);
 const ranDate = (coverage.generated || '').slice(0, 10);
 ---
-<!doctype html>
-<html lang="en" dir="ltr">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Howdah: a defensive firewall for PHP</title>
-  <meta name="description" content="Howdah is an open-source, defensive firewall that loads into PHP itself. It blocks abusive multipart upload floods before they exhaust memory, including on end-of-life PHP (5.4 to 8.1) that will not get the official fix." />
-  <meta name="color-scheme" content="light dark" />
-  <meta name="theme-color" content="#14112a" media="(prefers-color-scheme: dark)" />
-  <meta name="theme-color" content="#f7f1e5" media="(prefers-color-scheme: light)" />
-  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-  <link rel="canonical" href="https://howdah.org/" />
-  <link rel="preload" href="/fonts/fraunces-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin />
-</head>
-<body>
-  <a class="skip" href="#main">Skip to content</a>
-
-  <header>
-  <div class="status" role="note" aria-label="Project status">
+<Layout
+  title="Howdah: a defensive firewall for PHP"
+  description="Howdah is an open-source, defensive firewall that loads into PHP itself. It blocks abusive multipart upload floods before they exhaust memory, including on end-of-life PHP (5.4 to 8.1) that will not get the official fix."
+  path="/"
+>
+  <div class="hero">
     <div class="wrap">
-      <strong>Released</strong>
-      <p><a href={REPO + '/releases/tag/v0.1.0'}>Howdah 0.1.0 is released.</a> It is an early 0.x release: the scope is deliberately narrow (multipart limits) and defaults may still change. Start in detect mode and read the coverage table for what has been tested.</p>
-    </div>
-  </div>
-
-  <div class="top">
-    <div class="wrap">
-      <a class="brand" href="/" aria-label="Howdah, home">
-        <svg viewBox="0 0 48 48" aria-hidden="true" focusable="false">
-          <path d="M6 41h36" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" fill="none"/>
-          <path d="M10 41V27h28v14" fill="var(--hot-bg)" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/>
-          <path d="M8 27c0-9 7-17 16-17s16 8 16 17z" fill="var(--accent)" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/>
-          <path d="M24 10V5" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
-          <path d="M18 34h12" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
-        </svg>
-        Howdah
-      </a>
-      <nav aria-label="Page sections">
-        <ul>
-          <li><a href="#what">What it is</a></li>
-          <li><a href="#story">PHP2Shell</a></li>
-          <li><a href="#coverage">Coverage</a></li>
-          <li><a href="#install">Install</a></li>
-          <li><a href={REPO}>GitHub</a></li>
-        </ul>
-      </nav>
-    </div>
-  </div>
-  </header>
-
-  <main id="main">
-    <div class="hero">
-      <div class="wrap">
-        <p class="eyebrow">Open source &middot; defensive &middot; built for PHP 5.4 to 8.5 (see coverage for what is tested)</p>
-        <h1>Howdah blocks abusive multipart <em>part/file floods</em> before they exhaust memory.</h1>
-        <p class="lede">That is the shape of the PHP2Shell attack. Howdah is a firewall that loads into PHP itself, so it protects even end-of-life PHP (5.4 to 8.1) that will not get the official fix, on the versions tested in the table below.</p>
-        <p class="fine">Built for sysadmins who run PHP on their own servers, including servers stuck on old PHP versions. Howdah is defensive only: it recognizes and refuses abusive requests, nothing else.</p>
-        <div class="cta">
-          <a class="btn primary" href={REPO + '/releases/tag/v0.1.0'}>Download 0.1.0</a>
-          <a class="btn ghost" href="#coverage">See exactly what has been tested</a>
-          <a class="btn ghost" href={REPO}>View on GitHub</a>
-        </div>
+      <p class="eyebrow">Open source &middot; defensive &middot; built for PHP 5.4 to 8.5 (see coverage for what is tested)</p>
+      <h1>Howdah blocks abusive multipart <em>part/file floods</em> before they exhaust memory.</h1>
+      <p class="lede">That is the shape of the PHP2Shell attack. Howdah is a firewall that loads into PHP itself, so it protects even end-of-life PHP (5.4 to 8.1) that will not get the official fix, on the versions tested in the table below.</p>
+      <p class="fine">Built for sysadmins who run PHP on their own servers, including servers stuck on old PHP versions. Howdah is defensive only: it recognizes and refuses abusive requests, nothing else.</p>
+      <div class="cta">
+        <a class="btn primary" href="/install/">Install Howdah</a>
+        <a class="btn ghost" href="#coverage">See exactly what has been tested</a>
+        <a class="btn ghost" href={REPO}>View on GitHub</a>
       </div>
     </div>
+  </div>
 
-    <section id="what">
-      <div class="wrap cols aside">
+  <section id="what">
+    <div class="wrap cols aside">
+      <div>
+        <h2>What is Howdah, and why the name?</h2>
+        <p>Howdah is a native extension for PHP. When a web request arrives, PHP starts parsing it before any of your code runs. Howdah watches that parsing step and refuses requests that are built to exhaust memory, while PHP is still working through them.</p>
+        <p>Version 0.1 does one job: it enforces limits on <code>multipart/form-data</code> uploads, such as the number of parts, the number of files and the length of names. Those limits block by default, even in detect mode. Everything else starts in log-only mode so you can watch it before you let it block.</p>
+        <p>It is not a replacement for patching. Upgrade PHP when you can. Use Howdah when you cannot, or until you can.</p>
+      </div>
+      <aside class="card" aria-labelledby="howdah-word">
+        <h3 id="howdah-word">A howdah?</h3>
+        <p>A howdah is the covered seat strapped onto an elephant's back: a small armoured shelter that carries someone safely. PHP's mascot is an elephant, so the name fits. Howdah sits on PHP's back and shields what is riding on it.</p>
+        <p>Howdah is an independent project. It is not made by, or endorsed by, the PHP project.</p>
+      </aside>
+    </div>
+  </section>
+
+  <section id="story" class="alt">
+    <div class="wrap">
+      <h2>The PHP2Shell story, plainly told</h2>
+      <div class="cols two">
         <div>
-          <h2>What is Howdah, and why the name?</h2>
-          <p>Howdah is a native extension for PHP. When a web request arrives, PHP starts parsing it before any of your code runs. Howdah watches that parsing step and refuses requests that are built to exhaust memory, while PHP is still working through them.</p>
-          <p>Version 0.1 does one job: it enforces limits on <code>multipart/form-data</code> uploads, such as the number of parts, the number of files and the length of names. Those limits block by default, even in detect mode. Everything else starts in log-only mode so you can watch it before you let it block.</p>
-          <p>It is not a replacement for patching. Upgrade PHP when you can. Use Howdah when you cannot, or until you can.</p>
-        </div>
-        <aside class="card" aria-labelledby="howdah-word">
-          <h3 id="howdah-word">A howdah?</h3>
-          <p>A howdah is the covered seat strapped onto an elephant's back: a small armoured shelter that carries someone safely. PHP's mascot is an elephant, so the name fits. Howdah sits on PHP's back and shields what is riding on it.</p>
-          <p>Howdah is an independent project. It is not made by, or endorsed by, the PHP project.</p>
-        </aside>
-      </div>
-    </section>
-
-    <section id="story" class="alt">
-      <div class="wrap">
-        <h2>The PHP2Shell story, plainly told</h2>
-        <div class="cols two">
-          <div>
-            <p>On 21 October 2026 the PHP project patched two linked flaws, CVE-2026-109618 and CVE-2026-109619, which security researchers named PHP2Shell. As publicly reported, a crafted <code>multipart/form-data</code> request makes PHP use a lot of memory while it reads the headers of upload parts. A body well under the default 8&nbsp;MB limit can hold hundreds of tiny, empty file parts. Corrupted state from that can, according to the reports, lead to remote code execution without logging in.</p>
-            <p>According to public reports, the official fix ships for PHP 8.2 and newer; older branches get no official patch. PHP 8.1 and older still run a very large share of the web.</p>
-            <div class="note">
-              <h3>What we did and did not verify</h3>
-              <p>Our tests reproduce only the harmless <em>structure</em> of such a flood: how many parts and fields, and how large. We did <strong>not</strong> reproduce the CVE's <code>session.upload_progress</code> header-parsing path, so we do <strong>not</strong> claim Howdah blocks CVE-2026-109618 on a stock configuration.</p>
-              <p>What we measured: PHP's own <code>max_input_vars</code> and <code>max_file_uploads</code> already keep the flood shape we built small on a default box. On a box where an admin has raised those caps, the same shape used 127 to 173&nbsp;MB, against a 128&nbsp;MB limit, and Howdah's default limits refuse it long before that. Howdah's value is strongest on raised-cap servers and on old PHP with no official fix. See the <a href="#coverage">coverage table</a> and <a href={REPO + '/blob/main/docs/coverage-data.md'}>the measurements</a>.</p>
-            </div>
-          </div>
-          <div>
-            <h3 style="margin-top:0">Why only a PHP extension can stop it</h3>
-            <ul class="facts">
-              <li>PHP reads the whole upload into <code>$_FILES</code> and <code>$_POST</code> before any PHP script runs, so a firewall written in PHP (for example via <code>auto_prepend_file</code>) is too late.</li>
-              <li><code>opcache.preload</code> runs once when the server starts, never per request.</li>
-              <li>A network firewall sees bytes on the wire, not how PHP will interpret them.</li>
-              <li>A compiled extension runs inside PHP's own upload parser, so it can count parts as PHP reads them and stop the request early.</li>
-            </ul>
-            <p style="margin-top:1rem;font-size:.95rem">The incident details above come from public reports. We are checking them against the official advisories (GHSA-w8hw-w9fx-j79w, GHSA-6wmf-4rv5-p3rp, php.net) and will correct this page if they differ.</p>
+          <p>On 21 October 2026 the PHP project patched two linked flaws, CVE-2026-109618 and CVE-2026-109619, which security researchers named PHP2Shell. As publicly reported, a crafted <code>multipart/form-data</code> request makes PHP use a lot of memory while it reads the headers of upload parts. A body well under the default 8&nbsp;MB limit can hold hundreds of tiny, empty file parts. Corrupted state from that can, according to the reports, lead to remote code execution without logging in.</p>
+          <p>According to public reports, the official fix ships for PHP 8.2 and newer; older branches get no official patch. PHP 8.1 and older still run a very large share of the web.</p>
+          <div class="note">
+            <h3>What we did and did not verify</h3>
+            <p>Our tests reproduce only the harmless <em>structure</em> of such a flood: how many parts and fields, and how large. We did <strong>not</strong> reproduce the CVE's <code>session.upload_progress</code> header-parsing path, so we do <strong>not</strong> claim Howdah blocks CVE-2026-109618 on a stock configuration.</p>
+            <p>What we measured: PHP's own <code>max_input_vars</code> and <code>max_file_uploads</code> already keep the flood shape we built small on a default box. On a box where an admin has raised those caps, the same shape used 127 to 173&nbsp;MB, against a 128&nbsp;MB limit, and Howdah's default limits refuse it long before that. Howdah's value is strongest on raised-cap servers and on old PHP with no official fix. See the <a href="/coverage/">coverage table</a> and <a href={`${REPO}/blob/main/docs/coverage-data.md`}>the measurements</a>.</p>
           </div>
         </div>
-      </div>
-    </section>
-
-    <section id="limits">
-      <div class="wrap">
-        <h2>What 0.1 enforces</h2>
-        <p>These are the default limits. A request that crosses one is refused with HTTP 403 and written to a JSON log. You can change them in a TOML file.</p>
-        <div class="tablewrap" tabindex="0" role="region" aria-label="Default limits (scrolls sideways on narrow screens)">
-          <table>
-            <caption class="sr-only">Default limits</caption>
-            <thead><tr><th scope="col">Limit</th><th scope="col">Default</th><th scope="col">What it stops</th></tr></thead>
-            <tbody>
-              <tr><th scope="row">max_parts</th><td>2000</td><td>Floods of form-field parts.</td></tr>
-              <tr><th scope="row">max_files</th><td>200</td><td>Floods of file parts (the PHP2Shell shape).</td></tr>
-              <tr><th scope="row">max_filename_bytes</th><td>512</td><td>Oversized filenames.</td></tr>
-              <tr><th scope="row">max_field_name_bytes</th><td>1024</td><td>Oversized field names.</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <p class="legend">These four rules are the exact defense. PHP hands Howdah one event per part with its real name, so every part is counted and every name measured precisely. Two more limits, <code>max_part_header_bytes</code> and <code>max_part_headers</code>, exist but are best-effort: only the <code>Content-Disposition</code> header reaches the extension, so they under-count and back up the four above rather than drive the defense.</p>
-      </div>
-    </section>
-
-    <section id="coverage" class="alt">
-      <div class="wrap">
-        <h2>Coverage: what has actually been tested</h2>
-        <p>Every cell below is generated from the test matrix results{ranDate && <> (run {ranDate})</>}. A version says &ldquo;Blocked&rdquo; only if the test for that exact version and server type passed. Versions we have not run are marked &ldquo;Not run&rdquo; and are <strong>not</strong> claimed as protected.</p>
-        <div class="tablewrap" tabindex="0" role="region" aria-label="Coverage by PHP version (scrolls sideways on narrow screens)">
-          <table>
-            <caption class="sr-only">Coverage of the two flood shapes by PHP version</caption>
-            <thead>
-              <tr>
-                <th scope="col">PHP</th>
-                <th scope="col">File flood<br /><code>max_files</code></th>
-                <th scope="col">Field/part flood<br /><code>max_parts</code></th>
-                <th scope="col">Server types tested</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r: any) => (
-                <tr>
-                  <th scope="row">{r.version ?? r.minor}</th>
-                  {r.version ? (
-                    <>
-                      <td><span class="tag ok">Blocked</span></td>
-                      <td><span class="tag ok">Blocked</span></td>
-                      <td>
-                        {tested(r).join(', ')}
-                        {untested(r).length > 0 && <small>Not run on: {untested(r).join(', ')}</small>}
-                      </td>
-                    </>
-                  ) : (
-                    <>
-                      <td><span class="tag no">Not run</span></td>
-                      <td><span class="tag no">Not run</span></td>
-                      <td><small style="margin:0">{r.why}</small></td>
-                    </>
-                  )}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <p class="legend"><strong>How to read it.</strong> &ldquo;Blocked&rdquo; means a request shaped like the flood got HTTP 403 and a log entry at default limits, on a server configured with raised caps (the exposed setup). The same runs also sent seven ordinary uploads (galleries, settings forms, nested arrays) and none was blocked. Totals: {coverage.totals.pass} checks passed, {coverage.totals.fail} failed, {coverage.totals.skip} skipped. The skips are PHP 5.4 on php-fpm, which the lab could not drive.</p>
-        <div class="note">
-          <h3>Honest limits of this table</h3>
+        <div>
+          <h3 style="margin-top:0">Why only a PHP extension can stop it</h3>
           <ul class="facts">
-            <li>Apache <code>mod_php</code> was tested on 7.4 and 8.1 only. For 5.6, 7.3 and 8.4 the non-CLI check was php-fpm.</li>
-            <li>PHP 5.4 was tested on PHP's built-in server only.</li>
-            <li>{coverage.notRunMinors.length} minors were not run: {coverage.notRunMinors.join(', ')}. They share a code path with a generation that passed, which is a reason to expect they work, not a test result.</li>
-            <li>The CVE's <code>session.upload_progress</code> header-parsing path was not reproduced. Upload-progress on and off were both tested, to confirm Howdah still works either way.</li>
-            <li>Linux x86_64, non-thread-safe PHP builds only.</li>
+            <li>PHP reads the whole upload into <code>$_FILES</code> and <code>$_POST</code> before any PHP script runs, so a firewall written in PHP (for example via <code>auto_prepend_file</code>) is too late.</li>
+            <li><code>opcache.preload</code> runs once when the server starts, never per request.</li>
+            <li>A network firewall sees bytes on the wire, not how PHP will interpret them.</li>
+            <li>A compiled extension runs inside PHP's own upload parser, so it can count parts as PHP reads them and stop the request early.</li>
           </ul>
+          <p style="margin-top:1rem;font-size:.95rem">The incident details above come from public reports. We are checking them against the official advisories (GHSA-w8hw-w9fx-j79w, GHSA-6wmf-4rv5-p3rp, php.net) and will correct this page if they differ.</p>
         </div>
-        <p class="legend">The table is generated by <a href={REPO + '/blob/main/site/scripts/gen-coverage.mjs'}>a script</a> from <a href={REPO + '/blob/main/lab/integration/matrix-results.tsv'}>the raw results</a>. The same data, in prose, is in <a href={REPO + '/blob/main/docs/coverage.md'}>docs/coverage.md</a>.</p>
-      </div>
-    </section>
-
-    <section id="install">
-      <div class="wrap">
-        <h2>Install, verify, roll back</h2>
-        <p>Version 0.1.0 is installed by hand from a signed tarball, one per PHP minor version, from the <a href={REPO + '/releases/tag/v0.1.0'}>v0.1.0 release page</a>. Package repositories (apt, yum) are not available yet. The example is PHP 7.3 with PHP-FPM on Ubuntu 16.04; other setups use the same steps with different paths. Start in detect mode, and check the <a href="#coverage">coverage table</a> for your PHP version first.</p>
-        <ol class="steps">
-          <li>
-            <h3>See which PHP you have</h3>
-            <p>Howdah needs one build per PHP minor version. The helper lists every PHP install on the box and changes nothing.</p>
-<pre tabindex="0"><code>curl -fsSLO https://github.com/howdah/howdah/releases/download/v0.1.0/howdah-check
-chmod +x howdah-check
-./howdah-check detect
-<span class="c"># -> PHP 7.3.33, API 20180731, NTS, /usr/lib/php/20180731, SAPIs: cli fpm</span></code></pre>
-            <p><code>howdah-check</code> is a single POSIX shell script that works with any PHP version. It is also bundled in every tarball, and it is covered by <code>SHA256SUMS</code> if you want to verify it (step 2).</p>
-          </li>
-          <li>
-            <h3>Download, verify, then install</h3>
-            <p>Pick the tarball whose name matches your PHP minor version and Zend API number (the <code>API</code> line above; it is also in <code>php -i | grep 'PHP API'</code>). Download it with <code>SHA256SUMS</code>, <code>SHA256SUMS.asc</code> and <code>howdah-release-signing.asc</code> (the public key) from the release page, then check the checksum and the signature before installing. The signing key's primary fingerprint is <code>1152 1035 C600 F638 31F8 2551 2087 B872 0997 807B</code>; compare it with what <code>gpg</code> prints.</p>
-<pre tabindex="0"><code>B=https://github.com/howdah/howdah/releases/download/v0.1.0
-T=howdah-0.1.0-php7.3-20180731-linux-x86_64.tar.gz
-curl -fLO $B/$T -O $B/SHA256SUMS -O $B/SHA256SUMS.asc -O $B/howdah-release-signing.asc
-
-sha256sum -c --ignore-missing SHA256SUMS
-gpg --import howdah-release-signing.asc
-gpg --verify SHA256SUMS.asc SHA256SUMS
-
-tar xzf $T
-sudo cp howdah-0.1.0-php7.3/howdah.so /usr/lib/php/20180731/
-sudo cp howdah-0.1.0-php7.3/howdah.ini /etc/php/7.3/mods-available/
-sudo install -m 0755 howdah-0.1.0-php7.3/howdah-check /usr/local/bin/
-<span class="c"># or build from source against your PHP headers with cargo and php-config</span></code></pre>
-          </li>
-          <li>
-            <h3>Enable it for FPM and restart</h3>
-            <p>It ships with <code>howdah.mode = detect</code>: the critical limits above block right away, and everything else only logs.</p>
-<pre tabindex="0"><code>sudo phpenmod -v 7.3 -s fpm howdah
-sudo systemctl restart php7.3-fpm</code></pre>
-          </li>
-          <li>
-            <h3>Verify it is live in the web server, not just the command line</h3>
-            <p>The self-test sends two harmless requests: one carrying a marker field, and one with just over the part limit (empty fields, no payload).</p>
-<pre tabindex="0"><code>php7.3 --ri howdah
-howdah-check web https://your.site/
-<span class="c"># -> selftest marker:   flagged  (request id 7f3c...)</span>
-<span class="c"># -> over-limit parts:  BLOCKED  (HTTP 403, request id 91ab..., 2001 parts)</span>
-tail -n 2 /var/log/howdah/events.log</code></pre>
-            <p>If the second line says &ldquo;not blocked&rdquo;, PHP's own <code>max_input_vars</code> may have stopped parsing before the limit was reached. That is PHP protecting itself, and it is worth knowing.</p>
-          </li>
-          <li>
-            <h3>Move to block mode when the logs look clean</h3>
-<pre tabindex="0"><code>sudo sed -i 's/^howdah.mode.*/howdah.mode = block/' /etc/php/7.3/mods-available/howdah.ini
-sudo systemctl restart php7.3-fpm</code></pre>
-          </li>
-          <li>
-            <h3>Roll back at any time</h3>
-            <p>One step, no rebuild.</p>
-<pre tabindex="0"><code>sudo phpdismod -v 7.3 -s fpm howdah &amp;&amp; sudo systemctl restart php7.3-fpm</code></pre>
-          </li>
-        </ol>
-        <p class="legend">CentOS 7 with stock PHP 5.4 uses Apache <code>mod_php</code> and a different config directory (<code>/etc/php.d/</code>); the same steps apply, but PHP 5.4 was tested on PHP's built-in server only (see coverage). Full per-platform guides are planned for 1.0.</p>
-      </div>
-    </section>
-  </main>
-
-  <footer class="alt" style="background:var(--bg-2)">
-    <div class="wrap">
-      <div>
-        <h2>Howdah</h2>
-        <p>An independent, open-source, defensive web application firewall for PHP. This site has no trackers, no cookies, no third-party requests and no JavaScript. Fonts are served from this site.</p>
-        <p>Howdah is not affiliated with or endorsed by the PHP project or The PHP Group.</p>
-      </div>
-      <div>
-        <h2>Project</h2>
-        <ul>
-          <li><a href={REPO}>Source on GitHub</a></li>
-          <li><a href={REPO + '/security/policy'}>Security policy</a></li>
-          <li><a href={REPO + '/blob/main/docs/coverage.md'}>Coverage details</a></li>
-        </ul>
-      </div>
-      <div>
-        <h2>License</h2>
-        <ul>
-          <li><a href={REPO + '/blob/main/LICENSE-MIT'}>MIT</a></li>
-          <li><a href={REPO + '/blob/main/LICENSE-APACHE'}>Apache-2.0</a></li>
-        </ul>
-        <p>Dual-licensed: use either, at your option.</p>
       </div>
     </div>
-  </footer>
-</body>
-</html>
+  </section>
+
+  <section id="limits">
+    <div class="wrap">
+      <h2>What 0.1 enforces</h2>
+      <p>These are the default limits. A request that crosses one is refused with HTTP 403 and written to a JSON log. You can change them in a TOML file.</p>
+      <div class="tablewrap" tabindex="0" role="region" aria-label="Default limits (scrolls sideways on narrow screens)">
+        <table>
+          <caption class="sr-only">Default limits</caption>
+          <thead><tr><th scope="col">Limit</th><th scope="col">Default</th><th scope="col">What it stops</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">max_parts</th><td>2000</td><td>Floods of form-field parts.</td></tr>
+            <tr><th scope="row">max_files</th><td>200</td><td>Floods of file parts (the PHP2Shell shape).</td></tr>
+            <tr><th scope="row">max_filename_bytes</th><td>512</td><td>Oversized filenames.</td></tr>
+            <tr><th scope="row">max_field_name_bytes</th><td>1024</td><td>Oversized field names.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="legend">These four rules are the exact defense. PHP hands Howdah one event per part with its real name, so every part is counted and every name measured precisely. Two more limits, <code>max_part_header_bytes</code> and <code>max_part_headers</code>, exist but are best-effort: only the <code>Content-Disposition</code> header reaches the extension, so they under-count and back up the four above rather than drive the defense.</p>
+    </div>
+  </section>
+
+  <section id="coverage" class="alt">
+    <div class="wrap">
+      <h2>Coverage: what has actually been tested</h2>
+      <p>Every cell below is generated from the test matrix results{ranDate && <> (run {ranDate})</>}. A version says &ldquo;Blocked&rdquo; only if the test for that exact version and server type passed. Versions we have not run are marked &ldquo;Not run&rdquo; and are <strong>not</strong> claimed as protected.</p>
+      <div class="tablewrap" tabindex="0" role="region" aria-label="Coverage by PHP version (scrolls sideways on narrow screens)">
+        <table>
+          <caption class="sr-only">Coverage of the two flood shapes by PHP version</caption>
+          <thead>
+            <tr>
+              <th scope="col">PHP</th>
+              <th scope="col">File flood<br /><code>max_files</code></th>
+              <th scope="col">Field/part flood<br /><code>max_parts</code></th>
+              <th scope="col">Server types tested</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r: any) => (
+              <tr>
+                <th scope="row">{r.version ?? r.minor}</th>
+                {r.version ? (
+                  <>
+                    <td><span class="tag ok">Blocked</span></td>
+                    <td><span class="tag ok">Blocked</span></td>
+                    <td>
+                      {tested(r).join(', ')}
+                      {untested(r).length > 0 && <small>Not run on: {untested(r).join(', ')}</small>}
+                    </td>
+                  </>
+                ) : (
+                  <>
+                    <td><span class="tag no">Not run</span></td>
+                    <td><span class="tag no">Not run</span></td>
+                    <td><small style="margin:0">{r.why}</small></td>
+                  </>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p class="legend"><strong>How to read it.</strong> &ldquo;Blocked&rdquo; means a request shaped like the flood got HTTP 403 and a log entry at default limits, on a server configured with raised caps (the exposed setup). The same runs also sent seven ordinary uploads (galleries, settings forms, nested arrays) and none was blocked. Totals: {coverage.totals.pass} checks passed, {coverage.totals.fail} failed, {coverage.totals.skip} skipped. The skips are PHP 5.4 on php-fpm, which the lab could not drive.</p>
+      <p class="legend">The table is generated by <a href={`${REPO}/blob/main/site/scripts/gen-coverage.mjs`}>a script</a> from <a href={`${REPO}/blob/main/lab/integration/matrix-results.tsv`}>the raw results</a>. The full per-server-type table and the honest limits are on the <a href="/coverage/">coverage page</a>.</p>
+    </div>
+  </section>
+
+  <section id="install">
+    <div class="wrap">
+      <h2>Install, verify, roll back</h2>
+      <p>Howdah installs from the apt/yum repository or a signed tarball, one build per PHP minor version. The <a href="/install/">install picker</a> gives the exact commands for your OS, PHP source and server type. Start in detect mode, and check the <a href="/coverage/">coverage table</a> for your PHP version first.</p>
+      <p><a class="btn primary" href="/install/">Open the install picker</a></p>
+    </div>
+  </section>
+</Layout>

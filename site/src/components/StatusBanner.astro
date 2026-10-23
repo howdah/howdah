@@ -1,0 +1,11 @@
+---
+// The site-wide status banner. Released-1.0 copy: still steers first-timers to
+// detect mode and the coverage table before they switch anything to block.
+import { RELEASES } from '../lib/site';
+---
+<div class="status" role="note" aria-label="Project status">
+  <div class="wrap">
+    <strong>Released</strong>
+    <p><a href={`${RELEASES}/tag/v1.0.0`}>Howdah 1.0.0 is released.</a> Install from the apt/yum repository or a signed tarball. Howdah starts in <code>detect</code> mode: the critical limits block, everything else only logs. Read the <a href="/coverage/">coverage table</a> for exactly what has been tested on your PHP version before you switch rules to block.</p>
+  </div>
+</div>

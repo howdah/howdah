@@ -1,0 +1,217 @@
+//! WebAssembly build of the Howdah core for the browser demo.
+//!
+//! Verdicts come from the REAL core: `howdah_wasm_analyze` drives the same
+//! C-ABI entry points the PHP extension uses (init -> request_begin -> feed ->
+//! request_end -> take_log_line -> free). Nothing is re-implemented here.
+//!
+//! # ABI for the JS author (all sizes/pointers are wasm32 u32)
+//!
+//! * `howdah_wasm_alloc(len) -> ptr`: allocate `len` zeroed bytes in linear
+//!   memory. Copy input bytes there (`new Uint8Array(memory.buffer, ptr, len)`;
+//!   re-create the view after any call, memory may grow). Free with
+//!   `howdah_wasm_free(ptr, len)` using the SAME len.
+//! * `howdah_wasm_free(ptr, len)`: free a buffer from `howdah_wasm_alloc` or an
+//!   analyze result. Exactly once per buffer.
+//! * `howdah_wasm_analyze(cfg_ptr, cfg_len, body_ptr, body_len) -> result_ptr`:
+//!   - config: UTF-8 TOML (`cfg_len == 0` => safe defaults: block mode, default
+//!     limits; invalid config also falls back to safe defaults, in the core).
+//!   - body: raw multipart/form-data body bytes, delimited with the FIXED
+//!     boundary [`BOUNDARY`] (`HowdahDemoBoundary`), i.e. delimiter lines are
+//!     `--HowdahDemoBoundary`, final `--HowdahDemoBoundary--`. The JS must build
+//!     bodies with exactly that boundary.
+//!   - Input buffers are only borrowed; the caller still frees them.
+//!   - Returns a pointer to a UTF-8 JSON string
+//!     `{"action":"allow|log|block","rule":<string|null>,"reason":<string>}`.
+//!     Read its length with `howdah_wasm_result_len()` IMMEDIATELY after the
+//!     call (before any other analyze), decode it, then
+//!     `howdah_wasm_free(result_ptr, result_len)`.
+//! * `howdah_wasm_result_len() -> len`: byte length of the most recent result.
+//!
+//! The module is single-threaded and needs no imports (no WASI, no JS glue).
+//! Mode `detect` downgrades standard-severity hits to `"log"`; critical flood
+//! rules still block, exactly as in the shipping extension.
+
+use howdah_core::ffi::{
+    howdah_feed, howdah_free, howdah_free_str, howdah_init, howdah_request_begin, howdah_request_end,
+    howdah_take_log_line,
+};
+use std::ffi::{c_char, CStr};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Fixed multipart boundary the demo body must use.
+pub const BOUNDARY: &str = "HowdahDemoBoundary";
+
+static RESULT_LEN: AtomicUsize = AtomicUsize::new(0);
+
+fn into_raw(v: Vec<u8>) -> *mut u8 {
+    Box::into_raw(v.into_boxed_slice()) as *mut u8
+}
+
+/// Allocate `len` zeroed bytes; release with [`howdah_wasm_free`] (same `len`).
+#[no_mangle]
+pub extern "C" fn howdah_wasm_alloc(len: usize) -> *mut u8 {
+    into_raw(vec![0u8; len])
+}
+
+/// Free a buffer from [`howdah_wasm_alloc`] / [`howdah_wasm_analyze`].
+///
+/// # Safety
+/// `ptr`/`len` must be exactly a pair previously handed out, freed at most once.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_wasm_free(ptr: *mut u8, len: usize) {
+    if !ptr.is_null() {
+        drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
+    }
+}
+
+/// Length in bytes of the last [`howdah_wasm_analyze`] result.
+#[no_mangle]
+pub extern "C" fn howdah_wasm_result_len() -> usize {
+    RESULT_LEN.load(Ordering::Relaxed)
+}
+
+/// Run the real core over `body`; see the module docs for the ABI.
+///
+/// # Safety
+/// Each non-null pointer must be valid for reads of its length.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_wasm_analyze(
+    cfg_ptr: *const u8,
+    cfg_len: usize,
+    body_ptr: *const u8,
+    body_len: usize,
+) -> *mut u8 {
+    let cfg: &[u8] = if cfg_ptr.is_null() || cfg_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(cfg_ptr, cfg_len)
+    };
+    let body: &[u8] = if body_ptr.is_null() || body_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(body_ptr, body_len)
+    };
+    let json = analyze(cfg, body);
+    RESULT_LEN.store(json.len(), Ordering::Relaxed);
+    into_raw(json.into_bytes())
+}
+
+/// Drive the core's C ABI end to end and shape the JSON verdict.
+fn analyze(cfg: &[u8], body: &[u8]) -> String {
+    // SAFETY: all pointers come from live slices valid for the stated lengths;
+    // the ctx and the log string are released exactly once below.
+    let (code, line) = unsafe {
+        let ctx = howdah_init(cfg.as_ptr() as *const c_char, cfg.len());
+        howdah_request_begin(ctx, BOUNDARY.as_ptr() as *const c_char, BOUNDARY.len(), std::ptr::null());
+        howdah_feed(ctx, body.as_ptr() as *const c_char, body.len());
+        let code = howdah_request_end(ctx);
+        let p = howdah_take_log_line(ctx);
+        let line = if p.is_null() {
+            None
+        } else {
+            let s = CStr::from_ptr(p).to_string_lossy().into_owned();
+            howdah_free_str(p);
+            Some(s)
+        };
+        howdah_free(ctx);
+        (code, line)
+    };
+    let action = match code {
+        2 => "block",
+        1 => "log",
+        _ => "allow",
+    };
+    let parsed = line.and_then(|l| serde_json::from_str::<serde_json::Value>(&l).ok());
+    let field = |k: &str| parsed.as_ref().and_then(|v| v.get(k)).and_then(|v| v.as_str()).map(str::to_owned);
+    let rule = field("rule");
+    let reason = field("reason").unwrap_or_else(|| {
+        if action == "allow" {
+            "no limit exceeded".to_string()
+        } else {
+            String::new()
+        }
+    });
+    serde_json::json!({ "action": action, "rule": rule, "reason": reason }).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Full alloc/copy/analyze/read/free dance, as the JS glue does it.
+    fn run(cfg: &str, body: &[u8]) -> serde_json::Value {
+        unsafe {
+            let c = howdah_wasm_alloc(cfg.len());
+            std::slice::from_raw_parts_mut(c, cfg.len()).copy_from_slice(cfg.as_bytes());
+            let b = howdah_wasm_alloc(body.len());
+            std::slice::from_raw_parts_mut(b, body.len()).copy_from_slice(body);
+            let r = howdah_wasm_analyze(c, cfg.len(), b, body.len());
+            let n = howdah_wasm_result_len();
+            let out = std::str::from_utf8(std::slice::from_raw_parts(r, n)).unwrap().to_owned();
+            howdah_wasm_free(r, n);
+            howdah_wasm_free(b, body.len());
+            howdah_wasm_free(c, cfg.len());
+            serde_json::from_str(&out).unwrap()
+        }
+    }
+
+    fn body(parts: usize, file: bool) -> Vec<u8> {
+        let mut s = String::new();
+        for i in 0..parts {
+            let fname = if file { "; filename=\"a.txt\"" } else { "" };
+            s += &format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"f{i}\"{fname}\r\n\r\nx\r\n");
+        }
+        s += &format!("--{BOUNDARY}--\r\n");
+        s.into_bytes()
+    }
+
+    #[test]
+    fn normal_body_allows() {
+        let v = run("", &body(3, false));
+        assert_eq!(v["action"], "allow");
+        assert!(v["rule"].is_null());
+    }
+
+    #[test]
+    fn part_flood_blocks_max_parts() {
+        let v = run("", &body(2500, false));
+        assert_eq!(v["action"], "block");
+        assert_eq!(v["rule"], "max_parts");
+        assert!(!v["reason"].as_str().unwrap().is_empty());
+    }
+
+    #[test]
+    fn file_flood_blocks_max_files() {
+        let v = run("[limits]\nmax_parts = 100000\n", &body(300, true));
+        assert_eq!(v["action"], "block");
+        assert_eq!(v["rule"], "max_files");
+    }
+
+    #[test]
+    fn malformed_body_flagged() {
+        let b = format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nx");
+        let v = run("", b.as_bytes());
+        assert_eq!(v["rule"], "malformed_multipart");
+        assert_ne!(v["action"], "allow");
+    }
+
+    #[test]
+    fn detect_mode_logs_instead_of_blocking() {
+        // Critical flood rules still block in detect mode (core semantics);
+        // a standard-severity rule (malformed) downgrades to log.
+        let b = format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nx");
+        let v = run("mode = \"detect\"\n", b.as_bytes());
+        assert_eq!(v["action"], "log");
+        assert_eq!(v["rule"], "malformed_multipart");
+    }
+
+    #[test]
+    fn empty_inputs_are_safe() {
+        unsafe {
+            let r = howdah_wasm_analyze(std::ptr::null(), 0, std::ptr::null(), 0);
+            let n = howdah_wasm_result_len();
+            assert!(n > 0);
+            howdah_wasm_free(r, n);
+        }
+    }
+}

@@ -8,8 +8,6 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <stddef.h>
-#include <stdint.h>
 
 /**
  * Action codes returned over the ABI. Pinned: Allow=0, Log=1, Block=2.
@@ -85,7 +83,7 @@ int32_t howdah_request_end(struct howdah_ctx *ctx);
  * # Safety
  * `ctx` NULL or live.
  */
-const char *howdah_take_log_line(struct howdah_ctx *ctx);
+char *howdah_take_log_line(struct howdah_ctx *ctx);
 
 /**
  * Free a string from `howdah_take_log_line`. NULL is a no-op.

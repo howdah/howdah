@@ -11,6 +11,11 @@
 //!   `howdah_free_str` (never `free()`). All input pointers are borrowed for the
 //!   duration of the call only (data is copied). NULL pointers are tolerated
 //!   everywhere (NULL ctx = no-op / Allow / NULL; NULL data with len 0 = empty).
+//! * BUILD REQUIREMENT: this crate and the consuming cdylib/extension MUST be
+//!   built with `panic = "unwind"` (set in the workspace profiles). Under
+//!   `panic = "abort"` every `catch_unwind` is a no-op and a panic aborts PHP.
+//! * Every non-null pointer + `len` pair must satisfy `len <= isize::MAX` and
+//!   be valid for reads of `len` bytes (`slice::from_raw_parts` contract).
 //! * A ctx must not be used from two threads at once (PHP workers each own one).
 #![allow(non_camel_case_types)]
 
@@ -203,19 +208,32 @@ impl howdah_ctx {
 
     fn panic_note(&mut self) {
         // Best effort; must not itself unwind out of the boundary.
+        // Do not clobber an already-stashed real Log/Block line.
+        if self.log.is_some() {
+            return;
+        }
         let _ = catch_unwind(AssertUnwindSafe(|| {
-            self.stash(RuleId::SelfTest, Action::Log, "internal panic caught; failing open");
+            self.stash(RuleId::SelfTest, Action::Log, "internal panic caught at FFI boundary; failed open");
         }));
     }
 }
 
+/// Must never unwind: the stderr write ignores errors (`eprintln!` would panic
+/// on EIO/EPIPE) and the whole body is itself guarded.
+///
 /// # Safety
 /// `ctx` must be NULL or a live howdah_ctx.
 unsafe fn report_panic(ctx: *mut howdah_ctx) {
-    eprintln!("howdah: panic caught at FFI boundary; failing open (Allow)");
-    if !ctx.is_null() {
-        (*ctx).panic_note();
-    }
+    use std::io::Write;
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        let _ = writeln!(
+            std::io::stderr(),
+            "howdah: panic caught at FFI boundary; failing open (Allow)"
+        );
+        if !ctx.is_null() {
+            (*ctx).panic_note();
+        }
+    }));
 }
 
 /// Create a context from TOML config. Invalid, non-UTF-8 or NULL config falls
@@ -326,17 +344,17 @@ pub unsafe extern "C" fn howdah_request_end(ctx: *mut howdah_ctx) -> i32 {
 /// # Safety
 /// `ctx` NULL or live.
 #[no_mangle]
-pub unsafe extern "C" fn howdah_take_log_line(ctx: *mut howdah_ctx) -> *const c_char {
+pub unsafe extern "C" fn howdah_take_log_line(ctx: *mut howdah_ctx) -> *mut c_char {
     if ctx.is_null() {
-        return std::ptr::null();
+        return std::ptr::null_mut();
     }
     catch_unwind(AssertUnwindSafe(|| match (*ctx).log.take() {
         Some(s) => CString::new(s.replace('\0', ""))
-            .map(|c| c.into_raw() as *const c_char)
-            .unwrap_or(std::ptr::null()),
-        None => std::ptr::null(),
+            .map(|c| c.into_raw())
+            .unwrap_or(std::ptr::null_mut()),
+        None => std::ptr::null_mut(),
     }))
-    .unwrap_or(std::ptr::null())
+    .unwrap_or(std::ptr::null_mut())
 }
 
 /// Free a string from `howdah_take_log_line`. NULL is a no-op.
@@ -398,7 +416,7 @@ mod tests {
                 return None;
             }
             let s = CStr::from_ptr(p).to_string_lossy().into_owned();
-            howdah_free_str(p as *mut c_char);
+            howdah_free_str(p);
             Some(s)
         }
     }

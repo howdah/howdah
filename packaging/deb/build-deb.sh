@@ -90,7 +90,7 @@ echo "/etc/php/$MINOR/mods-available/howdah.ini" > "$ROOT/DEBIAN/conffiles"
 cat > "$ROOT/usr/share/doc/$PKG/copyright" <<EOF2
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: Howdah
-Source: https://github.com/howdah-org/howdah
+Source: https://github.com/howdah/howdah
 
 Files: *
 Copyright: 2026 Howdah contributors

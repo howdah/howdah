@@ -1,11 +1,14 @@
 #!/bin/sh
 # howdah-check - read-only helper for installing/verifying Howdah.
 #
-#   howdah-check detect     list every PHP install on this box
+#   howdah-check detect     list every PHP install on this box, the host arch,
+#                           and the release tarball that matches each install
 #   howdah-check web <url>  EICAR-style self-test over HTTP (see cmd_web)
 #
 # For each install, detect prints: version, PHP API number, NTS/ZTS,
-# extension_dir, the SAPIs present (cli/fpm/apache) and whether the `howdah`
+# extension_dir, the exact release asset to download for it (host CPU arch +
+# api + PHP MAJ.MIN: howdah-<VERSION>-php<minor>-<api>-linux-<arch>.tar.gz),
+# the SAPIs present (cli/fpm/apache) and whether the `howdah`
 # extension is loaded in each. It NEVER modifies anything: it only runs
 # `php -v/-i/-m`, `php-fpm -m`, `php-config`, and reads config files.
 #
@@ -13,7 +16,8 @@
 # probe degrades gracefully: a missing/failed probe prints "unknown" for that
 # field and never aborts the run.
 #
-# Env: HOWDAH_CHECK_ROOT  prefix prepended to the fixed discovery paths (tests).
+# Env: HOWDAH_CHECK_ROOT      prefix prepended to the fixed discovery paths (tests).
+#      HOWDAH_CHECK_UNAME_M   stand-in for `uname -m` output (tests).
 
 PROG=howdah-check
 ROOT=${HOWDAH_CHECK_ROOT:-}
@@ -24,11 +28,23 @@ say() { printf '%s\n' "$*"; }
 
 usage() {
   say "usage: $PROG detect | web <url>" >&2
-  say "  detect   find every PHP install and report what Howdah needs (read-only)" >&2
+  say "  detect   find every PHP install; report host arch + the matching release asset (read-only)" >&2
   say "  web URL  send two harmless self-test requests; confirms Howdah is live in the web SAPI" >&2
 }
 
 # --- small helpers ----------------------------------------------------------
+
+# normalize a `uname -m` value: arm64 -> aarch64; x86_64/aarch64 pass through;
+# anything else is reported verbatim
+norm_arch() {
+  case "$1" in
+    arm64) echo aarch64 ;;
+    '') echo unknown ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+# a PHP .so must match the host CPU, so arch is host-wide: computed once
+ARCH=$(norm_arch "${HOWDAH_CHECK_UNAME_M:-$(uname -m 2>/dev/null)}")
 
 # run a command with a timeout when one is available (never hang the run)
 HAVE_TMO=0
@@ -240,6 +256,11 @@ report_install() {
   say "  version: ${_ver:-unknown}"
   say "  api: ${_api:-unknown}"
   say "  thread_safety: $_tsl"
+  if [ -n "$_api" ] && [ -n "$_mm" ] && [ "$ARCH" != unknown ]; then
+    say "  matching release asset: howdah-<VERSION>-php$_mm-$_api-linux-$ARCH.tar.gz"
+  else
+    say "  matching release asset: cannot determine (api/version/arch unknown)"
+  fi
   say "  extension_dir: ${_ext:-unknown}"
   say "  php_ini: ${_ini:-(none)}"
   if [ -n "$_scan" ] && [ "$_scan" != "(none)" ]; then say "  ini_scan_dir: $_scan"; fi
@@ -308,6 +329,7 @@ report_config_only() {
     say "  version: $_v (from $_d)"
     say "  api: unknown"
     say "  thread_safety: unknown"
+    say "  matching release asset: cannot determine (api/version unknown)"
     say "  extension_dir: unknown"
     for _s in cli fpm apache2; do
       _n=$_s; [ "$_s" = apache2 ] && _n=apache
@@ -321,6 +343,8 @@ report_config_only() {
 }
 
 cmd_detect() {
+  say "host arch: $ARCH"
+  say "release assets and howdah-check: https://github.com/howdah/howdah/releases (replace <VERSION> with the latest release)"
   discover
   _oifs=$IFS; IFS=$NL
   for _b in $CANDS; do

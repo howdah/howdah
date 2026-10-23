@@ -29,14 +29,17 @@ spec() {
     5.4) echo "lab-php-5.4 php5" ;;
     5.5) echo "lab-php-5.5 php5" ;;
     5.6) echo "lab-php-5.6 php5" ;;
+    7.0) echo "lab-php-7.0 php7" ;;
+    7.1) echo "lab-php-7.1 php7" ;;
+    7.2) echo "lab-php-7.2 php7" ;;
     7.3) echo "lab-php-7.3 php7" ;;
     7.4) echo "lab-php-7.4 php7" ;;
+    8.0) echo "lab-php-8.0 php8" ;;
     8.1) echo "lab-php-8.1 php8" ;;
+    8.2) echo "lab-php-8.2 php8" ;;
+    8.3) echo "lab-php-8.3 php8" ;;
     8.4) echo "lab-php-8.4 php8" ;;
-    # Minors below have no committed lab base image yet (need a php:X-fpm image
-    # built first). Listed so matrix.sh records them as not-run rather than
-    # silently omitting. 5.5 base pull is broken upstream (milestone-0 finding).
-    7.0|7.1|7.2|8.0|8.2|8.3|8.5) echo "MISSING -" ;;
+    8.5) echo "lab-php-8.5 php8" ;;
     *) echo "UNKNOWN -" ;;
   esac
 }

@@ -26,8 +26,13 @@ RUN set -e; . /etc/os-release; \
       yum install -y gcc make curl unzip which >/dev/null \
       && (yum install -y fcgi >/dev/null 2>&1 || true) \
       && /tmp/libclang-modern.sh; \
-    elif [ "$VERSION_ID" = 9 ]; then \
-      printf 'deb http://archive.debian.org/debian stretch main\ndeb http://archive.debian.org/debian-security stretch/updates main\n' > /etc/apt/sources.list; \
+    elif [ "$VERSION_ID" = 9 ] || [ "$VERSION_ID" = 10 ]; then \
+      # stretch (PHP 5.6/7.0) and buster (PHP 7.1/7.2): both long EOL and moved
+      # to archive.debian.org; their distro clang (3.8 / 7) is too old for
+      # bindgen, so libclang 18 comes from the manylinux wheel. Archive keys have
+      # expired, so accept unauthenticated (throwaway lab layer).
+      if [ "$VERSION_ID" = 9 ]; then CN=stretch; else CN=buster; fi; \
+      printf 'deb http://archive.debian.org/debian %s main\ndeb http://archive.debian.org/debian-security %s/updates main\n' "$CN" "$CN" > /etc/apt/sources.list; \
       apt-get $APT update \
       && apt-get $APT install -y --no-install-recommends --allow-unauthenticated ca-certificates curl gcc libc-dev unzip libfcgi-bin \
       && /tmp/libclang-modern.sh; \

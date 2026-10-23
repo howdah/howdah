@@ -1,4 +1,4 @@
-## Howdah cross-version block matrix -- generated 2026-10-23T08:04:01Z
+## Howdah cross-version block matrix -- generated 2026-10-23T16:54:54Z
 ## columns: phpver\tsapi\tscenario\tresult\tdetail
 5.4.16	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
 5.4.16	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
@@ -34,6 +34,7 @@
 5.4.16	fpm	up_progress_off	SKIP	php-fpm/cgi-fcgi unavailable
 5.4.16	fpm	detect_standard	SKIP	php-fpm/cgi-fcgi unavailable
 5.4.16	fpm	detect_critical	SKIP	php-fpm/cgi-fcgi unavailable
+## NOT-RUN 5.4 apache: no php:5.4-apache image available
 5.6.40	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
 5.6.40	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
 5.6.40	cli	selftest	PASS	http=200 self_test logged
@@ -88,6 +89,276 @@
 5.6.40	fpm	fp_query_filter_a_b_order	PASS	http=200 no block
 5.6.40	fpm	fp_query_range_10_20_unit	PASS	http=200 no block
 5.6.40	fpm	fp_query_slug_my_blog_pos	PASS	http=200 no block
+5.6.40	apache	shaped_block_files	PASS	http=403 rule=max_files ip=127.0.0.1
+5.6.40	apache	shaped_block_fields	PASS	http=403
+5.6.40	apache	selftest	PASS	http=200
+5.6.40	apache	corpus_bare_lf_headers	PASS	http=200 no block
+5.6.40	apache	corpus_data_line_dashdash	PASS	http=200 no block
+5.6.40	apache	corpus_folded_headers	PASS	http=200 no block
+5.6.40	apache	corpus_gallery_upload	PASS	http=200 no block
+5.6.40	apache	corpus_nested_array	PASS	http=200 no block
+5.6.40	apache	corpus_non_form_data_disposition	PASS	http=200 no block
+5.6.40	apache	corpus_settings_form	PASS	http=200 no block
+5.6.40	apache	up_progress_on	PASS	http=403
+5.6.40	apache	up_progress_off	PASS	http=403
+5.6.40	apache	detect_standard	PASS	http=200 log
+5.6.40	apache	detect_critical	PASS	http=403
+5.6.40	apache	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+5.6.40	apache	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+5.6.40	apache	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort)
+5.6.40	apache	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort)
+5.6.40	apache	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
+5.6.40	apache	fp_large_form	PASS	http=200 no block
+5.6.40	apache	fp_nested_form	PASS	http=200 no block
+5.6.40	apache	fp_ordinary_headers	PASS	http=200 no block
+5.6.40	apache	fp_query_sort__price_	PASS	http=200 no block
+5.6.40	apache	fp_query_q_a_b_c_	PASS	http=200 no block
+5.6.40	apache	fp_query_filter_a_b_order	PASS	http=200 no block
+5.6.40	apache	fp_query_range_10_20_unit	PASS	http=200 no block
+5.6.40	apache	fp_query_slug_my_blog_pos	PASS	http=200 no block
+7.0.33	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
+7.0.33	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
+7.0.33	cli	selftest	PASS	http=200 self_test logged
+7.0.33	cli	corpus_bare_lf_headers	PASS	http=200 no block
+7.0.33	cli	corpus_data_line_dashdash	PASS	http=200 no block
+7.0.33	cli	corpus_folded_headers	PASS	http=200 no block
+7.0.33	cli	corpus_gallery_upload	PASS	http=200 no block
+7.0.33	cli	corpus_nested_array	PASS	http=200 no block
+7.0.33	cli	corpus_non_form_data_disposition	PASS	http=200 no block
+7.0.33	cli	corpus_settings_form	PASS	http=200 no block
+7.0.33	cli	up_progress_on	PASS	http=403
+7.0.33	cli	up_progress_off	PASS	http=403
+7.0.33	cli	detect_standard	PASS	http=200 action=log
+7.0.33	cli	detect_critical	PASS	http=403
+7.0.33	cli	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+7.0.33	cli	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+7.0.33	cli	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort on input path)
+7.0.33	cli	request_headers_flood	SKIP	header counting asserted under fpm/apache (cli HTTP_* routing is version-dependent)
+7.0.33	cli	request_headers_flood_detect	SKIP	header counting asserted under fpm/apache
+7.0.33	cli	fp_large_form	PASS	http=200 no block
+7.0.33	cli	fp_nested_form	PASS	http=200 no block
+7.0.33	cli	fp_ordinary_headers	PASS	http=200 no block
+7.0.33	cli	fp_query_sort__price_	PASS	http=200 no block
+7.0.33	cli	fp_query_q_a_b_c_	PASS	http=200 no block
+7.0.33	cli	fp_query_filter_a_b_order	PASS	http=200 no block
+7.0.33	cli	fp_query_range_10_20_unit	PASS	http=200 no block
+7.0.33	cli	fp_query_slug_my_blog_pos	PASS	http=200 no block
+7.0.33	fpm	shaped_block_files	PASS	http=403 rule=max_files ip=203.0.113.9
+7.0.33	fpm	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
+7.0.33	fpm	selftest	PASS	http=200
+7.0.33	fpm	corpus_bare_lf_headers	PASS	http=200 no block
+7.0.33	fpm	corpus_data_line_dashdash	PASS	http=200 no block
+7.0.33	fpm	corpus_folded_headers	PASS	http=200 no block
+7.0.33	fpm	corpus_gallery_upload	PASS	http=200 no block
+7.0.33	fpm	corpus_nested_array	PASS	http=200 no block
+7.0.33	fpm	corpus_non_form_data_disposition	PASS	http=200 no block
+7.0.33	fpm	corpus_settings_form	PASS	http=200 no block
+7.0.33	fpm	up_progress_on	PASS	http=403
+7.0.33	fpm	up_progress_off	PASS	http=403
+7.0.33	fpm	detect_standard	PASS	http=200 log
+7.0.33	fpm	detect_critical	PASS	http=403
+7.0.33	fpm	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+7.0.33	fpm	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+7.0.33	fpm	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort on input path)
+7.0.33	fpm	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort on input path)
+7.0.33	fpm	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
+7.0.33	fpm	fp_large_form	PASS	http=200 no block
+7.0.33	fpm	fp_nested_form	PASS	http=200 no block
+7.0.33	fpm	fp_ordinary_headers	PASS	http=200 no block
+7.0.33	fpm	fp_query_sort__price_	PASS	http=200 no block
+7.0.33	fpm	fp_query_q_a_b_c_	PASS	http=200 no block
+7.0.33	fpm	fp_query_filter_a_b_order	PASS	http=200 no block
+7.0.33	fpm	fp_query_range_10_20_unit	PASS	http=200 no block
+7.0.33	fpm	fp_query_slug_my_blog_pos	PASS	http=200 no block
+7.0.33	apache	shaped_block_files	PASS	http=403 rule=max_files ip=127.0.0.1
+7.0.33	apache	shaped_block_fields	PASS	http=403
+7.0.33	apache	selftest	PASS	http=200
+7.0.33	apache	corpus_bare_lf_headers	PASS	http=200 no block
+7.0.33	apache	corpus_data_line_dashdash	PASS	http=200 no block
+7.0.33	apache	corpus_folded_headers	PASS	http=200 no block
+7.0.33	apache	corpus_gallery_upload	PASS	http=200 no block
+7.0.33	apache	corpus_nested_array	PASS	http=200 no block
+7.0.33	apache	corpus_non_form_data_disposition	PASS	http=200 no block
+7.0.33	apache	corpus_settings_form	PASS	http=200 no block
+7.0.33	apache	up_progress_on	PASS	http=403
+7.0.33	apache	up_progress_off	PASS	http=403
+7.0.33	apache	detect_standard	PASS	http=200 log
+7.0.33	apache	detect_critical	PASS	http=403
+7.0.33	apache	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+7.0.33	apache	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+7.0.33	apache	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort)
+7.0.33	apache	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort)
+7.0.33	apache	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
+7.0.33	apache	fp_large_form	PASS	http=200 no block
+7.0.33	apache	fp_nested_form	PASS	http=200 no block
+7.0.33	apache	fp_ordinary_headers	PASS	http=200 no block
+7.0.33	apache	fp_query_sort__price_	PASS	http=200 no block
+7.0.33	apache	fp_query_q_a_b_c_	PASS	http=200 no block
+7.0.33	apache	fp_query_filter_a_b_order	PASS	http=200 no block
+7.0.33	apache	fp_query_range_10_20_unit	PASS	http=200 no block
+7.0.33	apache	fp_query_slug_my_blog_pos	PASS	http=200 no block
+7.1.33	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
+7.1.33	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
+7.1.33	cli	selftest	PASS	http=200 self_test logged
+7.1.33	cli	corpus_bare_lf_headers	PASS	http=200 no block
+7.1.33	cli	corpus_data_line_dashdash	PASS	http=200 no block
+7.1.33	cli	corpus_folded_headers	PASS	http=200 no block
+7.1.33	cli	corpus_gallery_upload	PASS	http=200 no block
+7.1.33	cli	corpus_nested_array	PASS	http=200 no block
+7.1.33	cli	corpus_non_form_data_disposition	PASS	http=200 no block
+7.1.33	cli	corpus_settings_form	PASS	http=200 no block
+7.1.33	cli	up_progress_on	PASS	http=403
+7.1.33	cli	up_progress_off	PASS	http=403
+7.1.33	cli	detect_standard	PASS	http=200 action=log
+7.1.33	cli	detect_critical	PASS	http=403
+7.1.33	cli	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+7.1.33	cli	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+7.1.33	cli	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort on input path)
+7.1.33	cli	request_headers_flood	SKIP	header counting asserted under fpm/apache (cli HTTP_* routing is version-dependent)
+7.1.33	cli	request_headers_flood_detect	SKIP	header counting asserted under fpm/apache
+7.1.33	cli	fp_large_form	PASS	http=200 no block
+7.1.33	cli	fp_nested_form	PASS	http=200 no block
+7.1.33	cli	fp_ordinary_headers	PASS	http=200 no block
+7.1.33	cli	fp_query_sort__price_	PASS	http=200 no block
+7.1.33	cli	fp_query_q_a_b_c_	PASS	http=200 no block
+7.1.33	cli	fp_query_filter_a_b_order	PASS	http=200 no block
+7.1.33	cli	fp_query_range_10_20_unit	PASS	http=200 no block
+7.1.33	cli	fp_query_slug_my_blog_pos	PASS	http=200 no block
+7.1.33	fpm	shaped_block_files	PASS	http=403 rule=max_files ip=203.0.113.9
+7.1.33	fpm	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
+7.1.33	fpm	selftest	PASS	http=200
+7.1.33	fpm	corpus_bare_lf_headers	PASS	http=200 no block
+7.1.33	fpm	corpus_data_line_dashdash	PASS	http=200 no block
+7.1.33	fpm	corpus_folded_headers	PASS	http=200 no block
+7.1.33	fpm	corpus_gallery_upload	PASS	http=200 no block
+7.1.33	fpm	corpus_nested_array	PASS	http=200 no block
+7.1.33	fpm	corpus_non_form_data_disposition	PASS	http=200 no block
+7.1.33	fpm	corpus_settings_form	PASS	http=200 no block
+7.1.33	fpm	up_progress_on	PASS	http=403
+7.1.33	fpm	up_progress_off	PASS	http=403
+7.1.33	fpm	detect_standard	PASS	http=200 log
+7.1.33	fpm	detect_critical	PASS	http=403
+7.1.33	fpm	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+7.1.33	fpm	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+7.1.33	fpm	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort on input path)
+7.1.33	fpm	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort on input path)
+7.1.33	fpm	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
+7.1.33	fpm	fp_large_form	PASS	http=200 no block
+7.1.33	fpm	fp_nested_form	PASS	http=200 no block
+7.1.33	fpm	fp_ordinary_headers	PASS	http=200 no block
+7.1.33	fpm	fp_query_sort__price_	PASS	http=200 no block
+7.1.33	fpm	fp_query_q_a_b_c_	PASS	http=200 no block
+7.1.33	fpm	fp_query_filter_a_b_order	PASS	http=200 no block
+7.1.33	fpm	fp_query_range_10_20_unit	PASS	http=200 no block
+7.1.33	fpm	fp_query_slug_my_blog_pos	PASS	http=200 no block
+7.1.33	apache	shaped_block_files	PASS	http=403 rule=max_files ip=127.0.0.1
+7.1.33	apache	shaped_block_fields	PASS	http=403
+7.1.33	apache	selftest	PASS	http=200
+7.1.33	apache	corpus_bare_lf_headers	PASS	http=200 no block
+7.1.33	apache	corpus_data_line_dashdash	PASS	http=200 no block
+7.1.33	apache	corpus_folded_headers	PASS	http=200 no block
+7.1.33	apache	corpus_gallery_upload	PASS	http=200 no block
+7.1.33	apache	corpus_nested_array	PASS	http=200 no block
+7.1.33	apache	corpus_non_form_data_disposition	PASS	http=200 no block
+7.1.33	apache	corpus_settings_form	PASS	http=200 no block
+7.1.33	apache	up_progress_on	PASS	http=403
+7.1.33	apache	up_progress_off	PASS	http=403
+7.1.33	apache	detect_standard	PASS	http=200 log
+7.1.33	apache	detect_critical	PASS	http=403
+7.1.33	apache	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+7.1.33	apache	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+7.1.33	apache	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort)
+7.1.33	apache	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort)
+7.1.33	apache	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
+7.1.33	apache	fp_large_form	PASS	http=200 no block
+7.1.33	apache	fp_nested_form	PASS	http=200 no block
+7.1.33	apache	fp_ordinary_headers	PASS	http=200 no block
+7.1.33	apache	fp_query_sort__price_	PASS	http=200 no block
+7.1.33	apache	fp_query_q_a_b_c_	PASS	http=200 no block
+7.1.33	apache	fp_query_filter_a_b_order	PASS	http=200 no block
+7.1.33	apache	fp_query_range_10_20_unit	PASS	http=200 no block
+7.1.33	apache	fp_query_slug_my_blog_pos	PASS	http=200 no block
+7.2.34	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
+7.2.34	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
+7.2.34	cli	selftest	PASS	http=200 self_test logged
+7.2.34	cli	corpus_bare_lf_headers	PASS	http=200 no block
+7.2.34	cli	corpus_data_line_dashdash	PASS	http=200 no block
+7.2.34	cli	corpus_folded_headers	PASS	http=200 no block
+7.2.34	cli	corpus_gallery_upload	PASS	http=200 no block
+7.2.34	cli	corpus_nested_array	PASS	http=200 no block
+7.2.34	cli	corpus_non_form_data_disposition	PASS	http=200 no block
+7.2.34	cli	corpus_settings_form	PASS	http=200 no block
+7.2.34	cli	up_progress_on	PASS	http=403
+7.2.34	cli	up_progress_off	PASS	http=403
+7.2.34	cli	detect_standard	PASS	http=200 action=log
+7.2.34	cli	detect_critical	PASS	http=403
+7.2.34	cli	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+7.2.34	cli	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+7.2.34	cli	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort on input path)
+7.2.34	cli	request_headers_flood	SKIP	header counting asserted under fpm/apache (cli HTTP_* routing is version-dependent)
+7.2.34	cli	request_headers_flood_detect	SKIP	header counting asserted under fpm/apache
+7.2.34	cli	fp_large_form	PASS	http=200 no block
+7.2.34	cli	fp_nested_form	PASS	http=200 no block
+7.2.34	cli	fp_ordinary_headers	PASS	http=200 no block
+7.2.34	cli	fp_query_sort__price_	PASS	http=200 no block
+7.2.34	cli	fp_query_q_a_b_c_	PASS	http=200 no block
+7.2.34	cli	fp_query_filter_a_b_order	PASS	http=200 no block
+7.2.34	cli	fp_query_range_10_20_unit	PASS	http=200 no block
+7.2.34	cli	fp_query_slug_my_blog_pos	PASS	http=200 no block
+7.2.34	fpm	shaped_block_files	PASS	http=403 rule=max_files ip=203.0.113.9
+7.2.34	fpm	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
+7.2.34	fpm	selftest	PASS	http=200
+7.2.34	fpm	corpus_bare_lf_headers	PASS	http=200 no block
+7.2.34	fpm	corpus_data_line_dashdash	PASS	http=200 no block
+7.2.34	fpm	corpus_folded_headers	PASS	http=200 no block
+7.2.34	fpm	corpus_gallery_upload	PASS	http=200 no block
+7.2.34	fpm	corpus_nested_array	PASS	http=200 no block
+7.2.34	fpm	corpus_non_form_data_disposition	PASS	http=200 no block
+7.2.34	fpm	corpus_settings_form	PASS	http=200 no block
+7.2.34	fpm	up_progress_on	PASS	http=403
+7.2.34	fpm	up_progress_off	PASS	http=403
+7.2.34	fpm	detect_standard	PASS	http=200 log
+7.2.34	fpm	detect_critical	PASS	http=403
+7.2.34	fpm	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+7.2.34	fpm	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+7.2.34	fpm	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort on input path)
+7.2.34	fpm	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort on input path)
+7.2.34	fpm	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
+7.2.34	fpm	fp_large_form	PASS	http=200 no block
+7.2.34	fpm	fp_nested_form	PASS	http=200 no block
+7.2.34	fpm	fp_ordinary_headers	PASS	http=200 no block
+7.2.34	fpm	fp_query_sort__price_	PASS	http=200 no block
+7.2.34	fpm	fp_query_q_a_b_c_	PASS	http=200 no block
+7.2.34	fpm	fp_query_filter_a_b_order	PASS	http=200 no block
+7.2.34	fpm	fp_query_range_10_20_unit	PASS	http=200 no block
+7.2.34	fpm	fp_query_slug_my_blog_pos	PASS	http=200 no block
+7.2.34	apache	shaped_block_files	PASS	http=403 rule=max_files ip=127.0.0.1
+7.2.34	apache	shaped_block_fields	PASS	http=403
+7.2.34	apache	selftest	PASS	http=200
+7.2.34	apache	corpus_bare_lf_headers	PASS	http=200 no block
+7.2.34	apache	corpus_data_line_dashdash	PASS	http=200 no block
+7.2.34	apache	corpus_folded_headers	PASS	http=200 no block
+7.2.34	apache	corpus_gallery_upload	PASS	http=200 no block
+7.2.34	apache	corpus_nested_array	PASS	http=200 no block
+7.2.34	apache	corpus_non_form_data_disposition	PASS	http=200 no block
+7.2.34	apache	corpus_settings_form	PASS	http=200 no block
+7.2.34	apache	up_progress_on	PASS	http=403
+7.2.34	apache	up_progress_off	PASS	http=403
+7.2.34	apache	detect_standard	PASS	http=200 log
+7.2.34	apache	detect_critical	PASS	http=403
+7.2.34	apache	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+7.2.34	apache	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+7.2.34	apache	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort)
+7.2.34	apache	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort)
+7.2.34	apache	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
+7.2.34	apache	fp_large_form	PASS	http=200 no block
+7.2.34	apache	fp_nested_form	PASS	http=200 no block
+7.2.34	apache	fp_ordinary_headers	PASS	http=200 no block
+7.2.34	apache	fp_query_sort__price_	PASS	http=200 no block
+7.2.34	apache	fp_query_q_a_b_c_	PASS	http=200 no block
+7.2.34	apache	fp_query_filter_a_b_order	PASS	http=200 no block
+7.2.34	apache	fp_query_range_10_20_unit	PASS	http=200 no block
+7.2.34	apache	fp_query_slug_my_blog_pos	PASS	http=200 no block
 7.3.33	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
 7.3.33	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
 7.3.33	cli	selftest	PASS	http=200 self_test logged
@@ -142,6 +413,33 @@
 7.3.33	fpm	fp_query_filter_a_b_order	PASS	http=200 no block
 7.3.33	fpm	fp_query_range_10_20_unit	PASS	http=200 no block
 7.3.33	fpm	fp_query_slug_my_blog_pos	PASS	http=200 no block
+7.3.33	apache	shaped_block_files	PASS	http=403 rule=max_files ip=127.0.0.1
+7.3.33	apache	shaped_block_fields	PASS	http=403
+7.3.33	apache	selftest	PASS	http=200
+7.3.33	apache	corpus_bare_lf_headers	PASS	http=200 no block
+7.3.33	apache	corpus_data_line_dashdash	PASS	http=200 no block
+7.3.33	apache	corpus_folded_headers	PASS	http=200 no block
+7.3.33	apache	corpus_gallery_upload	PASS	http=200 no block
+7.3.33	apache	corpus_nested_array	PASS	http=200 no block
+7.3.33	apache	corpus_non_form_data_disposition	PASS	http=200 no block
+7.3.33	apache	corpus_settings_form	PASS	http=200 no block
+7.3.33	apache	up_progress_on	PASS	http=403
+7.3.33	apache	up_progress_off	PASS	http=403
+7.3.33	apache	detect_standard	PASS	http=200 log
+7.3.33	apache	detect_critical	PASS	http=403
+7.3.33	apache	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+7.3.33	apache	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+7.3.33	apache	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort)
+7.3.33	apache	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort)
+7.3.33	apache	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
+7.3.33	apache	fp_large_form	PASS	http=200 no block
+7.3.33	apache	fp_nested_form	PASS	http=200 no block
+7.3.33	apache	fp_ordinary_headers	PASS	http=200 no block
+7.3.33	apache	fp_query_sort__price_	PASS	http=200 no block
+7.3.33	apache	fp_query_q_a_b_c_	PASS	http=200 no block
+7.3.33	apache	fp_query_filter_a_b_order	PASS	http=200 no block
+7.3.33	apache	fp_query_range_10_20_unit	PASS	http=200 no block
+7.3.33	apache	fp_query_slug_my_blog_pos	PASS	http=200 no block
 7.4.33	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
 7.4.33	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
 7.4.33	cli	selftest	PASS	http=200 self_test logged
@@ -196,6 +494,114 @@
 7.4.33	fpm	fp_query_filter_a_b_order	PASS	http=200 no block
 7.4.33	fpm	fp_query_range_10_20_unit	PASS	http=200 no block
 7.4.33	fpm	fp_query_slug_my_blog_pos	PASS	http=200 no block
+7.4.33	apache	shaped_block_files	PASS	http=403 rule=max_files ip=127.0.0.1
+7.4.33	apache	shaped_block_fields	PASS	http=403
+7.4.33	apache	selftest	PASS	http=200
+7.4.33	apache	corpus_bare_lf_headers	PASS	http=200 no block
+7.4.33	apache	corpus_data_line_dashdash	PASS	http=200 no block
+7.4.33	apache	corpus_folded_headers	PASS	http=200 no block
+7.4.33	apache	corpus_gallery_upload	PASS	http=200 no block
+7.4.33	apache	corpus_nested_array	PASS	http=200 no block
+7.4.33	apache	corpus_non_form_data_disposition	PASS	http=200 no block
+7.4.33	apache	corpus_settings_form	PASS	http=200 no block
+7.4.33	apache	up_progress_on	PASS	http=403
+7.4.33	apache	up_progress_off	PASS	http=403
+7.4.33	apache	detect_standard	PASS	http=200 log
+7.4.33	apache	detect_critical	PASS	http=403
+7.4.33	apache	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+7.4.33	apache	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+7.4.33	apache	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort)
+7.4.33	apache	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort)
+7.4.33	apache	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
+7.4.33	apache	fp_large_form	PASS	http=200 no block
+7.4.33	apache	fp_nested_form	PASS	http=200 no block
+7.4.33	apache	fp_ordinary_headers	PASS	http=200 no block
+7.4.33	apache	fp_query_sort__price_	PASS	http=200 no block
+7.4.33	apache	fp_query_q_a_b_c_	PASS	http=200 no block
+7.4.33	apache	fp_query_filter_a_b_order	PASS	http=200 no block
+7.4.33	apache	fp_query_range_10_20_unit	PASS	http=200 no block
+7.4.33	apache	fp_query_slug_my_blog_pos	PASS	http=200 no block
+8.0.30	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
+8.0.30	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
+8.0.30	cli	selftest	PASS	http=200 self_test logged
+8.0.30	cli	corpus_bare_lf_headers	PASS	http=200 no block
+8.0.30	cli	corpus_data_line_dashdash	PASS	http=200 no block
+8.0.30	cli	corpus_folded_headers	PASS	http=200 no block
+8.0.30	cli	corpus_gallery_upload	PASS	http=200 no block
+8.0.30	cli	corpus_nested_array	PASS	http=200 no block
+8.0.30	cli	corpus_non_form_data_disposition	PASS	http=200 no block
+8.0.30	cli	corpus_settings_form	PASS	http=200 no block
+8.0.30	cli	up_progress_on	PASS	http=403
+8.0.30	cli	up_progress_off	PASS	http=403
+8.0.30	cli	detect_standard	PASS	http=200 action=log
+8.0.30	cli	detect_critical	PASS	http=403
+8.0.30	cli	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+8.0.30	cli	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+8.0.30	cli	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort on input path)
+8.0.30	cli	request_headers_flood	SKIP	header counting asserted under fpm/apache (cli HTTP_* routing is version-dependent)
+8.0.30	cli	request_headers_flood_detect	SKIP	header counting asserted under fpm/apache
+8.0.30	cli	fp_large_form	PASS	http=200 no block
+8.0.30	cli	fp_nested_form	PASS	http=200 no block
+8.0.30	cli	fp_ordinary_headers	PASS	http=200 no block
+8.0.30	cli	fp_query_sort__price_	PASS	http=200 no block
+8.0.30	cli	fp_query_q_a_b_c_	PASS	http=200 no block
+8.0.30	cli	fp_query_filter_a_b_order	PASS	http=200 no block
+8.0.30	cli	fp_query_range_10_20_unit	PASS	http=200 no block
+8.0.30	cli	fp_query_slug_my_blog_pos	PASS	http=200 no block
+8.0.30	fpm	shaped_block_files	PASS	http=403 rule=max_files ip=203.0.113.9
+8.0.30	fpm	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
+8.0.30	fpm	selftest	PASS	http=200
+8.0.30	fpm	corpus_bare_lf_headers	PASS	http=200 no block
+8.0.30	fpm	corpus_data_line_dashdash	PASS	http=200 no block
+8.0.30	fpm	corpus_folded_headers	PASS	http=200 no block
+8.0.30	fpm	corpus_gallery_upload	PASS	http=200 no block
+8.0.30	fpm	corpus_nested_array	PASS	http=200 no block
+8.0.30	fpm	corpus_non_form_data_disposition	PASS	http=200 no block
+8.0.30	fpm	corpus_settings_form	PASS	http=200 no block
+8.0.30	fpm	up_progress_on	PASS	http=403
+8.0.30	fpm	up_progress_off	PASS	http=403
+8.0.30	fpm	detect_standard	PASS	http=200 log
+8.0.30	fpm	detect_critical	PASS	http=403
+8.0.30	fpm	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+8.0.30	fpm	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+8.0.30	fpm	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort on input path)
+8.0.30	fpm	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort on input path)
+8.0.30	fpm	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
+8.0.30	fpm	fp_large_form	PASS	http=200 no block
+8.0.30	fpm	fp_nested_form	PASS	http=200 no block
+8.0.30	fpm	fp_ordinary_headers	PASS	http=200 no block
+8.0.30	fpm	fp_query_sort__price_	PASS	http=200 no block
+8.0.30	fpm	fp_query_q_a_b_c_	PASS	http=200 no block
+8.0.30	fpm	fp_query_filter_a_b_order	PASS	http=200 no block
+8.0.30	fpm	fp_query_range_10_20_unit	PASS	http=200 no block
+8.0.30	fpm	fp_query_slug_my_blog_pos	PASS	http=200 no block
+8.0.30	apache	shaped_block_files	PASS	http=403 rule=max_files ip=127.0.0.1
+8.0.30	apache	shaped_block_fields	PASS	http=403
+8.0.30	apache	selftest	PASS	http=200
+8.0.30	apache	corpus_bare_lf_headers	PASS	http=200 no block
+8.0.30	apache	corpus_data_line_dashdash	PASS	http=200 no block
+8.0.30	apache	corpus_folded_headers	PASS	http=200 no block
+8.0.30	apache	corpus_gallery_upload	PASS	http=200 no block
+8.0.30	apache	corpus_nested_array	PASS	http=200 no block
+8.0.30	apache	corpus_non_form_data_disposition	PASS	http=200 no block
+8.0.30	apache	corpus_settings_form	PASS	http=200 no block
+8.0.30	apache	up_progress_on	PASS	http=403
+8.0.30	apache	up_progress_off	PASS	http=403
+8.0.30	apache	detect_standard	PASS	http=200 log
+8.0.30	apache	detect_critical	PASS	http=403
+8.0.30	apache	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+8.0.30	apache	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+8.0.30	apache	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort)
+8.0.30	apache	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort)
+8.0.30	apache	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
+8.0.30	apache	fp_large_form	PASS	http=200 no block
+8.0.30	apache	fp_nested_form	PASS	http=200 no block
+8.0.30	apache	fp_ordinary_headers	PASS	http=200 no block
+8.0.30	apache	fp_query_sort__price_	PASS	http=200 no block
+8.0.30	apache	fp_query_q_a_b_c_	PASS	http=200 no block
+8.0.30	apache	fp_query_filter_a_b_order	PASS	http=200 no block
+8.0.30	apache	fp_query_range_10_20_unit	PASS	http=200 no block
+8.0.30	apache	fp_query_slug_my_blog_pos	PASS	http=200 no block
 8.1.34	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
 8.1.34	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
 8.1.34	cli	selftest	PASS	http=200 self_test logged
@@ -250,6 +656,195 @@
 8.1.34	fpm	fp_query_filter_a_b_order	PASS	http=200 no block
 8.1.34	fpm	fp_query_range_10_20_unit	PASS	http=200 no block
 8.1.34	fpm	fp_query_slug_my_blog_pos	PASS	http=200 no block
+8.1.34	apache	shaped_block_files	PASS	http=403 rule=max_files ip=127.0.0.1
+8.1.34	apache	shaped_block_fields	PASS	http=403
+8.1.34	apache	selftest	PASS	http=200
+8.1.34	apache	corpus_bare_lf_headers	PASS	http=200 no block
+8.1.34	apache	corpus_data_line_dashdash	PASS	http=200 no block
+8.1.34	apache	corpus_folded_headers	PASS	http=200 no block
+8.1.34	apache	corpus_gallery_upload	PASS	http=200 no block
+8.1.34	apache	corpus_nested_array	PASS	http=200 no block
+8.1.34	apache	corpus_non_form_data_disposition	PASS	http=200 no block
+8.1.34	apache	corpus_settings_form	PASS	http=200 no block
+8.1.34	apache	up_progress_on	PASS	http=403
+8.1.34	apache	up_progress_off	PASS	http=403
+8.1.34	apache	detect_standard	PASS	http=200 log
+8.1.34	apache	detect_critical	PASS	http=403
+8.1.34	apache	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+8.1.34	apache	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+8.1.34	apache	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort)
+8.1.34	apache	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort)
+8.1.34	apache	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
+8.1.34	apache	fp_large_form	PASS	http=200 no block
+8.1.34	apache	fp_nested_form	PASS	http=200 no block
+8.1.34	apache	fp_ordinary_headers	PASS	http=200 no block
+8.1.34	apache	fp_query_sort__price_	PASS	http=200 no block
+8.1.34	apache	fp_query_q_a_b_c_	PASS	http=200 no block
+8.1.34	apache	fp_query_filter_a_b_order	PASS	http=200 no block
+8.1.34	apache	fp_query_range_10_20_unit	PASS	http=200 no block
+8.1.34	apache	fp_query_slug_my_blog_pos	PASS	http=200 no block
+8.2.35	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
+8.2.35	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
+8.2.35	cli	selftest	PASS	http=200 self_test logged
+8.2.35	cli	corpus_bare_lf_headers	PASS	http=200 no block
+8.2.35	cli	corpus_data_line_dashdash	PASS	http=200 no block
+8.2.35	cli	corpus_folded_headers	PASS	http=200 no block
+8.2.35	cli	corpus_gallery_upload	PASS	http=200 no block
+8.2.35	cli	corpus_nested_array	PASS	http=200 no block
+8.2.35	cli	corpus_non_form_data_disposition	PASS	http=200 no block
+8.2.35	cli	corpus_settings_form	PASS	http=200 no block
+8.2.35	cli	up_progress_on	PASS	http=403
+8.2.35	cli	up_progress_off	PASS	http=403
+8.2.35	cli	detect_standard	PASS	http=200 action=log
+8.2.35	cli	detect_critical	PASS	http=403
+8.2.35	cli	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+8.2.35	cli	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+8.2.35	cli	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort on input path)
+8.2.35	cli	request_headers_flood	SKIP	header counting asserted under fpm/apache (cli HTTP_* routing is version-dependent)
+8.2.35	cli	request_headers_flood_detect	SKIP	header counting asserted under fpm/apache
+8.2.35	cli	fp_large_form	PASS	http=200 no block
+8.2.35	cli	fp_nested_form	PASS	http=200 no block
+8.2.35	cli	fp_ordinary_headers	PASS	http=200 no block
+8.2.35	cli	fp_query_sort__price_	PASS	http=200 no block
+8.2.35	cli	fp_query_q_a_b_c_	PASS	http=200 no block
+8.2.35	cli	fp_query_filter_a_b_order	PASS	http=200 no block
+8.2.35	cli	fp_query_range_10_20_unit	PASS	http=200 no block
+8.2.35	cli	fp_query_slug_my_blog_pos	PASS	http=200 no block
+8.2.35	fpm	shaped_block_files	PASS	http=403 rule=max_files ip=203.0.113.9
+8.2.35	fpm	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
+8.2.35	fpm	selftest	PASS	http=200
+8.2.35	fpm	corpus_bare_lf_headers	PASS	http=200 no block
+8.2.35	fpm	corpus_data_line_dashdash	PASS	http=200 no block
+8.2.35	fpm	corpus_folded_headers	PASS	http=200 no block
+8.2.35	fpm	corpus_gallery_upload	PASS	http=200 no block
+8.2.35	fpm	corpus_nested_array	PASS	http=200 no block
+8.2.35	fpm	corpus_non_form_data_disposition	PASS	http=200 no block
+8.2.35	fpm	corpus_settings_form	PASS	http=200 no block
+8.2.35	fpm	up_progress_on	PASS	http=403
+8.2.35	fpm	up_progress_off	PASS	http=403
+8.2.35	fpm	detect_standard	PASS	http=200 log
+8.2.35	fpm	detect_critical	PASS	http=403
+8.2.35	fpm	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+8.2.35	fpm	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+8.2.35	fpm	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort on input path)
+8.2.35	fpm	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort on input path)
+8.2.35	fpm	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
+8.2.35	fpm	fp_large_form	PASS	http=200 no block
+8.2.35	fpm	fp_nested_form	PASS	http=200 no block
+8.2.35	fpm	fp_ordinary_headers	PASS	http=200 no block
+8.2.35	fpm	fp_query_sort__price_	PASS	http=200 no block
+8.2.35	fpm	fp_query_q_a_b_c_	PASS	http=200 no block
+8.2.35	fpm	fp_query_filter_a_b_order	PASS	http=200 no block
+8.2.35	fpm	fp_query_range_10_20_unit	PASS	http=200 no block
+8.2.35	fpm	fp_query_slug_my_blog_pos	PASS	http=200 no block
+8.2.35	apache	shaped_block_files	PASS	http=403 rule=max_files ip=127.0.0.1
+8.2.35	apache	shaped_block_fields	PASS	http=403
+8.2.35	apache	selftest	PASS	http=200
+8.2.35	apache	corpus_bare_lf_headers	PASS	http=200 no block
+8.2.35	apache	corpus_data_line_dashdash	PASS	http=200 no block
+8.2.35	apache	corpus_folded_headers	PASS	http=200 no block
+8.2.35	apache	corpus_gallery_upload	PASS	http=200 no block
+8.2.35	apache	corpus_nested_array	PASS	http=200 no block
+8.2.35	apache	corpus_non_form_data_disposition	PASS	http=200 no block
+8.2.35	apache	corpus_settings_form	PASS	http=200 no block
+8.2.35	apache	up_progress_on	PASS	http=403
+8.2.35	apache	up_progress_off	PASS	http=403
+8.2.35	apache	detect_standard	PASS	http=200 log
+8.2.35	apache	detect_critical	PASS	http=403
+8.2.35	apache	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+8.2.35	apache	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+8.2.35	apache	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort)
+8.2.35	apache	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort)
+8.2.35	apache	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
+8.2.35	apache	fp_large_form	PASS	http=200 no block
+8.2.35	apache	fp_nested_form	PASS	http=200 no block
+8.2.35	apache	fp_ordinary_headers	PASS	http=200 no block
+8.2.35	apache	fp_query_sort__price_	PASS	http=200 no block
+8.2.35	apache	fp_query_q_a_b_c_	PASS	http=200 no block
+8.2.35	apache	fp_query_filter_a_b_order	PASS	http=200 no block
+8.2.35	apache	fp_query_range_10_20_unit	PASS	http=200 no block
+8.2.35	apache	fp_query_slug_my_blog_pos	PASS	http=200 no block
+8.3.36	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
+8.3.36	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
+8.3.36	cli	selftest	PASS	http=200 self_test logged
+8.3.36	cli	corpus_bare_lf_headers	PASS	http=200 no block
+8.3.36	cli	corpus_data_line_dashdash	PASS	http=200 no block
+8.3.36	cli	corpus_folded_headers	PASS	http=200 no block
+8.3.36	cli	corpus_gallery_upload	PASS	http=200 no block
+8.3.36	cli	corpus_nested_array	PASS	http=200 no block
+8.3.36	cli	corpus_non_form_data_disposition	PASS	http=200 no block
+8.3.36	cli	corpus_settings_form	PASS	http=200 no block
+8.3.36	cli	up_progress_on	PASS	http=403
+8.3.36	cli	up_progress_off	PASS	http=403
+8.3.36	cli	detect_standard	PASS	http=200 action=log
+8.3.36	cli	detect_critical	PASS	http=403
+8.3.36	cli	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+8.3.36	cli	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+8.3.36	cli	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort on input path)
+8.3.36	cli	request_headers_flood	SKIP	header counting asserted under fpm/apache (cli HTTP_* routing is version-dependent)
+8.3.36	cli	request_headers_flood_detect	SKIP	header counting asserted under fpm/apache
+8.3.36	cli	fp_large_form	PASS	http=200 no block
+8.3.36	cli	fp_nested_form	PASS	http=200 no block
+8.3.36	cli	fp_ordinary_headers	PASS	http=200 no block
+8.3.36	cli	fp_query_sort__price_	PASS	http=200 no block
+8.3.36	cli	fp_query_q_a_b_c_	PASS	http=200 no block
+8.3.36	cli	fp_query_filter_a_b_order	PASS	http=200 no block
+8.3.36	cli	fp_query_range_10_20_unit	PASS	http=200 no block
+8.3.36	cli	fp_query_slug_my_blog_pos	PASS	http=200 no block
+8.3.36	fpm	shaped_block_files	PASS	http=403 rule=max_files ip=203.0.113.9
+8.3.36	fpm	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
+8.3.36	fpm	selftest	PASS	http=200
+8.3.36	fpm	corpus_bare_lf_headers	PASS	http=200 no block
+8.3.36	fpm	corpus_data_line_dashdash	PASS	http=200 no block
+8.3.36	fpm	corpus_folded_headers	PASS	http=200 no block
+8.3.36	fpm	corpus_gallery_upload	PASS	http=200 no block
+8.3.36	fpm	corpus_nested_array	PASS	http=200 no block
+8.3.36	fpm	corpus_non_form_data_disposition	PASS	http=200 no block
+8.3.36	fpm	corpus_settings_form	PASS	http=200 no block
+8.3.36	fpm	up_progress_on	PASS	http=403
+8.3.36	fpm	up_progress_off	PASS	http=403
+8.3.36	fpm	detect_standard	PASS	http=200 log
+8.3.36	fpm	detect_critical	PASS	http=403
+8.3.36	fpm	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+8.3.36	fpm	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+8.3.36	fpm	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort on input path)
+8.3.36	fpm	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort on input path)
+8.3.36	fpm	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
+8.3.36	fpm	fp_large_form	PASS	http=200 no block
+8.3.36	fpm	fp_nested_form	PASS	http=200 no block
+8.3.36	fpm	fp_ordinary_headers	PASS	http=200 no block
+8.3.36	fpm	fp_query_sort__price_	PASS	http=200 no block
+8.3.36	fpm	fp_query_q_a_b_c_	PASS	http=200 no block
+8.3.36	fpm	fp_query_filter_a_b_order	PASS	http=200 no block
+8.3.36	fpm	fp_query_range_10_20_unit	PASS	http=200 no block
+8.3.36	fpm	fp_query_slug_my_blog_pos	PASS	http=200 no block
+8.3.36	apache	shaped_block_files	PASS	http=403 rule=max_files ip=127.0.0.1
+8.3.36	apache	shaped_block_fields	PASS	http=403
+8.3.36	apache	selftest	PASS	http=200
+8.3.36	apache	corpus_bare_lf_headers	PASS	http=200 no block
+8.3.36	apache	corpus_data_line_dashdash	PASS	http=200 no block
+8.3.36	apache	corpus_folded_headers	PASS	http=200 no block
+8.3.36	apache	corpus_gallery_upload	PASS	http=200 no block
+8.3.36	apache	corpus_nested_array	PASS	http=200 no block
+8.3.36	apache	corpus_non_form_data_disposition	PASS	http=200 no block
+8.3.36	apache	corpus_settings_form	PASS	http=200 no block
+8.3.36	apache	up_progress_on	PASS	http=403
+8.3.36	apache	up_progress_off	PASS	http=403
+8.3.36	apache	detect_standard	PASS	http=200 log
+8.3.36	apache	detect_critical	PASS	http=403
+8.3.36	apache	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+8.3.36	apache	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+8.3.36	apache	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort)
+8.3.36	apache	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort)
+8.3.36	apache	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
+8.3.36	apache	fp_large_form	PASS	http=200 no block
+8.3.36	apache	fp_nested_form	PASS	http=200 no block
+8.3.36	apache	fp_ordinary_headers	PASS	http=200 no block
+8.3.36	apache	fp_query_sort__price_	PASS	http=200 no block
+8.3.36	apache	fp_query_q_a_b_c_	PASS	http=200 no block
+8.3.36	apache	fp_query_filter_a_b_order	PASS	http=200 no block
+8.3.36	apache	fp_query_range_10_20_unit	PASS	http=200 no block
+8.3.36	apache	fp_query_slug_my_blog_pos	PASS	http=200 no block
 8.4.27	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
 8.4.27	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
 8.4.27	cli	selftest	PASS	http=200 self_test logged
@@ -304,57 +899,111 @@
 8.4.27	fpm	fp_query_filter_a_b_order	PASS	http=200 no block
 8.4.27	fpm	fp_query_range_10_20_unit	PASS	http=200 no block
 8.4.27	fpm	fp_query_slug_my_blog_pos	PASS	http=200 no block
-7.4.33	apache	shaped_block_files	PASS	http=403 rule=max_files ip=127.0.0.1
-7.4.33	apache	shaped_block_fields	PASS	http=403
-7.4.33	apache	selftest	PASS	http=200
-7.4.33	apache	corpus_bare_lf_headers	PASS	http=200 no block
-7.4.33	apache	corpus_data_line_dashdash	PASS	http=200 no block
-7.4.33	apache	corpus_folded_headers	PASS	http=200 no block
-7.4.33	apache	corpus_gallery_upload	PASS	http=200 no block
-7.4.33	apache	corpus_nested_array	PASS	http=200 no block
-7.4.33	apache	corpus_non_form_data_disposition	PASS	http=200 no block
-7.4.33	apache	corpus_settings_form	PASS	http=200 no block
-7.4.33	apache	up_progress_on	PASS	http=403
-7.4.33	apache	up_progress_off	PASS	http=403
-7.4.33	apache	detect_standard	PASS	http=200 log
-7.4.33	apache	detect_critical	PASS	http=403
-7.4.33	apache	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
-7.4.33	apache	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
-7.4.33	apache	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort)
-7.4.33	apache	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort)
-7.4.33	apache	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
-7.4.33	apache	fp_large_form	PASS	http=200 no block
-7.4.33	apache	fp_nested_form	PASS	http=200 no block
-7.4.33	apache	fp_ordinary_headers	PASS	http=200 no block
-7.4.33	apache	fp_query_sort__price_	PASS	http=200 no block
-7.4.33	apache	fp_query_q_a_b_c_	PASS	http=200 no block
-7.4.33	apache	fp_query_filter_a_b_order	PASS	http=200 no block
-7.4.33	apache	fp_query_range_10_20_unit	PASS	http=200 no block
-7.4.33	apache	fp_query_slug_my_blog_pos	PASS	http=200 no block
-8.1.34	apache	shaped_block_files	PASS	http=403 rule=max_files ip=127.0.0.1
-8.1.34	apache	shaped_block_fields	PASS	http=403
-8.1.34	apache	selftest	PASS	http=200
-8.1.34	apache	corpus_bare_lf_headers	PASS	http=200 no block
-8.1.34	apache	corpus_data_line_dashdash	PASS	http=200 no block
-8.1.34	apache	corpus_folded_headers	PASS	http=200 no block
-8.1.34	apache	corpus_gallery_upload	PASS	http=200 no block
-8.1.34	apache	corpus_nested_array	PASS	http=200 no block
-8.1.34	apache	corpus_non_form_data_disposition	PASS	http=200 no block
-8.1.34	apache	corpus_settings_form	PASS	http=200 no block
-8.1.34	apache	up_progress_on	PASS	http=403
-8.1.34	apache	up_progress_off	PASS	http=403
-8.1.34	apache	detect_standard	PASS	http=200 log
-8.1.34	apache	detect_critical	PASS	http=403
-8.1.34	apache	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
-8.1.34	apache	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
-8.1.34	apache	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort)
-8.1.34	apache	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort)
-8.1.34	apache	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
-8.1.34	apache	fp_large_form	PASS	http=200 no block
-8.1.34	apache	fp_nested_form	PASS	http=200 no block
-8.1.34	apache	fp_ordinary_headers	PASS	http=200 no block
-8.1.34	apache	fp_query_sort__price_	PASS	http=200 no block
-8.1.34	apache	fp_query_q_a_b_c_	PASS	http=200 no block
-8.1.34	apache	fp_query_filter_a_b_order	PASS	http=200 no block
-8.1.34	apache	fp_query_range_10_20_unit	PASS	http=200 no block
-8.1.34	apache	fp_query_slug_my_blog_pos	PASS	http=200 no block
+8.4.27	apache	shaped_block_files	PASS	http=403 rule=max_files ip=127.0.0.1
+8.4.27	apache	shaped_block_fields	PASS	http=403
+8.4.27	apache	selftest	PASS	http=200
+8.4.27	apache	corpus_bare_lf_headers	PASS	http=200 no block
+8.4.27	apache	corpus_data_line_dashdash	PASS	http=200 no block
+8.4.27	apache	corpus_folded_headers	PASS	http=200 no block
+8.4.27	apache	corpus_gallery_upload	PASS	http=200 no block
+8.4.27	apache	corpus_nested_array	PASS	http=200 no block
+8.4.27	apache	corpus_non_form_data_disposition	PASS	http=200 no block
+8.4.27	apache	corpus_settings_form	PASS	http=200 no block
+8.4.27	apache	up_progress_on	PASS	http=403
+8.4.27	apache	up_progress_off	PASS	http=403
+8.4.27	apache	detect_standard	PASS	http=200 log
+8.4.27	apache	detect_critical	PASS	http=403
+8.4.27	apache	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+8.4.27	apache	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+8.4.27	apache	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort)
+8.4.27	apache	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort)
+8.4.27	apache	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
+8.4.27	apache	fp_large_form	PASS	http=200 no block
+8.4.27	apache	fp_nested_form	PASS	http=200 no block
+8.4.27	apache	fp_ordinary_headers	PASS	http=200 no block
+8.4.27	apache	fp_query_sort__price_	PASS	http=200 no block
+8.4.27	apache	fp_query_q_a_b_c_	PASS	http=200 no block
+8.4.27	apache	fp_query_filter_a_b_order	PASS	http=200 no block
+8.4.27	apache	fp_query_range_10_20_unit	PASS	http=200 no block
+8.4.27	apache	fp_query_slug_my_blog_pos	PASS	http=200 no block
+8.5.12RC1	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
+8.5.12RC1	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
+8.5.12RC1	cli	selftest	PASS	http=200 self_test logged
+8.5.12RC1	cli	corpus_bare_lf_headers	PASS	http=200 no block
+8.5.12RC1	cli	corpus_data_line_dashdash	PASS	http=200 no block
+8.5.12RC1	cli	corpus_folded_headers	PASS	http=200 no block
+8.5.12RC1	cli	corpus_gallery_upload	PASS	http=200 no block
+8.5.12RC1	cli	corpus_nested_array	PASS	http=200 no block
+8.5.12RC1	cli	corpus_non_form_data_disposition	PASS	http=200 no block
+8.5.12RC1	cli	corpus_settings_form	PASS	http=200 no block
+8.5.12RC1	cli	up_progress_on	PASS	http=403
+8.5.12RC1	cli	up_progress_off	PASS	http=403
+8.5.12RC1	cli	detect_standard	PASS	http=200 action=log
+8.5.12RC1	cli	detect_critical	PASS	http=403
+8.5.12RC1	cli	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+8.5.12RC1	cli	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+8.5.12RC1	cli	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort on input path)
+8.5.12RC1	cli	request_headers_flood	SKIP	header counting asserted under fpm/apache (cli HTTP_* routing is version-dependent)
+8.5.12RC1	cli	request_headers_flood_detect	SKIP	header counting asserted under fpm/apache
+8.5.12RC1	cli	fp_large_form	PASS	http=200 no block
+8.5.12RC1	cli	fp_nested_form	PASS	http=200 no block
+8.5.12RC1	cli	fp_ordinary_headers	PASS	http=200 no block
+8.5.12RC1	cli	fp_query_sort__price_	PASS	http=200 no block
+8.5.12RC1	cli	fp_query_q_a_b_c_	PASS	http=200 no block
+8.5.12RC1	cli	fp_query_filter_a_b_order	PASS	http=200 no block
+8.5.12RC1	cli	fp_query_range_10_20_unit	PASS	http=200 no block
+8.5.12RC1	cli	fp_query_slug_my_blog_pos	PASS	http=200 no block
+8.5.12RC1	fpm	shaped_block_files	PASS	http=403 rule=max_files ip=203.0.113.9
+8.5.12RC1	fpm	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip
+8.5.12RC1	fpm	selftest	PASS	http=200
+8.5.12RC1	fpm	corpus_bare_lf_headers	PASS	http=200 no block
+8.5.12RC1	fpm	corpus_data_line_dashdash	PASS	http=200 no block
+8.5.12RC1	fpm	corpus_folded_headers	PASS	http=200 no block
+8.5.12RC1	fpm	corpus_gallery_upload	PASS	http=200 no block
+8.5.12RC1	fpm	corpus_nested_array	PASS	http=200 no block
+8.5.12RC1	fpm	corpus_non_form_data_disposition	PASS	http=200 no block
+8.5.12RC1	fpm	corpus_settings_form	PASS	http=200 no block
+8.5.12RC1	fpm	up_progress_on	PASS	http=403
+8.5.12RC1	fpm	up_progress_off	PASS	http=403
+8.5.12RC1	fpm	detect_standard	PASS	http=200 log
+8.5.12RC1	fpm	detect_critical	PASS	http=403
+8.5.12RC1	fpm	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+8.5.12RC1	fpm	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort on input path)
+8.5.12RC1	fpm	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort on input path)
+8.5.12RC1	fpm	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort on input path)
+8.5.12RC1	fpm	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
+8.5.12RC1	fpm	fp_large_form	PASS	http=200 no block
+8.5.12RC1	fpm	fp_nested_form	PASS	http=200 no block
+8.5.12RC1	fpm	fp_ordinary_headers	PASS	http=200 no block
+8.5.12RC1	fpm	fp_query_sort__price_	PASS	http=200 no block
+8.5.12RC1	fpm	fp_query_q_a_b_c_	PASS	http=200 no block
+8.5.12RC1	fpm	fp_query_filter_a_b_order	PASS	http=200 no block
+8.5.12RC1	fpm	fp_query_range_10_20_unit	PASS	http=200 no block
+8.5.12RC1	fpm	fp_query_slug_my_blog_pos	PASS	http=200 no block
+8.5.12	apache	shaped_block_files	PASS	http=403 rule=max_files ip=127.0.0.1
+8.5.12	apache	shaped_block_fields	PASS	http=403
+8.5.12	apache	selftest	PASS	http=200
+8.5.12	apache	corpus_bare_lf_headers	PASS	http=200 no block
+8.5.12	apache	corpus_data_line_dashdash	PASS	http=200 no block
+8.5.12	apache	corpus_folded_headers	PASS	http=200 no block
+8.5.12	apache	corpus_gallery_upload	PASS	http=200 no block
+8.5.12	apache	corpus_nested_array	PASS	http=200 no block
+8.5.12	apache	corpus_non_form_data_disposition	PASS	http=200 no block
+8.5.12	apache	corpus_settings_form	PASS	http=200 no block
+8.5.12	apache	up_progress_on	PASS	http=403
+8.5.12	apache	up_progress_off	PASS	http=403
+8.5.12	apache	detect_standard	PASS	http=200 log
+8.5.12	apache	detect_critical	PASS	http=403
+8.5.12	apache	input_vars_flood	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+8.5.12	apache	input_vars_flood_detect	PASS	blocked rule=max_input_vars http=200 (403 best-effort)
+8.5.12	apache	nesting_depth	PASS	blocked rule=max_input_nesting_depth http=200 (403 best-effort)
+8.5.12	apache	request_headers_flood	PASS	blocked rule=max_request_headers http=200 (403 best-effort)
+8.5.12	apache	request_headers_flood_detect	PASS	logged rule=max_request_headers http=200 (detect)
+8.5.12	apache	fp_large_form	PASS	http=200 no block
+8.5.12	apache	fp_nested_form	PASS	http=200 no block
+8.5.12	apache	fp_ordinary_headers	PASS	http=200 no block
+8.5.12	apache	fp_query_sort__price_	PASS	http=200 no block
+8.5.12	apache	fp_query_q_a_b_c_	PASS	http=200 no block
+8.5.12	apache	fp_query_filter_a_b_order	PASS	http=200 no block
+8.5.12	apache	fp_query_range_10_20_unit	PASS	http=200 no block
+8.5.12	apache	fp_query_slug_my_blog_pos	PASS	http=200 no block

@@ -129,7 +129,7 @@ max_total_bytes = 2097152 # per-request aggregate scan budget
 max_values = 2000         # per-request value count budget
 
 [inspect.rule_modes]      # optional per-class mode override; keys are the rule names
-sql_injection = "block"   # path_traversal, command_injection
+# sql_injection = "block" # example only: opt ONE class into blocking (default is log-only). Also: path_traversal, command_injection
 ```
 
 The rule names are `sql_injection`, `path_traversal` and `command_injection`.

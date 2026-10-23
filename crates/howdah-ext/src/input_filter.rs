@@ -76,15 +76,11 @@ pub(crate) unsafe extern "C" fn filter(
     // into PHP (carry-forward #4). On panic we do NOT drop — we fall through to
     // chaining the prior filter (fail-open), exactly like rfc1867::callback.
     //
-    // Layer-2 value scanning runs in the SAME guard, after (and independent of)
-    // Layer 1's `process`: it never influences `drop_var`, and a panic in either
-    // step yields `false` -> chain the prior filter.
-    let drop_var = catch_unwind(AssertUnwindSafe(|| {
-        let drop_var = process(arg, var, val_len);
-        inspect_value(arg, var, val, val_len);
-        drop_var
-    }))
-    .unwrap_or(false);
+    // Layer-2 value scanning runs in its OWN guard, after Layer 1's `process`
+    // result is captured: a scan panic means "no scan" and can never flip
+    // Layer 1's drop verdict.
+    let drop_var = catch_unwind(AssertUnwindSafe(|| process(arg, var, val_len))).unwrap_or(false);
+    let _ = catch_unwind(AssertUnwindSafe(|| inspect_value(arg, var, val, val_len)));
 
     if drop_var {
         // The core decided Block: drop THIS variable (return 0, do not chain) to

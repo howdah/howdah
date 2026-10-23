@@ -1,0 +1,17 @@
+Package: @PKG@
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Howdah Maintainers <packages@howdah.org>
+Installed-Size: @SIZE@
+Depends: phpapi-@API@, php@MINOR@-common
+Section: php
+Priority: optional
+Homepage: https://howdah.org
+Description: Howdah defensive WAF module for PHP @MINOR@
+ Howdah is an open-source, defensive web application firewall that runs inside
+ PHP. It refuses abusive multipart/form-data requests (part/file floods, header
+ and input-shape abuse) before PHP allocates memory for them.
+ .
+ This package provides the PHP @MINOR@ module (Zend module API @API@) and its
+ configuration, and enables it on install in detect (log-only) mode. Licensed
+ MIT or Apache-2.0.

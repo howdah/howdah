@@ -1,0 +1,12 @@
+#!/bin/sh
+# Belt and braces: after remove/purge make sure no dangling conf.d symlink to
+# the (now removed) ini is left behind, which would make PHP warn on start.
+set -e
+case "$1" in
+  remove|purge|disappear)
+    for l in /etc/php/@MINOR@/*/conf.d/*-howdah.ini; do
+      if [ -L "$l" ] && [ ! -e "$l" ]; then rm -f "$l"; fi
+    done
+    ;;
+esac
+exit 0

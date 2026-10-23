@@ -1,0 +1,13 @@
+#!/bin/sh
+# Best-effort enable. Never fail the transaction: a failed enable must not leave
+# dpkg half-configured or take PHP down.
+set -e
+case "$1" in
+  configure)
+    if command -v phpenmod >/dev/null 2>&1; then
+      phpenmod -v @MINOR@ howdah >/dev/null 2>&1 \
+        || echo "howdah: could not enable via phpenmod; run: phpenmod -v @MINOR@ howdah" >&2
+    fi
+    ;;
+esac
+exit 0

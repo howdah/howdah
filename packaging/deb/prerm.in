@@ -1,0 +1,12 @@
+#!/bin/sh
+# Disable before the files go away so PHP never references a missing howdah.so.
+# On upgrade the new postinst re-enables, so only act on a real removal.
+set -e
+case "$1" in
+  remove|deconfigure)
+    if command -v phpdismod >/dev/null 2>&1; then
+      phpdismod -v @MINOR@ howdah >/dev/null 2>&1 || true
+    fi
+    ;;
+esac
+exit 0

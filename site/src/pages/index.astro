@@ -200,9 +200,11 @@ const ranDate = (coverage.generated || '').slice(0, 10);
           <li>
             <h3>See which PHP you have</h3>
             <p>Howdah needs one build per PHP minor version. The helper lists every PHP install on the box and changes nothing.</p>
-<pre tabindex="0"><code>php7.3 -v
-howdah-check detect
+<pre tabindex="0"><code>curl -fsSLO https://github.com/howdah/howdah/releases/download/v0.1.0/howdah-check
+chmod +x howdah-check
+./howdah-check detect
 <span class="c"># -> PHP 7.3.33, API 20180731, NTS, /usr/lib/php/20180731, SAPIs: cli fpm</span></code></pre>
+            <p><code>howdah-check</code> is a single POSIX shell script that works with any PHP version. It is also bundled in every tarball, and it is covered by <code>SHA256SUMS</code> if you want to verify it (step 2).</p>
           </li>
           <li>
             <h3>Download, verify, then install</h3>

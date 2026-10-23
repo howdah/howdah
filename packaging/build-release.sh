@@ -17,6 +17,7 @@
 #
 # Output: packaging/out/
 #   howdah-<version>-php<minor>-<api>-linux-x86_64.tar.gz   (per minor)
+#   howdah-check                                            (standalone, top-level)
 #   build-report.tsv                                        (what was built)
 # Signing (SHA256SUMS + detached signature) is a separate step: packaging/sign.sh
 set -euo pipefail
@@ -139,9 +140,17 @@ EOF
   rm -rf "$stage"
 done
 
+# Publish howdah-check as a STANDALONE top-level asset (the same version-
+# independent POSIX-sh script that also rides inside every tarball). Users need
+# it BEFORE picking a tarball -- `howdah-check detect` reports the PHP API
+# number that selects the right one. One copy, signed via SHA256SUMS alongside
+# the tarballs (sign.sh picks it up automatically).
+cp "$REPO_ROOT/tools/howdah-check" "$OUT/howdah-check"
+chmod +x "$OUT/howdah-check"
+
 echo ""
 echo "======================================================================"
-echo "== built $built tarball(s) into $OUT"
+echo "== built $built tarball(s) into $OUT (+ standalone howdah-check)"
 column -t -s$'\t' "$REPORT" || cat "$REPORT"
 if [ -n "$failed" ]; then
   echo "== FAILED minors:$failed" >&2

@@ -16,7 +16,8 @@
 # HOWDAH_GPG_SIGNING_KEY secret and runs with HOWDAH_SIGN_BATCH=1.
 #
 # Output in DIR:
-#   SHA256SUMS      sha256 of every *.tar.gz (one per line, filenames only)
+#   SHA256SUMS      sha256 of every *.tar.gz PLUS the standalone howdah-check
+#                   (one per line, filenames only)
 #   SHA256SUMS.asc  detached, armored signature of SHA256SUMS
 set -euo pipefail
 
@@ -25,15 +26,19 @@ SIGNING_KEY="${HOWDAH_SIGNING_KEY:-1E8D725D31BD5DC9!}"
 
 cd "$DIR"
 shopt -s nullglob
-tarballs=(*.tar.gz)
-if [ ${#tarballs[@]} -eq 0 ]; then
+assets=(*.tar.gz)
+if [ ${#assets[@]} -eq 0 ]; then
   echo "FATAL: no *.tar.gz in $DIR (run build-release.sh first)" >&2
   exit 1
 fi
+# The standalone, version-independent howdah-check is a first-class release
+# asset (you run `howdah-check detect` to find your PHP API number BEFORE
+# picking a tarball), so the detached signature must cover it too.
+[ -f howdah-check ] && assets+=(howdah-check)
 
-echo "== hashing ${#tarballs[@]} tarball(s) in $DIR"
+echo "== hashing ${#assets[@]} asset(s) in $DIR"
 # Filenames only (no paths) so `sha256sum -c SHA256SUMS` works from inside DIR.
-sha256sum "${tarballs[@]}" > SHA256SUMS
+sha256sum "${assets[@]}" > SHA256SUMS
 cat SHA256SUMS
 
 gpg_args=(--batch --yes --armor -u "$SIGNING_KEY" --detach-sign -o SHA256SUMS.asc)

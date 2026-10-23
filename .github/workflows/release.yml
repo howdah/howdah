@@ -75,10 +75,16 @@ jobs:
           path: dl
           merge-multiple: true
 
-      - name: Gather tarballs into packaging/out
+      - name: Gather tarballs + standalone howdah-check into packaging/out
         run: |
           mkdir -p packaging/out
           find dl -name '*.tar.gz' -exec cp {} packaging/out/ \;
+          # Publish howdah-check as a standalone top-level asset too (needed
+          # BEFORE picking a tarball). The build matrix only uploads tarballs,
+          # so take it straight from the checked-out repo. sign.sh then includes
+          # it in SHA256SUMS, so it is covered by the detached signature.
+          cp tools/howdah-check packaging/out/howdah-check
+          chmod +x packaging/out/howdah-check
           ls -l packaging/out
 
       - name: Import CI signing subkey (passphraseless, non-interactive)
@@ -127,6 +133,7 @@ jobs:
             --notes "Signed release. Verify: \`gpg --import howdah-release-signing.asc && gpg --verify SHA256SUMS.asc SHA256SUMS && sha256sum -c SHA256SUMS\`" \
             $extra \
             packaging/out/*.tar.gz \
+            packaging/out/howdah-check \
             packaging/out/SHA256SUMS \
             packaging/out/SHA256SUMS.asc \
             packaging/out/howdah-release-signing.asc

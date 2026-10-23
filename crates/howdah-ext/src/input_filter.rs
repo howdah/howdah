@@ -75,7 +75,16 @@ pub(crate) unsafe extern "C" fn filter(
     // Our own processing is fully panic-guarded: a glue bug must never unwind
     // into PHP (carry-forward #4). On panic we do NOT drop — we fall through to
     // chaining the prior filter (fail-open), exactly like rfc1867::callback.
-    let drop_var = catch_unwind(AssertUnwindSafe(|| process(arg, var, val_len))).unwrap_or(false);
+    //
+    // Layer-2 value scanning runs in the SAME guard, after (and independent of)
+    // Layer 1's `process`: it never influences `drop_var`, and a panic in either
+    // step yields `false` -> chain the prior filter.
+    let drop_var = catch_unwind(AssertUnwindSafe(|| {
+        let drop_var = process(arg, var, val_len);
+        inspect_value(arg, var, val, val_len);
+        drop_var
+    }))
+    .unwrap_or(false);
 
     if drop_var {
         // The core decided Block: drop THIS variable (return 0, do not chain) to
@@ -149,6 +158,48 @@ unsafe fn process(arg: c_int, var: VarPtr, val_len: ValLen) -> bool {
     false
 }
 
+/// Map a filter `arg` + variable name to the Layer-2 scan source (a
+/// `HOWDAH_SRC_*` code), or `None` when the value is not scanned. POST includes
+/// multipart fields (the multipart skip is Layer 1's count path only). For
+/// `PARSE_SERVER` only the request path (`REQUEST_URI`, `PATH_INFO`) is scanned;
+/// `HTTP_*` headers and every other `$_SERVER` key are not.
+fn source_for(arg: c_int, name: &[u8]) -> Option<i32> {
+    if arg == sys::PARSE_GET as c_int {
+        Some(core::HOWDAH_SRC_GET)
+    } else if arg == sys::PARSE_POST as c_int {
+        Some(core::HOWDAH_SRC_POST)
+    } else if arg == sys::PARSE_COOKIE as c_int {
+        Some(core::HOWDAH_SRC_COOKIE)
+    } else if arg == sys::PARSE_SERVER as c_int && (name == b"REQUEST_URI" || name == b"PATH_INFO")
+    {
+        Some(core::HOWDAH_SRC_PATH)
+    } else {
+        None
+    }
+}
+
+/// Layer-2: scan the decoded value (binary-safe, `*val` for `val_len` bytes) on
+/// its own path, independent of Layer 1's counting. A core Block latches the
+/// request-end 403 via `INPUT_BLOCKED`; the variable is NEVER dropped here.
+unsafe fn inspect_value(arg: c_int, var: VarPtr, val: *mut *mut c_char, val_len: ValLen) {
+    let (name, name_len) = var_name(var);
+    let name_bytes: &[u8] = if name.is_null() {
+        &[]
+    } else {
+        std::slice::from_raw_parts(name as *const u8, name_len)
+    };
+    let Some(source) = source_for(arg, name_bytes) else {
+        return;
+    };
+    module::maybe_begin();
+    let vptr: *const c_char = if val.is_null() { ptr::null() } else { *val as *const c_char };
+    let vlen = if vptr.is_null() { 0 } else { val_len as usize };
+    let action = core::howdah_inspect_value(module::CTX, source, name, name_len, vptr, vlen);
+    if action == core::HOWDAH_BLOCK {
+        INPUT_BLOCKED = true;
+    }
+}
+
 /// True when a `PARSE_SERVER` variable name is an `HTTP_*` request header (the
 /// prefix PHP uses for every client-supplied header in `$_SERVER`).
 unsafe fn is_http_header(name: *const c_char, name_len: usize) -> bool {
@@ -167,4 +218,36 @@ unsafe fn var_name(var: VarPtr) -> (*const c_char, usize) {
     }
     let p = var as *const c_char;
     (p, CStr::from_ptr(p).to_bytes().len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GET: c_int = sys::PARSE_GET as c_int;
+    const POST: c_int = sys::PARSE_POST as c_int;
+    const COOKIE: c_int = sys::PARSE_COOKIE as c_int;
+    const SERVER: c_int = sys::PARSE_SERVER as c_int;
+
+    #[test]
+    fn get_post_cookie_map_to_their_source() {
+        assert_eq!(source_for(GET, b"q"), Some(core::HOWDAH_SRC_GET));
+        assert_eq!(source_for(POST, b"q"), Some(core::HOWDAH_SRC_POST));
+        assert_eq!(source_for(COOKIE, b"q"), Some(core::HOWDAH_SRC_COOKIE));
+    }
+
+    #[test]
+    fn server_path_names_only() {
+        assert_eq!(source_for(SERVER, b"REQUEST_URI"), Some(core::HOWDAH_SRC_PATH));
+        assert_eq!(source_for(SERVER, b"PATH_INFO"), Some(core::HOWDAH_SRC_PATH));
+        assert_eq!(source_for(SERVER, b"HTTP_HOST"), None);
+        assert_eq!(source_for(SERVER, b"SCRIPT_NAME"), None);
+        assert_eq!(source_for(SERVER, b"REQUEST_URI2"), None);
+    }
+
+    #[test]
+    fn stray_arg_is_none() {
+        assert_eq!(source_for(-1, b"REQUEST_URI"), None);
+        assert_eq!(source_for(99, b"q"), None);
+    }
 }

@@ -13,11 +13,18 @@ pub enum InspectClass {
     CommandInjection,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
 pub struct InspectLimits {
     pub max_value_bytes: usize,
     pub max_total_bytes: usize,
     pub max_values: usize,
+}
+
+impl Default for InspectLimits {
+    fn default() -> Self {
+        Self::defaults()
+    }
 }
 
 impl InspectLimits {

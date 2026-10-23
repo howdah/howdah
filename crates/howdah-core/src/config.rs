@@ -4,6 +4,7 @@ use std::fmt;
 
 use serde::Deserialize;
 
+use crate::inspect::{InspectClass, InspectLimits};
 use crate::limits::{Limits, RuleId};
 
 /// Global enforcement mode.
@@ -23,6 +24,55 @@ pub struct LogConfig {
     pub path: Option<String>,
 }
 
+/// Layer-2 input inspection settings. Its `mode` is independent of the global
+/// mode: a global `block` never arms content scanning.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct InspectConfig {
+    pub enabled: bool,
+    pub mode: Mode,
+    pub sqli: bool,
+    pub traversal: bool,
+    pub cmdi: bool,
+    pub limits: InspectLimits,
+    /// Per-class mode overrides.
+    pub rule_modes: BTreeMap<RuleId, Mode>,
+}
+
+impl Default for InspectConfig {
+    fn default() -> Self {
+        InspectConfig {
+            enabled: true,
+            mode: Mode::Detect,
+            sqli: true,
+            traversal: true,
+            cmdi: true,
+            limits: InspectLimits::defaults(),
+            rule_modes: BTreeMap::new(),
+        }
+    }
+}
+
+impl InspectConfig {
+    /// Off if the global mode is off or inspection is disabled; otherwise the
+    /// inspect section's own mode (the global `block` is deliberately ignored).
+    pub fn effective_mode(&self, global: Mode) -> Mode {
+        if global == Mode::Off || !self.enabled {
+            Mode::Off
+        } else {
+            self.mode
+        }
+    }
+
+    pub fn class_enabled(&self, c: InspectClass) -> bool {
+        match c {
+            InspectClass::SqlInjection => self.sqli,
+            InspectClass::PathTraversal => self.traversal,
+            InspectClass::CommandInjection => self.cmdi,
+        }
+    }
+}
+
 /// Parsed Howdah configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -31,6 +81,7 @@ pub struct Config {
     pub log: LogConfig,
     /// Per-rule mode overrides.
     pub rule_modes: BTreeMap<RuleId, Mode>,
+    pub inspect: InspectConfig,
 }
 
 #[derive(Deserialize)]
@@ -40,6 +91,7 @@ struct RawConfig {
     limits: Limits,
     log: LogConfig,
     rules: BTreeMap<RuleId, Mode>,
+    inspect: InspectConfig,
 }
 
 impl Default for RawConfig {
@@ -50,6 +102,7 @@ impl Default for RawConfig {
             limits: c.limits,
             log: c.log,
             rules: c.rule_modes,
+            inspect: c.inspect,
         }
     }
 }
@@ -76,6 +129,7 @@ impl Config {
             limits: raw.limits,
             log: raw.log,
             rule_modes: raw.rules,
+            inspect: raw.inspect,
         })
     }
 
@@ -86,6 +140,7 @@ impl Config {
             limits: Limits::default(),
             log: LogConfig::default(),
             rule_modes: BTreeMap::new(),
+            inspect: InspectConfig::default(),
         }
     }
 }
@@ -189,5 +244,43 @@ self_test = "off"
         assert!(c.limits.max_parts > 0);
         assert!(c.limits.validate().is_ok());
         assert!(c.rule_modes.is_empty());
+    }
+
+    #[test]
+    fn inspect_defaults_detect_and_enabled() {
+        let c = Config::from_toml("").unwrap();
+        assert!(c.inspect.enabled);
+        assert_eq!(c.inspect.mode, Mode::Detect);
+        for k in [
+            crate::inspect::InspectClass::SqlInjection,
+            crate::inspect::InspectClass::PathTraversal,
+            crate::inspect::InspectClass::CommandInjection,
+        ] {
+            assert!(c.inspect.class_enabled(k));
+        }
+    }
+
+    #[test]
+    fn inspect_section_parses() {
+        let c = Config::from_toml("[inspect]\nmode = \"block\"\ncmdi = false").unwrap();
+        assert_eq!(c.inspect.effective_mode(Mode::Block), Mode::Block);
+        assert!(!c.inspect.class_enabled(crate::inspect::InspectClass::CommandInjection));
+    }
+
+    #[test]
+    fn global_block_does_not_arm_inspect() {
+        let c = Config::from_toml("mode = \"block\"").unwrap();
+        assert_eq!(c.inspect.effective_mode(Mode::Block), Mode::Detect);
+    }
+
+    #[test]
+    fn global_off_disables_inspect() {
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.inspect.effective_mode(Mode::Off), Mode::Off);
+    }
+
+    #[test]
+    fn inspect_unknown_key_rejected() {
+        assert!(Config::from_toml("[inspect]\nnope = 1").is_err());
     }
 }

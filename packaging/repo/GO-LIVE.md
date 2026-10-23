@@ -72,6 +72,19 @@ Actions -> `publish-repos` -> Run workflow.
    a package file with changed bytes is refused (`--immutable`): bump the
    revision (`HOWDAH_DEB_REV` / `HOWDAH_RPM_REL`) or version instead.
 
+### Re-publishing the same version (e.g. architecture backfill)
+
+To add packages that failed to build the first time (for example an `aarch64`
+cell that has since been fixed) **without** bumping the version, run the
+workflow with **both `publish` and `overwrite` checked**. `overwrite` drops the
+`--immutable` guard so the full, freshly rebuilt set replaces what is there;
+because every run rebuilds all packages, the pool and the regenerated index stay
+consistent. The rebuilt package bytes differ from the originals, so the pool
+objects are long-cached — **afterwards, purge the Cloudflare cache** (Caching →
+Purge Everything, or the `/apt/pool/*` and `*.rpm` paths) so the edge serves the
+new bytes that the new index references. Verify with a fresh-container install
+(step 5) once the cache is purged.
+
 **Known limitation: the index reflects only the latest publish.** The workflow
 re-indexes just the packages built in that run. Earlier versions stay in R2 as
 objects (the pool) but drop out of the apt `Packages` and yum `repodata`

@@ -17,9 +17,9 @@ can't, or until you can.
 > see [docs/coverage.md](docs/coverage.md). Install, verify and rollback steps
 > are on the project site (built from `site/`).
 
-## What 1.0 does
+## What Layer 1 does
 
-Version 1.0 (Layer 1) has one job: refuse abusive request shapes, starting with `multipart/form-data`
+Layer 1 has one job: refuse abusive request shapes, starting with `multipart/form-data`
 requests that carry a flood of parts or files (the *shape* of the PHP2Shell attack, and of
 older issues such as CVE-2023-0662) before they exhaust worker memory.
 
@@ -85,7 +85,7 @@ Lab base images come from `lab/images/php-X.Y.Dockerfile`; build them first
 
 `tools/howdah-check` is a read-only helper for installing and verifying
 Howdah on a server. End users can download it on its own from the
-[v0.1.0 release](https://github.com/howdah/howdah/releases/download/v0.1.0/howdah-check)
+[latest release](https://github.com/howdah/howdah/releases/latest/download/howdah-check)
 (it is also bundled in each tarball):
 
 ```sh

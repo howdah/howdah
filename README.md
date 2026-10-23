@@ -9,10 +9,10 @@ tool: it recognizes and blocks abusive input. It is not a hacking tool, and it
 is not a replacement for patching PHP. Upgrade when you can; use Howdah when you
 can't, or until you can.
 
-> **Status: 1.1.0 is released** — Layer 1 (request-parsing limits) plus Layer 2 (input
-> inspection, log-only). Signed tarballs for PHP 5.4 to 8.5 are on the
-> [v1.1.0 release page](https://github.com/howdah/howdah/releases/tag/v1.1.0).
-> Defaults may still change; Layers 3 and 4 are the roadmap.
+> **Status: 1.2.0 is released** — Layer 1 (request-parsing limits), Layer 2 (input
+> inspection, log-only) plus Layer 3 (sink hardening, log-first). Signed tarballs for PHP 5.4 to 8.5 are on the
+> [v1.2.0 release page](https://github.com/howdah/howdah/releases/tag/v1.2.0).
+> Defaults may still change; Layer 4 is the roadmap.
 > Start in `detect` mode. Not every PHP version has been tested:
 > see [docs/coverage.md](docs/coverage.md). Install, verify and rollback steps
 > are on the project site (built from `site/`).
@@ -44,6 +44,24 @@ for SQL injection, path traversal and command/code injection. It **detects and
 logs; it does not block by default**, and the matched value is never logged.
 Signature inspection is best-effort and can be bypassed. See the `[inspect]`
 section of [docs/config.md](docs/config.md) and the [CHANGELOG](CHANGELOG.md).
+
+## Layer 3: sink hardening (in 1.2)
+
+Layer 3 ships in 1.2. It guards dangerous PHP functions ("sinks"). Version 1.2
+**actively guards two sinks**: `command_exec` (`system`, `exec`, `shell_exec`,
+`passthru`, `popen`, `proc_open`) and `unserialize`. It is a flat allowlist
+policy in the Snuffleupagus style. It **detects and logs; it does not block by
+default.** It has its own `sinks.mode`, which defaults to `detect` and is
+independent of the global `howdah.mode`: `howdah.mode = block` does not arm
+sinks. `unserialize` is off by default, and the sink argument (the command line
+or the serialized payload) is never logged. This is not XSS or output
+inspection. It is best-effort virtual patching and can be bypassed; one known
+gap is that `proc_open` with an array command (PHP 7.4+) is not inspected.
+
+`include` and `eval` are **reserved**: their config keys exist but nothing is
+hooked in 1.2. `phar://` and SSRF coverage are roadmap, not shipped. See the
+`[sinks]` section of [docs/config.md](docs/config.md) and the
+[CHANGELOG](CHANGELOG.md).
 
 ## PHP versions
 

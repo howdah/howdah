@@ -6,13 +6,13 @@ import { REPO, PKG } from '../lib/site';
 const rows = coverage.rows;
 const ranDate = (coverage.generated || '').slice(0, 10);
 
-// Four-layer model (design §3). Layer 1 shipped in 1.0, Layer 2 in 1.1
-// (status 'released', log-only); 3–4 are the roadmap.
+// Four-layer model (design §3). Layer 1 shipped in 1.0, Layer 2 in 1.1,
+// Layer 3 in 1.2 (status 'released', log-only); 4 is the roadmap.
 // Non-active layers are dimmed so the page never implies they are in 1.0.
 const layers = [
   { n: 1, name: 'Request parsing', covers: 'Upload/multipart floods (PHP2Shell), input-variable floods, deeply nested arrays, oversized headers — refused while PHP parses the request.', status: 'active' },
   { n: 2, name: 'Request inspection', covers: 'Content inspection of decoded GET/POST/cookie/path values for SQL injection, path traversal and command/code injection. It detects and logs; it does not block by default.', status: 'released' },
-  { n: 3, name: 'Runtime checks', covers: 'Guarding dangerous sinks: exec/system, include of user paths, unserialize/phar, SSRF.', status: 'planned' },
+  { n: 3, name: 'Runtime checks', covers: 'Sink hardening: guards command execution (system/exec/shell_exec/passthru/popen/proc_open) and unserialize with a flat allowlist policy. It detects and logs; it does not block by default. include/eval, phar:// and SSRF are roadmap, not in 1.2.', status: 'released' },
   { n: 4, name: 'After a breach', covers: 'Blocking execution of PHP from upload dirs, webshell behaviour, unexpected outbound connections.', status: 'planned' },
 ];
 
@@ -52,7 +52,7 @@ const compare = [
       <div>
         <h2>What is Howdah, and why the name?</h2>
         <p>Howdah is a native extension for PHP. When a web request arrives, PHP starts parsing it before any of your code runs. Howdah watches that parsing step and refuses requests that are built to exhaust memory, while PHP is still working through them.</p>
-        <p>Version 1.0 completes Howdah's first layer: limits on <code>multipart/form-data</code> uploads, on the number and shape of input variables, and on request headers. The critical resource-exhaustion limits block by default, even in detect mode; everything else starts in log-only mode so you can watch it before you let it block. Version 1.1 adds Layer 2, which inspects request content for injection patterns and logs them; it does not block by default.</p>
+        <p>Version 1.0 completes Howdah's first layer: limits on <code>multipart/form-data</code> uploads, on the number and shape of input variables, and on request headers. The critical resource-exhaustion limits block by default, even in detect mode; everything else starts in log-only mode so you can watch it before you let it block. Version 1.1 adds Layer 2, which inspects request content for injection patterns and logs them; it does not block by default. Version 1.2 adds Layer 3, which guards two dangerous PHP sinks, command execution and <code>unserialize</code>, and also logs first.</p>
         <p>It is not a replacement for patching. Upgrade PHP when you can. Use Howdah when you cannot, or until you can.</p>
       </div>
       <aside class="card" aria-labelledby="howdah-word">
@@ -66,13 +66,13 @@ const compare = [
   <section id="how" class="alt">
     <div class="wrap">
       <h2>How it works: four layers</h2>
-      <p>Howdah's protection is organised in four layers. <strong>Version 1.0 delivered Layer 1; version 1.1 adds Layer 2.</strong> Layer 2 detects and logs SQL injection, path traversal and command/code injection in request values; it does not block by default. Layers 3 and 4 are the roadmap, and this page never claims they are here yet.</p>
+      <p>Howdah's protection is organised in four layers. <strong>Version 1.0 delivered Layer 1; version 1.1 added Layer 2; version 1.2 adds Layer 3.</strong> Layer 2 detects and logs SQL injection, path traversal and command/code injection in request values; Layer 3 guards the command-execution and <code>unserialize</code> sinks; neither blocks by default. Layer 4 is the roadmap, and this page never claims it is here yet.</p>
       <ol class="layers" aria-label="The four protection layers; a request flows from the top down">
         {layers.map((l) => (
           <li class={l.status}>
             <span class="lnum" aria-hidden="true">{l.n}</span>
             <div>
-              <h3>Layer {l.n}: {l.name} {l.status === 'active' ? <span class="pill ok">Active in 1.0</span> : l.status === 'released' ? <span class="pill ok">Active in 1.1 · log-only</span> : <span class="pill na">Planned</span>}</h3>
+              <h3>Layer {l.n}: {l.name} {l.status === 'active' ? <span class="pill ok">Active in 1.0</span> : l.status === 'released' ? <span class="pill ok">Active in {l.n === 3 ? '1.2' : '1.1'} · log-only</span> : <span class="pill na">Planned</span>}</h3>
               <p>{l.covers}</p>
             </div>
           </li>
@@ -161,7 +161,39 @@ const compare = [
     </div>
   </section>
 
-  <section id="story" class="alt">
+  <section id="sinks" class="alt">
+    <div class="wrap">
+      <h2>Layer 3 — the sinks Howdah guards <span class="pill ok">1.2 · log-only</span></h2>
+      <p>Layer 2 looks at request values. Layer 3 looks at what the application does with them: it guards dangerous PHP functions, called <em>sinks</em>, with a flat allowlist policy in the style of Snuffleupagus. Version 1.2 <strong>actively guards two sinks. It detects and logs; it does not block by default.</strong> This is sink hardening, not XSS or output inspection.</p>
+      <div class="cols two" style="margin-top:1.5rem">
+        <div>
+          <h3>Two active sinks</h3>
+          <div class="tablewrap" tabindex="0" role="region" aria-label="Layer 3 active sinks (scrolls sideways on narrow screens)">
+            <table>
+              <caption class="sr-only">Layer 3 sinks guarded in 1.2</caption>
+              <thead><tr><th scope="col">Sink</th><th scope="col">Functions</th><th scope="col">Default</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">Command execution</th><td><code>system</code>, <code>exec</code>, <code>shell_exec</code>, <code>passthru</code>, <code>popen</code>, <code>proc_open</code></td><td>Logs when not allowlisted</td></tr>
+                <tr><th scope="row">Unserialize</th><td><code>unserialize</code></td><td><strong>Off</strong>; opt in to log</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="legend">Known limitation: <code>proc_open</code> with an array command (PHP 7.4+) is not inspected.</p>
+          <h3 style="margin-top:1.5rem">Not in 1.2: the roadmap</h3>
+          <p><code>include</code> and <code>eval</code> are <strong>reserved</strong>: their config keys exist, but nothing is hooked, so they do nothing in 1.2. <code>phar://</code> and SSRF coverage are roadmap too. None of these is shipped.</p>
+        </div>
+        <div>
+          <h3>Log-first, on purpose</h3>
+          <p>Layer 3 has its own <code>sinks.mode</code>, which defaults to <code>detect</code> (log only). It is independent of the global <code>howdah.mode</code>: setting <code>howdah.mode = block</code> does <strong>not</strong> arm sinks. Only command execution and <code>unserialize</code> can block in 1.2, and only when an operator sets that sink to <code>block</code> explicitly, after setting its allowlist.</p>
+          <h3 style="margin-top:1.5rem">The argument is never logged</h3>
+          <p>An event records the sink and the function name (plus the class name for <code>unserialize</code>). The command line and the serialized payload are never written to the log.</p>
+        </div>
+      </div>
+      <p class="legend" style="margin-top:1.5rem"><strong>Honest caveat.</strong> A flat allowlist policy is best-effort virtual patching and can be bypassed, which is why Layer 3 logs rather than blocks. Use the log to learn what your application really calls, then fix the application (no shell calls on user input, no unserialize of untrusted data). To configure it, see the <code>[sinks]</code> section of the <a href="/docs/configuration/#layer-3-sinks">configuration reference</a>.</p>
+    </div>
+  </section>
+
+  <section id="story">
     <div class="wrap">
       <h2>The PHP2Shell story, plainly told</h2>
       <div class="cols two">

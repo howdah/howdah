@@ -35,13 +35,22 @@ DEST="R2:$BUCKET/$PFX"
 
 DRY=""
 [ "${HOWDAH_R2_DRY_RUN:-0}" = 1 ] && DRY="--dry-run"
+# Packages are --immutable by default: re-publishing the same file name with
+# different bytes is an error (bump the revision instead). HOWDAH_R2_OVERWRITE=1
+# drops that for a DELIBERATE same-version re-publish (e.g. backfilling an
+# architecture that failed to build the first time). Because every publish
+# rebuilds ALL packages, the pool and the freshly generated index stay
+# consistent — but the overwritten pool objects must then be purged from the
+# Cloudflare cache (they are long-cached), so this is an explicit opt-in.
+IMMUT="--immutable"
+[ "${HOWDAH_R2_OVERWRITE:-0}" = 1 ] && { IMMUT=""; echo "NOTE: HOWDAH_R2_OVERWRITE=1 -> packages may be overwritten (purge the pool cache after)"; }
 LONG="Cache-Control: public, max-age=31536000, immutable"    # version-named packages
 SHORT="Cache-Control: public, max-age=300, must-revalidate"  # mutable indexes / roots
 rc() { rclone "$@" $DRY --retries 5 --low-level-retries 10 -v; }
 
-echo "== 1/3 packages (immutable, long cache) -> $DEST"
-rc copy "$REPO/apt/pool" "${DEST}apt/pool" --immutable --header-upload "$LONG"
-rc copy "$REPO/yum" "${DEST}yum" --include '*.rpm' --immutable --header-upload "$LONG"
+echo "== 1/3 packages (long cache) -> $DEST"
+rc copy "$REPO/apt/pool" "${DEST}apt/pool" $IMMUT --header-upload "$LONG"
+rc copy "$REPO/yum" "${DEST}yum" --include '*.rpm' $IMMUT --header-upload "$LONG"
 
 echo "== 2/3 indexes (short cache)"
 rc copy "$REPO/apt/dists" "${DEST}apt/dists" \

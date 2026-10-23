@@ -23,6 +23,10 @@ on:
         description: "Actually upload to R2 (false = build + sign + dry-run only)"
         type: boolean
         default: false
+      overwrite:
+        description: "Allow overwriting already-published package files (same-version re-publish, e.g. arch backfill). Purge the Cloudflare pool cache after."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -186,6 +190,7 @@ jobs:
           RCLONE_CONFIG_R2_NO_CHECK_BUCKET: "true"
           HOWDAH_R2_BUCKET: ${{ secrets.HOWDAH_R2_BUCKET }}
           HOWDAH_R2_DRY_RUN: ${{ inputs.publish && '0' || '1' }}
+          HOWDAH_R2_OVERWRITE: ${{ inputs.overwrite && '1' || '0' }}
         run: |
           if [ "$HOWDAH_R2_DRY_RUN" = 1 ]; then
             echo "::notice::publish=false: DRY RUN, nothing is written to R2"

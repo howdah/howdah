@@ -243,6 +243,13 @@ pub(crate) unsafe fn emit_and_bail(status: c_int, request_id: String) -> ! {
     // response and the log sink, leaving nothing of ours alive past its return.
     let _ = catch_unwind(AssertUnwindSafe(|| response::emit_block(status, &request_id)));
     drop(request_id); // explicit: no heap-owned Rust value may be live at bail()
+    // Reset the per-request lifecycle BEFORE the longjmp: on SAPIs where
+    // `zend_bailout` skips RSHUTDOWN (the CLI built-in server), a stale `BEGUN`
+    // would poison every later request on this worker. These are Copy flags, so
+    // the reset leaves nothing heap-owned alive across `bail()`.
+    BLOCKED = false;
+    SELFTEST_SEEN = false;
+    module::clear_request_state();
     bail();
 }
 

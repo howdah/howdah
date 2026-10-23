@@ -27,7 +27,9 @@ cp /tmp/t/release/libhowdah_ext.so "$WORK/howdah.so"
 
 # Document root + app.
 DOCROOT=/var/www/html; mkdir -p "$DOCROOT"
-printf '<?php $n=count($_FILES)+count($_POST); echo "OK n=$n\\n";' > "$DOCROOT/index.php"
+# Read $_SERVER so auto_globals_jit materializes the HTTP_* request-header vars
+# the chained input_filter counts (see matrix_container.sh for the rationale).
+printf '<?php $n=count($_FILES)+count($_POST)+count($_SERVER); echo "OK n=$n\\n";' > "$DOCROOT/index.php"
 gen() { php -r '
   $f=fopen($argv[1],"w"); $b=$argv[2]; $n=(int)$argv[3]; $k=$argv[4];
   for($i=0;$i<$n;$i++){ fwrite($f,"--$b\r\n");
@@ -37,6 +39,17 @@ gen() { php -r '
 gen "$WORK/flood_files.bin"  FloodB0 3000 file
 gen "$WORK/flood_fields.bin" FloodB0 3000 field
 printf -- '--MarkerB0\r\nContent-Disposition: form-data; name="__howdah_selftest__"\r\n\r\n1\r\n--MarkerB0--\r\n' > "$WORK/marker.bin"
+
+# ---- Task 9 fixtures (input-shape / header rules) --------------------------
+INCORPUS=/src/lab/integration/corpus/input
+php -r 'for($i=0;$i<60;$i++){echo($i?"&":"")."v$i=$i";}' > "$WORK/iv.body"
+printf 'a[b][c][d][e]=1' > "$WORK/nd.body"
+printf 'mode="block"\n[limits]\nmax_input_vars=50\n'         > "$WORK/iv.toml"
+printf 'mode="detect"\n[limits]\nmax_input_vars=50\n'        > "$WORK/ivd.toml"
+printf 'mode="block"\n[limits]\nmax_input_nesting_depth=3\n' > "$WORK/nd.toml"
+printf 'mode="block"\n[limits]\nmax_request_headers=5\n'     > "$WORK/rh.toml"
+printf 'mode="detect"\n[limits]\nmax_request_headers=5\n'    > "$WORK/rhd.toml"
+: > "$WORK/flood_hdr.txt"; i=0; while [ "$i" -lt 15 ]; do printf 'X-Flood-%s: v%s\n' "$i" "$i" >> "$WORK/flood_hdr.txt"; i=$((i+1)); done
 
 CONFD=$(php -r 'echo PHP_CONFIG_FILE_SCAN_DIR;' 2>/dev/null); [ -z "$CONFD" ] && CONFD=/usr/local/etc/php/conf.d
 mkdir -p "$CONFD"
@@ -55,6 +68,28 @@ ap_start() { $AP start 2>"$WORK/ap.err"; _j=0
 ap_stop() { $AP stop 2>/dev/null; _j=0; while curl -s -o /dev/null http://127.0.0.1/ 2>/dev/null; do _j=$((_j+1)); [ "$_j" -gt 40 ] && break; sleep 0.1; done; }
 post() { curl -s -o "$WORK/resp.txt" -w '%{http_code}' -X POST \
     -H "Content-Type: multipart/form-data; boundary=$1" --data-binary @"$2" http://127.0.0.1/ 2>/dev/null || echo 000; }
+# apost <method> <ct> <bodyfile> -> http code (body in $WORK/resp.txt)
+apost() { curl -s -o "$WORK/resp.txt" -w '%{http_code}' -X "$1" -H "Content-Type: $2" \
+    --data-binary @"$3" http://127.0.0.1/ 2>/dev/null || echo 000; }
+# aget_hdrs <headerfile> -> http code (one "Name: value" per line -> real headers)
+aget_hdrs() { _hf=$1; set --; while IFS= read -r _l || [ -n "$_l" ]; do [ -n "$_l" ] && set -- "$@" -H "$_l"; done < "$_hf"
+  curl -s -o "$WORK/resp.txt" -w '%{http_code}' "$@" http://127.0.0.1/ 2>/dev/null || echo 000; }
+# aget_query <querystring> -> http code
+aget_query() { curl -s -o "$WORK/resp.txt" -w '%{http_code}' "http://127.0.0.1/?$1" 2>/dev/null || echo 000; }
+
+# Task 9 assertions (log-based; the input/header-path 403 is best-effort -- the
+# var-drop + log line is the mitigation, HTTP status may already be committed).
+alogblock() { # <scenario> <http> <rule>
+  if ! grep -q '"action":"block"' "$LOG"; then record "$S" "$1" FAIL "no block line (http=$2)"; return; fi
+  if ! grep -q "\"rule\":\"$3\"" "$LOG"; then record "$S" "$1" FAIL "rule != $3 (http=$2)"; return; fi
+  record "$S" "$1" PASS "blocked rule=$3 http=$2 (403 best-effort)"; }
+alogdetect() { # <scenario> <http> <rule>
+  if grep -q '"action":"block"' "$LOG"; then record "$S" "$1" FAIL "blocked in detect (http=$2)"; return; fi
+  if grep -q '"action":"log"' "$LOG" && grep -q "\"rule\":\"$3\"" "$LOG"; then record "$S" "$1" PASS "logged rule=$3 http=$2 (detect)";
+  else record "$S" "$1" FAIL "no log line rule=$3 (http=$2)"; fi; }
+anofp() { # <name> <http>
+  if [ "$2" = 200 ] && ! grep -q '"action":"block"' "$LOG"; then record "$S" "fp_$1" PASS "http=200 no block";
+  else record "$S" "fp_$1" FAIL "http=$2 blocks=$(grep -c '"action":"block"' "$LOG")"; fi; }
 
 # shaped block (defaults) + client_ip (apache sets REMOTE_ADDR=127.0.0.1)
 : > "$LOG"; write_ini "" </dev/null; ap_start || { record $S shaped_block_files FAIL "apache down"; exit 1; }
@@ -88,4 +123,28 @@ ap_start || record $S detect_critical FAIL down
 c=$(post FloodB0 "$WORK/flood_fields.bin")
 if echo "$c" | grep -qE '^(403|413)$' && grep -q '"action":"block"' "$LOG"; then record $S detect_critical PASS "http=$c"; else record $S detect_critical FAIL "http=$c"; fi
 ap_stop
+# --- Task 9: input-shape rules (urlencoded POST) ---------------------------
+: > "$LOG"; write_ini "$WORK/iv.toml" </dev/null; ap_start || record $S input_vars_flood FAIL down
+c=$(apost POST application/x-www-form-urlencoded "$WORK/iv.body"); alogblock input_vars_flood "$c" max_input_vars; ap_stop
+: > "$LOG"; write_ini "$WORK/ivd.toml" </dev/null; ap_start || record $S input_vars_flood_detect FAIL down
+c=$(apost POST application/x-www-form-urlencoded "$WORK/iv.body"); alogblock input_vars_flood_detect "$c" max_input_vars; ap_stop
+: > "$LOG"; write_ini "$WORK/nd.toml" </dev/null; ap_start || record $S nesting_depth FAIL down
+c=$(apost POST application/x-www-form-urlencoded "$WORK/nd.body"); alogblock nesting_depth "$c" max_input_nesting_depth; ap_stop
+
+# --- Task 9: request-header count over real HTTP headers (Standard) ---------
+: > "$LOG"; write_ini "$WORK/rh.toml" </dev/null; ap_start || record $S request_headers_flood FAIL down
+c=$(aget_hdrs "$WORK/flood_hdr.txt"); alogblock request_headers_flood "$c" max_request_headers; ap_stop
+: > "$LOG"; write_ini "$WORK/rhd.toml" </dev/null; ap_start || record $S request_headers_flood_detect FAIL down
+c=$(aget_hdrs "$WORK/flood_hdr.txt"); alogdetect request_headers_flood_detect "$c" max_request_headers; ap_stop
+
+# --- Task 9: false-positive corpus at default limits -----------------------
+: > "$LOG"; write_ini "" </dev/null; ap_start || record $S fp_setup FAIL down
+: > "$LOG"; c=$(apost POST application/x-www-form-urlencoded "$INCORPUS/large_form.urlencoded"); anofp large_form "$c"
+: > "$LOG"; c=$(apost POST application/x-www-form-urlencoded "$INCORPUS/nested_form.urlencoded"); anofp nested_form "$c"
+: > "$LOG"; c=$(aget_hdrs "$INCORPUS/ordinary_headers.txt"); anofp ordinary_headers "$c"
+while IFS= read -r q || [ -n "$q" ]; do [ -z "$q" ] && continue; : > "$LOG"
+  c=$(aget_query "$q"); anofp "query_$(echo "$q" | tr -c 'a-zA-Z0-9' _ | cut -c1-16)" "$c"
+done < "$INCORPUS/safe_queries.txt"
+ap_stop
+
 echo "== [$PHPVER] apache rows ==" >&2; grep "^$PHPVER	" "$RESULTS" | grep "	apache	" >&2 || true

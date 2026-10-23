@@ -1,10 +1,10 @@
 {
-  "generated": "2026-10-23T02:10:17Z",
+  "generated": "2026-10-23T07:43:02Z",
   "source": "lab/integration/matrix-results.tsv",
   "totals": {
-    "pass": 182,
+    "pass": 340,
     "fail": 0,
-    "skip": 7
+    "skip": 25
   },
   "corpusFalsePositives": 0,
   "rows": [
@@ -15,10 +15,10 @@
       "sapis": {
         "cli": {
           "state": "pass",
-          "pass": 14,
+          "pass": 25,
           "fail": 0,
-          "skip": 0,
-          "total": 14,
+          "skip": 2,
+          "total": 27,
           "files": "PASS",
           "fields": "PASS",
           "note": ""
@@ -39,7 +39,7 @@
           "fail": 0,
           "skip": 0,
           "total": 0,
-          "note": "no php:5.4-apache image (PHP 5.4 predates official images); real-world 5.4 is mod_php under CentOS 7 httpd"
+          "note": ""
         }
       },
       "tested": [
@@ -61,20 +61,20 @@
       "sapis": {
         "cli": {
           "state": "pass",
-          "pass": 14,
+          "pass": 25,
           "fail": 0,
-          "skip": 0,
-          "total": 14,
+          "skip": 2,
+          "total": 27,
           "files": "PASS",
           "fields": "PASS",
           "note": ""
         },
         "fpm": {
           "state": "pass",
-          "pass": 14,
+          "pass": 27,
           "fail": 0,
           "skip": 0,
-          "total": 14,
+          "total": 27,
           "files": "PASS",
           "fields": "PASS",
           "note": ""
@@ -85,7 +85,7 @@
           "fail": 0,
           "skip": 0,
           "total": 0,
-          "note": "apache mod_php not run this pass (fpm already exercises the non-CLI SAPI; mechanical repeat of 7.4/8.1)"
+          "note": ""
         }
       },
       "tested": [
@@ -124,20 +124,20 @@
       "sapis": {
         "cli": {
           "state": "pass",
-          "pass": 14,
+          "pass": 25,
           "fail": 0,
-          "skip": 0,
-          "total": 14,
+          "skip": 2,
+          "total": 27,
           "files": "PASS",
           "fields": "PASS",
           "note": ""
         },
         "fpm": {
           "state": "pass",
-          "pass": 14,
+          "pass": 27,
           "fail": 0,
           "skip": 0,
-          "total": 14,
+          "total": 27,
           "files": "PASS",
           "fields": "PASS",
           "note": ""
@@ -148,7 +148,7 @@
           "fail": 0,
           "skip": 0,
           "total": 0,
-          "note": "apache mod_php not run this pass (fpm already exercises the non-CLI SAPI; mechanical repeat of 7.4/8.1)"
+          "note": ""
         }
       },
       "tested": [
@@ -163,30 +163,30 @@
       "sapis": {
         "cli": {
           "state": "pass",
-          "pass": 14,
+          "pass": 25,
           "fail": 0,
-          "skip": 0,
-          "total": 14,
+          "skip": 2,
+          "total": 27,
           "files": "PASS",
           "fields": "PASS",
           "note": ""
         },
         "fpm": {
           "state": "pass",
-          "pass": 14,
+          "pass": 27,
           "fail": 0,
           "skip": 0,
-          "total": 14,
+          "total": 27,
           "files": "PASS",
           "fields": "PASS",
           "note": ""
         },
         "apache": {
           "state": "pass",
-          "pass": 14,
+          "pass": 27,
           "fail": 0,
           "skip": 0,
-          "total": 14,
+          "total": 27,
           "files": "PASS",
           "fields": "PASS",
           "note": ""
@@ -213,30 +213,30 @@
       "sapis": {
         "cli": {
           "state": "pass",
-          "pass": 14,
+          "pass": 25,
           "fail": 0,
-          "skip": 0,
-          "total": 14,
+          "skip": 2,
+          "total": 27,
           "files": "PASS",
           "fields": "PASS",
           "note": ""
         },
         "fpm": {
           "state": "pass",
-          "pass": 14,
+          "pass": 27,
           "fail": 0,
           "skip": 0,
-          "total": 14,
+          "total": 27,
           "files": "PASS",
           "fields": "PASS",
           "note": ""
         },
         "apache": {
           "state": "pass",
-          "pass": 14,
+          "pass": 27,
           "fail": 0,
           "skip": 0,
-          "total": 14,
+          "total": 27,
           "files": "PASS",
           "fields": "PASS",
           "note": ""
@@ -271,20 +271,20 @@
       "sapis": {
         "cli": {
           "state": "pass",
-          "pass": 14,
+          "pass": 25,
           "fail": 0,
-          "skip": 0,
-          "total": 14,
+          "skip": 2,
+          "total": 27,
           "files": "PASS",
           "fields": "PASS",
           "note": ""
         },
         "fpm": {
           "state": "pass",
-          "pass": 14,
+          "pass": 27,
           "fail": 0,
           "skip": 0,
-          "total": 14,
+          "total": 27,
           "files": "PASS",
           "fields": "PASS",
           "note": ""
@@ -295,7 +295,7 @@
           "fail": 0,
           "skip": 0,
           "total": 0,
-          "note": "apache mod_php not run this pass (fpm already exercises the non-CLI SAPI; mechanical repeat of 7.4/8.1)"
+          "note": ""
         }
       },
       "tested": [

@@ -278,11 +278,28 @@ unsafe extern "C" fn rshutdown(_type: c_int, _module_number: c_int) -> c_int {
             let _ = catch_unwind(AssertUnwindSafe(|| response::emit_block(status, &request_id)));
         }
     }
+    clear_request_state();
+    SUCCESS
+}
+
+/// Reset the per-request lifecycle flags for the next request. Runs at the end
+/// of RSHUTDOWN AND — via [`rfc1867::emit_and_bail`] — immediately before a
+/// bailout refusal. The second call site is load-bearing: `zend_bailout` is a
+/// longjmp that, on some SAPIs (the CLI built-in server, confirmed across
+/// 5.4–8.4), returns straight to the SAPI's request loop and SKIPS our
+/// RSHUTDOWN. Were `BEGUN` left set, the next request's `maybe_begin` would
+/// no-op, the core request would never be re-opened, and every subsequent
+/// request on that worker would reuse this request's already-ended state —
+/// emitting a stale 403 with no fresh log line. Resetting here makes a skipped
+/// RSHUTDOWN harmless; when RSHUTDOWN does run it simply resets again (idempotent).
+///
+/// # Safety
+/// Single-threaded (NTS) request teardown; the statics are request-local.
+pub(crate) unsafe fn clear_request_state() {
     BEGUN = false;
     ENDED = false;
     MULTIPART = false;
     input_filter::INPUT_BLOCKED = false;
-    SUCCESS
 }
 
 /// Everything up to the first `?` (log the path, never the query string).

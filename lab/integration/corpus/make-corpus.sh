@@ -71,5 +71,69 @@ f="$OUT/data_line_dashdash.bin"; : > "$f"
   cr "--not-a-boundary just user text"
   cr "--$B--"; } >> "$f"
 
+# ===========================================================================
+# Input-path false-positive corpus (Task 9): NON-multipart legitimate requests
+# that MUST NOT block at the shipped defaults (max_input_vars=2000,
+# max_input_nesting_depth=64, max_request_headers=200). These are urlencoded
+# bodies / header lists / query strings, NOT multipart, so they live under
+# input/ and are driven by a separate loop (never the *.bin multipart loop).
+# Shape only -- no payloads (design §9).
+IN="$OUT/input"; mkdir -p "$IN"
+
+# A. A large legitimate urlencoded form: 1500 fields, well under max_input_vars
+#    (2000) and above stock PHP max_input_vars (1000) so it exercises a raised-
+#    cap real form. One line, '&'-joined `field_N=value_N`.
+f="$IN/large_form.urlencoded"; : > "$f"
+i=0; while [ "$i" -lt 1500 ]; do
+  [ "$i" -gt 0 ] && printf '&' >> "$f"
+  printf 'field_%s=value_%s' "$i" "$i" >> "$f"
+  i=$((i+1))
+done
+
+# B. A legitimately nested urlencoded form (survey answers). Depth stays <= 6
+#    brackets, far under max_input_nesting_depth (64). ~40 fields.
+f="$IN/nested_form.urlencoded"; : > "$f"
+first=1
+emit() { [ "$first" -eq 1 ] || printf '&' >> "$f"; first=0; printf '%s' "$1" >> "$f"; }
+s=0; while [ "$s" -lt 4 ]; do
+  q=0; while [ "$q" -lt 5 ]; do
+    # answers[section_s][q_q][choice] -> 3 brackets (depth 3)
+    emit "answers[section_$s][q_$q][choice]=opt_$q"
+    q=$((q+1))
+  done
+  s=$((s+1))
+done
+# a few deeper-but-legitimate matrix fields: 5 brackets (depth 5 <= 6)
+d=0; while [ "$d" -lt 6 ]; do
+  emit "matrix[a][b][c][d][row_$d]=on"
+  d=$((d+1))
+done
+
+# C. ~50 ordinary request headers, far under max_request_headers (200).
+#    One "Name: value" per line, LF-terminated (the harness reads each line and
+#    passes it to curl / turns it into an HTTP_* server var; a trailing CR would
+#    corrupt the header, so these are plain LF, NOT the CRLF `cr` helper).
+lf() { printf '%s\n' "$1"; }
+f="$IN/ordinary_headers.txt"; : > "$f"
+{ lf 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+  lf 'Accept-Language: en-US,en;q=0.9'
+  lf 'Accept-Encoding: gzip, deflate, br'
+  lf 'Cache-Control: no-cache'
+  lf 'DNT: 1'
+  lf 'Upgrade-Insecure-Requests: 1'; } >> "$f"
+i=0; while [ "$i" -lt 44 ]; do lf "X-App-Header-$i: value-$i"; i=$((i+1)); done >> "$f"
+
+# D. Query strings that legitimately contain '-' in normal positions. Each must
+#    NOT trip the cgi_arg_injection virtual patch (every one carries a literal
+#    '=' and none starts with '-'). One query string per line, LF-terminated.
+f="$IN/safe_queries.txt"; : > "$f"
+{ lf 'sort=-price'
+  lf 'q=a-b-c'
+  lf 'filter=a-b&order=-date'
+  lf 'range=10-20&unit=px-em'
+  lf 'slug=my-blog-post&utm-source=news-letter'; } >> "$f"
+
 echo "wrote corpus to $OUT:"
 ls -l "$OUT"/*.bin
+echo "wrote input corpus to $IN:"
+ls -l "$IN"

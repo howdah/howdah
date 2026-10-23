@@ -7,6 +7,7 @@ pub mod limits;
 pub mod log;
 pub mod multipart;
 pub mod rules;
+pub mod sinks;
 
 pub use config::{Config, ConfigError, LogConfig, Mode};
 pub use limits::{Limits, RuleId, Severity};

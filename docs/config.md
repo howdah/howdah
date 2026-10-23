@@ -98,6 +98,45 @@ Rules carry a **severity**:
   `self_test`) log in `detect` and block only in `block` mode — these are the
   shapes an unusual-but-legitimate client can hit.
 
+## `[inspect]` — Layer 2 input inspection (log-only by default)
+
+**These rules only LOG; they do not block any request.** Layer 2 looks at
+decoded request values for SQL-injection, path-traversal and
+command-injection shapes and writes an event when it sees one. A global
+`howdah.mode = block` does **not** arm them. To block, set `inspect.mode` (or
+one class via `[inspect.rule_modes]`) to `block` explicitly.
+
+Signature inspection is best-effort and can be bypassed by a determined
+attacker. That is why it logs by default: use the log to see what is
+happening, and fix the application (parameterized queries, path
+normalization, no shell calls on user input) rather than rely on this layer.
+
+`[inspect]` lives in the TOML file named by the `howdah.config` php.ini
+setting, not in `howdah.ini` itself. Its mode is independent of the global
+`mode`.
+
+```toml
+[inspect]
+enabled = true          # master on/off for Layer 2
+mode = "detect"         # detect = log only (default); block; off. INDEPENDENT of the global howdah.mode.
+sqli = true             # per-class toggles
+traversal = true
+cmdi = true
+
+[inspect.limits]
+max_value_bytes = 16384   # scan at most this many bytes of one value
+max_total_bytes = 2097152 # per-request aggregate scan budget
+max_values = 2000         # per-request value count budget
+
+[inspect.rule_modes]      # optional per-class mode override; keys are the rule names
+sql_injection = "block"   # path_traversal, command_injection
+```
+
+The rule names are `sql_injection`, `path_traversal` and `command_injection`.
+A `[inspect.rule_modes]` entry overrides `inspect.mode` for that class only.
+The `[inspect.limits]` budgets bound the scanning work per value and per
+request; values past a budget are not scanned.
+
 ## Enforcement timing (honest caveat)
 
 The multipart limits refuse the request *while the body is parsed*, before PHP

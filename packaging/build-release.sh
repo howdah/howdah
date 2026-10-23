@@ -6,7 +6,8 @@
 #
 # With no arguments builds the full supported matrix. Each minor is built on a
 # CentOS 7 / glibc-2.17 base (packaging/release.Dockerfile) so the binary runs
-# on CentOS 7, Ubuntu 14.04+, Debian 8+ and newer; build-one.sh asserts with
+# on CentOS 7, Ubuntu 14.04+, Debian 8+ and newer (x86_64; aarch64: CentOS 7,
+# Ubuntu 16.04+, Debian 9+); build-one.sh asserts with
 # `objdump -T` that no referenced glibc symbol is newer than 2.17 and fails the
 # build otherwise. Minors beyond Remi EL7's ceiling (PHP > 8.1) build their PHP
 # headers from source on the same glibc-2.17 base (listed in FROM_SOURCE below).
@@ -144,13 +145,18 @@ for minor in "${MINORS[@]}"; do
     cp "$REPO_ROOT/tools/howdah-check" "$pkgdir/$root/howdah-check"
     chmod +x "$pkgdir/$root/howdah-check"
     # Per-tarball provenance + verify note.
-    sed -E "s/@API@/$api/; s/@MINOR@/$minor/; s/@VERSION@/$HOWDAH_VERSION/" \
+    if [ "$ARCH" = x86_64 ]; then
+      distro_floor="runs on CentOS 7, Ubuntu 14.04+, Debian 8+ and newer"
+    else
+      distro_floor="runs on CentOS 7 (arm64), Ubuntu 16.04+, Debian 9+ and newer"
+    fi
+    sed -E "s/@API@/$api/; s/@MINOR@/$minor/; s/@VERSION@/$HOWDAH_VERSION/; s/@ARCH@/$ARCH/; s/@FLOOR@/$distro_floor/" \
         > "$pkgdir/$root/README.txt" <<'EOF'
 Howdah @VERSION@ -- PHP @MINOR@ build (Zend module API @API@)
 
 Contents:
-  howdah.so     the extension, built against glibc 2.17 (runs on CentOS 7,
-                Ubuntu 14.04+, Debian 8+ and newer). NTS, non-debug.
+  howdah.so     the extension for linux-@ARCH@, built against glibc 2.17
+                (@FLOOR@). NTS, non-debug.
   howdah.ini    config template (copy into your PHP SAPI's config dir)
   howdah-check  read-only installer/verifier: `./howdah-check detect`
 

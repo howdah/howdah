@@ -19,7 +19,7 @@
 #
 # Build context must be the repo root so COPY can reach lab/images/.
 
-FROM --platform=linux/arm64 alpine:3 AS clangres
+FROM --platform=linux/arm64 alpine:3.21 AS clangres
 ARG CLANG_DEB=https://archive.ubuntu.com/ubuntu/pool/universe/l/llvm-toolchain-18/libclang-common-18-dev_18.1.3-1ubuntu1_amd64.deb
 ARG CLANG_DEB_SHA256=d41631bb752815a8196261d1030c096591c59678c8adfbf2e6a740a691b49e80
 RUN set -eu; apk add --no-cache curl binutils zstd tar >/dev/null; cd /tmp; \

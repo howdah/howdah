@@ -37,7 +37,13 @@ claim it blocks CVE-2026-109618 on a stock configuration; see
 ## PHP versions
 
 Built to target PHP 5.4 through 8.5 on Linux (NTS builds; CLI, FPM and Apache
-mod_php). Not every minor is tested yet. [docs/coverage.md](docs/coverage.md)
+mod_php). Release tarballs ship for **x86_64 and aarch64** on a glibc-2.17
+baseline. x86_64 covers all 14 minors. aarch64 is provided for the minors whose
+from-source build succeeds in CI on native arm64 runners (Remi has no aarch64
+EL7 packages), and **PHP 5.x on aarch64 is best-effort** (old `./configure` may
+not detect aarch64); the release assets are the definitive per-arch list. The
+core is arch-agnostic pure Rust, but arm64 is build-verified only: the full
+scenario matrix has run on x86_64 alone. Not every minor is tested yet. [docs/coverage.md](docs/coverage.md)
 is the source of truth for which versions and SAPIs have been exercised.
 
 ## Quickstart

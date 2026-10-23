@@ -287,7 +287,7 @@ that populate superglobals lazily. See caveats 5–7.
    14 PHP minors (5.4 to 8.5). aarch64 is provided for the minors whose
    from-source build succeeds on native arm64 CI runners (Remi has no aarch64
    EL7 packages, so every arm64 minor builds from PHP source); **PHP 5.x on
-   aarch64 is best-effort** because the old `./configure` may not detect
+   aarch64 is best-effort** because the old \`./configure\` may not detect
    aarch64. The release assets are the definitive per-arch list. The core is
    arch-agnostic pure Rust, but arm64 is **build-verified only** (PHP 7.4 and
    8.4 locally under QEMU; the rest in CI). Every matrix result in the tables

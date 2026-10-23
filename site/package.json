@@ -6,7 +6,7 @@
   "scripts": {
     "coverage": "node scripts/gen-coverage.mjs",
     "dev": "astro dev",
-    "build": "node scripts/gen-coverage.mjs && astro build",
+    "build": "node scripts/gen-coverage.mjs && node scripts/copy-demo.mjs && astro build",
     "preview": "astro preview"
   },
   "dependencies": {

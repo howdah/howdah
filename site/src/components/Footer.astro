@@ -1,0 +1,33 @@
+---
+// Site footer. Mirrors the privacy promise the home page makes and links the
+// project, docs and license.
+import { REPO } from '../lib/site';
+---
+<footer class="alt" style="background:var(--bg-2)">
+  <div class="wrap">
+    <div>
+      <h2>Howdah</h2>
+      <p>An independent, open-source, defensive web application firewall for PHP. This site has no trackers, no cookies, no third-party requests and no JavaScript except the install picker and the in-browser demo. Fonts are served from this site.</p>
+      <p>Howdah is not affiliated with or endorsed by the PHP project or The PHP Group.</p>
+    </div>
+    <div>
+      <h2>Project</h2>
+      <ul>
+        <li><a href="/install/">Install</a></li>
+        <li><a href="/coverage/">Coverage</a></li>
+        <li><a href="/docs/">Documentation</a></li>
+        <li><a href="/community/">Community</a></li>
+        <li><a href={REPO}>Source on GitHub</a></li>
+        <li><a href={`${REPO}/security/policy`}>Security policy</a></li>
+      </ul>
+    </div>
+    <div>
+      <h2>License</h2>
+      <ul>
+        <li><a href={`${REPO}/blob/main/LICENSE-MIT`}>MIT</a></li>
+        <li><a href={`${REPO}/blob/main/LICENSE-APACHE`}>Apache-2.0</a></li>
+      </ul>
+      <p>Dual-licensed: use either, at your option.</p>
+    </div>
+  </div>
+</footer>

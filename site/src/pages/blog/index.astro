@@ -1,0 +1,39 @@
+---
+import Layout from '../../layouts/Layout.astro';
+
+const posts = [
+  { href: '/blog/howdah-1-0/', title: 'Howdah 1.0: a defensive firewall inside PHP', date: '2026-10-23', summary: 'The first full release — apt/yum repositories, an install picker, a browser demo, and Layer-1 protection complete, on PHP 5.4 through 8.5.' },
+  { href: '/blog/php2shell-explained/', title: 'PHP2Shell, explained plainly', date: '2026-10-23', summary: 'What the PHP2Shell upload-flood class is, why only a PHP extension can stop it, and exactly what Howdah does and does not verify.' },
+];
+const fmt = (d: string) => new Date(d + 'T00:00:00Z').toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });
+---
+<Layout
+  title="Howdah blog"
+  description="News and explainers from the Howdah project: release notes and plain-language write-ups of the threats Howdah addresses."
+  path="/blog/"
+>
+  <div class="pagehead">
+    <div class="wrap">
+      <p class="crumbs"><a href="/">Home</a> / <span aria-current="page">Blog</span></p>
+      <h1>Blog</h1>
+      <p class="lede">Release notes and plain-language explainers.</p>
+    </div>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <h2 class="sr-only">Posts</h2>
+      <ul class="cardgrid">
+        {posts.map((p) => (
+          <li>
+            <a class="card" href={p.href}>
+              <h3>{p.title}</h3>
+              <p><time datetime={p.date}>{fmt(p.date)}</time></p>
+              <p>{p.summary}</p>
+            </a>
+          </li>
+        ))}
+      </ul>
+    </div>
+  </section>
+</Layout>

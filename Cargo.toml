@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/howdah-core"]
+members = ["crates/howdah-core", "crates/howdah-sys"]
 
 [workspace.package]
 version = "0.1.0"

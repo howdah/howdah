@@ -77,6 +77,8 @@ pub struct howdah_ctx {
     meta: Meta,
     worst: Action,
     log: Option<String>,
+    /// True while the only stashed line is the self_test marker (a real hit replaces it).
+    selftest_only: bool,
 }
 
 fn describe(r: RuleId) -> &'static str {
@@ -125,6 +127,7 @@ impl howdah_ctx {
             meta: Meta::default(),
             worst: Action::Allow,
             log: None,
+            selftest_only: false,
         }
     }
 
@@ -145,7 +148,9 @@ impl howdah_ctx {
     /// Fold a hit into the sticky worst action; log only on escalation.
     fn apply(&mut self, hit: Option<&LimitHit>) {
         let a = decide(hit, self.config.mode, &self.config.rule_modes);
-        if rank(a) > rank(self.worst) {
+        // A real hit always replaces a pending self_test-only line.
+        if rank(a) > rank(self.worst) || (self.selftest_only && a != Action::Allow && hit.is_some()) {
+            self.selftest_only = false;
             self.worst = a;
             if let Some(h) = hit {
                 self.stash(h.rule, a, describe(h.rule));
@@ -159,9 +164,14 @@ impl howdah_ctx {
     fn selftest(&mut self) {
         let hit = crate::limits::selftest_hit();
         let a = decide(Some(&hit), self.config.mode, &self.config.rule_modes);
-        if a == Action::Allow || self.worst == Action::Block {
+        // Only when nothing else was flagged: never displace, suppress or
+        // downgrade a real detection. A later real hit replaces this line.
+        // (Any client can trigger one self_test line per request by sending
+        // the marker; low risk, by design.)
+        if a == Action::Allow || self.worst != Action::Allow {
             return;
         }
+        self.selftest_only = true;
         self.worst = Action::Log;
         self.stash(RuleId::SelfTest, Action::Log, describe(RuleId::SelfTest));
     }
@@ -303,6 +313,7 @@ pub unsafe extern "C" fn howdah_request_begin(
         c.request_id = new_request_id();
         c.worst = Action::Allow;
         c.log = None;
+        c.selftest_only = false;
         c.meta = match meta.as_ref() {
             Some(m) => Meta {
                 client_ip: copy_str(m.client_ip, m.client_ip_len),
@@ -395,7 +406,7 @@ pub unsafe extern "C" fn howdah_selftest(ctx: *mut howdah_ctx) -> i32 {
     }));
     r.unwrap_or_else(|_| {
         report_panic(ctx);
-        HOWDAH_ALLOW
+        code((*ctx).worst)
     })
 }
 
@@ -486,6 +497,33 @@ mod tests {
         assert!(take(c).is_none());
         unsafe { howdah_free(c) };
         assert_eq!(unsafe { howdah_selftest(std::ptr::null_mut()) }, HOWDAH_ALLOW);
+    }
+
+    #[test]
+    fn selftest_then_real_standard_hit_logs_the_real_rule() {
+        let c = init("mode = \"detect\"");
+        begin(c);
+        feed(c, BODY);
+        assert_eq!(unsafe { howdah_selftest(c) }, HOWDAH_LOG);
+        // Malformed continuation (garbage after a delimiter) then truncation.
+        feed(c, b"--Bzzz");
+        unsafe { howdah_request_end(c) };
+        let line = take(c).unwrap();
+        assert!(line.contains("malformed_multipart"), "{line}");
+        assert!(!line.contains("self_test"), "{line}");
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn selftest_after_real_log_hit_preserves_it() {
+        let c = init("mode = \"detect\"");
+        begin(c);
+        feed(c, b"--B\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nx");
+        unsafe { howdah_request_end(c) }; // truncated -> malformed Log
+        unsafe { howdah_selftest(c) };
+        let line = take(c).unwrap();
+        assert!(line.contains("malformed_multipart"), "{line}");
+        unsafe { howdah_free(c) };
     }
 
     #[test]

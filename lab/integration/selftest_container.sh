@@ -74,6 +74,17 @@ run_mode() {
        --data-binary @"$WORK/normal.bin" "http://127.0.0.1:$_port/")
   [ "$_c" = 200 ] || fail "[$_mode] normal form got HTTP $_c"
   ! grep -q self_test "$LOG" || fail "[$_mode] ordinary traffic produced a self_test line"
+  # The marker must never mask a real detection: marker + a genuine over-limit
+  # structure in the same request logs the REAL rule (a Block in both modes).
+  : > "$LOG"
+  { printf -- '--MaskB0\r\nContent-Disposition: form-data; name="__howdah_selftest__"\r\n\r\n1\r\n'
+    _i=0; while [ "$_i" -lt 2001 ]; do
+      printf -- '--MaskB0\r\nContent-Disposition: form-data; name="m%s"\r\n\r\n\r\n' "$_i"; _i=$((_i+1)); done
+    printf -- '--MaskB0--\r\n'; } > "$WORK/mask.bin"
+  curl -s -o /dev/null -X POST -H "Content-Type: multipart/form-data; boundary=MaskB0" \
+       --data-binary @"$WORK/mask.bin" "http://127.0.0.1:$_port/"
+  grep -q '"rule":"max_parts"' "$LOG" || fail "[$_mode] marker masked a real detection"
+  ! grep -q self_test "$LOG" || fail "[$_mode] self_test line displaced the real rule"
   echo "[$_mode] OK (marker $_mid flagged 200; over-limit $_oid blocked; normal form clean)"
 
   kill "$SRV" 2>/dev/null || true; SRV=""

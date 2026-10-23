@@ -374,8 +374,12 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_traffic_never_produces_selftest() {
-        assert_ne!(feed(&Limits::defaults(), part("ok").as_bytes()).map(|h| h.rule), Some(RuleId::SelfTest));
+    fn limit_checks_never_report_selftest() {
+        // The limit checks can never yield SelfTest; the real "never matches
+        // ordinary traffic" guarantee is the exact-name match (see
+        // selftest_marker_is_exact_and_never_ordinary) plus the integration
+        // normal-form check.
+        assert_eq!(feed(&Limits::defaults(), part("ok").as_bytes()), None);
         let body: String = (0..5000).map(|i| part(&format!("f{i}"))).collect();
         assert_ne!(feed(&Limits::defaults(), body.as_bytes()).unwrap().rule, RuleId::SelfTest);
     }

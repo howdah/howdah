@@ -357,7 +357,11 @@ cmd_web() {
   case "$_n" in ''|*[!0-9]*) say "$PROG: HOWDAH_CHECK_PARTS must be a number" >&2; exit 2 ;; esac
   _k=""; [ "${HOWDAH_CHECK_INSECURE:-0}" = 1 ] && _k="-k"
   _t=$(mktemp -d 2>/dev/null) || { say "$PROG: cannot create temp dir" >&2; exit 2; }
-  trap 'rm -rf "$_t"' EXIT INT TERM
+  # cmd_web writes only to its own mktemp dir (otherwise read-only); clean up
+  # on exit, and exit (not just clean up) on INT/TERM.
+  trap 'rm -rf "$_t"' EXIT
+  trap 'rm -rf "$_t"; exit 130' INT
+  trap 'rm -rf "$_t"; exit 143' TERM
   _rc=0
 
   # 1. self-test marker
@@ -366,8 +370,13 @@ cmd_web() {
   _code=$(curl -s $_k -m 30 -o "$_t/m.body" -D "$_t/m.hdr" -w '%{http_code}' -X POST \
     -H "Content-Type: multipart/form-data; boundary=$_b" --data-binary @"$_t/marker.bin" "$_url" 2>/dev/null) || _code=000
   _id=$(tr -d '\r' < "$_t/m.hdr" 2>/dev/null | sed -n 's/^[Xx]-[Hh]owdah-[Ss]elftest:[[:space:]]*//p' | head -n 1)
-  if [ -n "$_id" ] && [ "$_code" = 200 ]; then
-    say "selftest marker:   flagged  (HTTP $_code, request id $_id)"
+  if [ -n "$_id" ]; then
+    # The header proves Howdah is live whatever the app answered.
+    if [ "$_code" = 200 ]; then
+      say "selftest marker:   flagged  (HTTP $_code, request id $_id)"
+    else
+      say "selftest marker:   flagged  (HTTP $_code, request id $_id) [warning: app did not answer 200; Howdah is live regardless]"
+    fi
   elif [ "$_code" = 000 ]; then
     say "selftest marker:   NO RESPONSE from $_url"; _rc=1
   else

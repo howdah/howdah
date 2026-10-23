@@ -9,8 +9,12 @@ tool: it recognizes and blocks abusive input. It is not a hacking tool, and it
 is not a replacement for patching PHP. Upgrade when you can; use Howdah when you
 can't, or until you can.
 
-> **Status: pre-release (0.1, "PHP2Shell shield").** Not ready for production
-> use. Interfaces and defaults may change.
+> **Status: 0.1.0 is released ("PHP2Shell shield").** Signed tarballs for PHP
+> 5.4 to 8.5 are on the [v0.1.0 release page](https://github.com/howdah/howdah/releases/tag/v0.1.0).
+> It is an early 0.x release with a deliberately narrow scope, and defaults may
+> still change. Start in `detect` mode. Not every PHP version has been tested:
+> see [docs/coverage.md](docs/coverage.md). Install, verify and rollback steps
+> are on the project site (built from `site/`).
 
 ## What 0.1 does
 

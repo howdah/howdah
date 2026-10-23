@@ -53,6 +53,33 @@ jobs:
         working-directory: fuzz
         run: cargo fuzz run multipart -- -runs=20000 -max_total_time=60
 
+  # Per-PR arm64 build smoke on the native arm64 runner (ubuntu-24.04-arm; QEMU
+  # not used). Spans generations incl. PHP 5.x, the key open question for
+  # aarch64. Non-blocking: it reports whether each minor builds and does not
+  # gate merges. build-one.sh asserts ELF/glibc <= 2.17 itself; re-checked here.
+  aarch64-build-smoke:
+    name: aarch64 build PHP ${{ matrix.minor }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        minor: ['5.6', '7.4', '8.4']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build aarch64 tarball
+        run: HOWDAH_ARCH=aarch64 packaging/build-release.sh "${{ matrix.minor }}"
+      - name: Assert ARM aarch64 ELF with glibc <= 2.17
+        run: |
+          tmp="$(mktemp -d)"
+          tar -xzf packaging/out/*-linux-aarch64.tar.gz -C "$tmp"
+          so="$(ls "$tmp"/*/howdah.so)"
+          file "$so" | tee /dev/stderr | grep -q 'ELF 64-bit.*ARM aarch64'
+          max="$(objdump -T "$so" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -1)"
+          echo "glibc max ref: $max"
+          [ "$(printf '%s\n2.17\n' "$max" | sort -V | tail -1)" = 2.17 ]
+
   lab:
     name: lab PHP ${{ matrix.php }}
     runs-on: ubuntu-24.04

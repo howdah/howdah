@@ -5,7 +5,7 @@
 # Runs inside the `howdah-release` image (CentOS 7 / glibc 2.17 + rustup +
 # libclang). The repo is mounted read-only at /src; /out is writable.
 #
-#   build-one.sh <minor> [--from-source]
+#   build-one.sh <minor> [--from-source]      (HOWDAH_ARCH=x86_64|aarch64, default x86_64)
 #   e.g. build-one.sh 7.3            # headers via Remi phpXY-php-devel
 #        build-one.sh 8.4 --from-source   # compile PHP from source for headers
 #
@@ -18,6 +18,19 @@ MINOR="${1:?usage: build-one.sh <minor> [--from-source]}"
 FROM_SOURCE=0
 [ "${2:-}" = "--from-source" ] && FROM_SOURCE=1
 XY=$(printf '%s' "$MINOR" | tr -d .)
+
+# Target arch (build-release.sh passes it; the container is already that arch --
+# native, or QEMU-emulated under --platform linux/arm64 -- so objdump/file below
+# are the container's own). aarch64 has no Remi EL7 packages: from-source only.
+ARCH="${HOWDAH_ARCH:-x86_64}"
+case "$ARCH" in
+  x86_64)  FILE_ARCH='x86-64' ;;
+  aarch64) FILE_ARCH='ARM aarch64' ;;
+  *) echo "FATAL: unsupported HOWDAH_ARCH '$ARCH'"; exit 2 ;;
+esac
+if [ "$ARCH" = aarch64 ] && [ "$FROM_SOURCE" -ne 1 ]; then
+  echo "FATAL [$MINOR]: aarch64 builds need --from-source (no Remi EL7 aarch64 packages)" >&2; exit 1
+fi
 
 # version -> cargo feature (php5 / php7 / php8)
 case "$MINOR" in
@@ -138,7 +151,8 @@ SO=/tmp/t/release/libhowdah_ext.so
 # Fail CLOSED: dump objdump output to a file first (so a failed objdump or an
 # empty parse can never silently pass), require that we actually parsed some
 # GLIBC_ references, and rank versions with `sort -V` so 2.9 < 2.17.
-note "objdump -T glibc symbol-version check (baseline 2.17)"
+file "$SO" | grep -q "$FILE_ARCH" || die "$SO is not a $ARCH ELF: $(file "$SO")"
+note "objdump -T glibc symbol-version check (baseline 2.17, $ARCH)"
 DYN=/tmp/dynsyms.$MINOR.txt
 objdump -T "$SO" > "$DYN" 2>/tmp/objdump.err || { tail -5 /tmp/objdump.err >&2; die "objdump -T failed on $SO"; }
 REFS=$(grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' "$DYN" | sort -u -V)

@@ -51,18 +51,57 @@ jobs:
           # Name assets from the tag (keeps any -rc suffix), not Cargo.toml.
           HOWDAH_VERSION="${GITHUB_REF_NAME#v}"
           export HOWDAH_VERSION
-          packaging/build-release.sh "${{ matrix.minor }}"
+          HOWDAH_ARCH=x86_64 packaging/build-release.sh "${{ matrix.minor }}"
 
       - name: Upload tarball artifact
         uses: actions/upload-artifact@v4
         with:
-          name: howdah-php${{ matrix.minor }}
+          name: howdah-php${{ matrix.minor }}-x86_64
+          path: packaging/out/*.tar.gz
+          if-no-files-found: error
+
+  # ---- aarch64 tarballs: BEST-EFFORT, never blocks the release -------------
+  # Chosen path: GitHub's native arm64 Linux runner (ubuntu-24.04-arm, free for
+  # public repos); the QEMU-on-ubuntu-latest fallback is NOT used. Every minor
+  # builds PHP headers from source (Remi has no aarch64 EL7). PHP 5.x may fail
+  # (old ./configure may not detect aarch64); a failed cell just means no
+  # aarch64 tarball for that minor and the release job still publishes.
+  build-aarch64:
+    needs: check
+    runs-on: ubuntu-24.04-arm
+    continue-on-error: true
+    # Bound a started-but-stuck arm64 cell so it cannot hold `release` for the
+    # 360-min default. (A cell that never gets a runner is a separate case: it
+    # delays `release` until GitHub's unassigned-job timeout, then fails and the
+    # release publishes x86_64-only. arm64 runner availability is surfaced by
+    # the ci.yml aarch64 smoke on every PR.)
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        minor: ["5.4", "5.5", "5.6", "7.0", "7.1", "7.2", "7.3", "7.4", "8.0", "8.1", "8.2", "8.3", "8.4", "8.5"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build glibc-2.17 aarch64 tarball for PHP ${{ matrix.minor }}
+        run: |
+          HOWDAH_VERSION="${GITHUB_REF_NAME#v}"
+          export HOWDAH_VERSION
+          HOWDAH_ARCH=aarch64 packaging/build-release.sh "${{ matrix.minor }}"
+
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: howdah-php${{ matrix.minor }}-aarch64
           path: packaging/out/*.tar.gz
           if-no-files-found: error
 
   # ---- hash, sign, and publish the whole set -------------------------------
+  # Publishes whenever the gating x86_64 build is green, even if some (or all)
+  # best-effort aarch64 cells failed; whatever aarch64 tarballs uploaded ship.
   release:
-    needs: build
+    needs: [build, build-aarch64]
+    if: ${{ always() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write   # only this job creates the release + uploads assets

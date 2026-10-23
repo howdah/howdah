@@ -2,6 +2,7 @@
 pub mod config;
 pub mod ffi;
 pub mod input;
+pub mod inspect;
 pub mod limits;
 pub mod log;
 pub mod multipart;

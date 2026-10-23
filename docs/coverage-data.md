@@ -302,3 +302,67 @@ cli-server (5.4, 5.6, 7.3, 7.4, 8.1, 8.4), php-fpm (5.6, 7.3, 7.4, 8.1, 8.4), an
 Apache mod_php (7.4, 8.1). 5.4 php-fpm is SKIP (no `cgi-fcgi` in the image, as in
 0.1). The START-ordering dependence (MULTIPART set before the first PARSE_POST)
 is confirmed sound; the contingency (Content-Type-based detection) was not needed.
+
+# Howdah 1.0 Layer-2 (input inspection) coverage data (Task 8)
+
+Layer 2 inspects the *values* of GET, POST, cookie and path variables for
+three attack classes and logs what it finds. It is a different kind of control
+from the Layer-1 structural limits above, so it is reported here as prose and
+is deliberately **not** part of `matrix-results.tsv` / `coverage.json`.
+
+## What it is, and what it is not
+
+- **Log-only. It does not block by default.** `inspect.mode` is independent of
+  the global `mode` and defaults to `detect`: a hit writes a JSON event with
+  `"action":"log"` and the request continues. A global `mode = "block"` does
+  not arm Layer 2.
+- **Best-effort and bypassable.** These are small hand-written signatures, not
+  a parser for SQL, shell or filesystem semantics. A determined attacker can
+  encode, split or reshape a payload so that nothing flags. A clean log does
+  **not** mean a request was safe. Do not rely on Layer 2 as a defense; it is a
+  detection signal.
+- **The logged event omits the value.** Only the rule, source and variable
+  name are recorded, never the payload bytes (checked in the lab run below).
+  This covers the matched GET, POST and cookie value. For the PATH source, the
+  request path appears in the event's `uri` field exactly as it does for every
+  Howdah event: the request target is always logged, and it is not decoded
+  form, body or cookie input.
+
+## What each class looks for
+
+| Rule | Looks for (shapes, not an exhaustive list) |
+|---|---|
+| `sql_injection` | a quote followed by a comment marker or an `or`/`and` comparison (`' OR 1=1 --`); `UNION SELECT`; a `;` followed by a recognisable stacked statement (`DROP TABLE`, `DELETE FROM`, `INSERT INTO`, `UPDATE x SET`, `SELECT` of `*`/a number/`@@var`/columns `FROM`) |
+| `path_traversal` | `../` or `..\` sequences; sensitive targets such as `/etc/passwd`, `/proc/self/`, `php://`, `file://`, `boot.ini`; percent-encoded forms in path values |
+| `command_injection` | `$(...)`; a closed backtick pair that starts with a common binary; `;`, `\|`, `&&`, `\|\|` followed by a common binary (`cat`, `id`, `curl`, ...); a PHP exec sink name immediately followed by `(` (`system(`, `eval(`) |
+
+## Signal quality: benign-corpus tuning
+
+Run against realistic near-miss free text. These must not flag, and are pinned
+in the `benign_corpus_is_clean` unit test: `operating system (Linux)`,
+`file system (ext4)`, ``use `foo` here``, `#fff`, `#main`,
+`Thanks; update your profile`, `fine; select one option`, `union of two sets`,
+`name=O'Brien`, `reports/2024/q1.pdf`, `./theme/style.css`. Three signatures
+were tightened to get there (no attack pin was weakened): the exec-sink rule no
+longer allows whitespace before `(`; a backtick pair counts only if it starts
+with a known binary; and a stacked statement after `;` needs a SQL-shaped
+second token instead of just a verb.
+
+## Where it was verified
+
+End-to-end in a real SAPI (PHP built-in server, extension loaded, default
+config) by `lab/integration/inspect.sh`: SQLi, traversal and command-injection
+values sent as both GET and POST each returned HTTP 200 (not blocked) with an
+`"action":"log"` event and the matching `rule`; the log did not contain the
+payload bytes; and benign GET and POST requests produced zero events.
+
+| PHP | Result |
+|---|---|
+| 8.3.36 (cli-server) | PASS, 7/7 checks |
+| 7.4.33 (cli-server) | PASS, 7/7 checks |
+
+Other versions and SAPIs were **not** run for Layer 2. The scanners are
+version-independent pure Rust in `howdah-core`, with no PHP calls inside them,
+so matching behavior should be identical across PHP 5.4-8.5 (an inference, not a per-version lab result). The version-dependent
+part is only the input-filter hook wiring, which was exercised on the two
+versions above.

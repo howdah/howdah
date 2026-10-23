@@ -25,6 +25,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::Config;
 use crate::input::InputState;
+use crate::inspect::{class_rule, scan, InspectClass, Source};
 use crate::limits::{LimitHit, RuleId, Severity};
 use crate::log::{log_line, new_request_id, EventRecord};
 use crate::multipart::{Event, MultipartState};
@@ -34,6 +35,12 @@ use crate::rules::{decide, Action};
 pub const HOWDAH_ALLOW: i32 = 0;
 pub const HOWDAH_LOG: i32 = 1;
 pub const HOWDAH_BLOCK: i32 = 2;
+
+/// Input sources for `howdah_inspect_value`.
+pub const HOWDAH_SRC_GET: i32 = 0;
+pub const HOWDAH_SRC_POST: i32 = 1;
+pub const HOWDAH_SRC_COOKIE: i32 = 2;
+pub const HOWDAH_SRC_PATH: i32 = 3;
 
 fn code(a: Action) -> i32 {
     match a {
@@ -82,6 +89,9 @@ pub struct howdah_ctx {
     selftest_only: bool,
     /// Per-request input-shape counters (vars, headers); reset in `request_begin`.
     input: InputState,
+    /// Layer-2 per-request aggregate scan budget; reset in `request_begin`.
+    inspect_values: usize,
+    inspect_bytes: usize,
 }
 
 fn describe(r: RuleId) -> &'static str {
@@ -101,6 +111,9 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::MaxInputKeyBytes => "input variable key too long",
         RuleId::MaxRequestHeaders => "too many request headers",
         RuleId::MaxRequestHeaderBytes => "request header too large",
+        RuleId::SqlInjection => "possible SQL injection in request input",
+        RuleId::PathTraversal => "possible path traversal in request input",
+        RuleId::CommandInjection => "possible command injection in request input",
     }
 }
 
@@ -144,6 +157,8 @@ impl howdah_ctx {
             log: None,
             selftest_only: false,
             input: InputState::new(),
+            inspect_values: 0,
+            inspect_bytes: 0,
         }
     }
 
@@ -164,14 +179,83 @@ impl howdah_ctx {
     /// Fold a hit into the sticky worst action; log only on escalation.
     fn apply(&mut self, hit: Option<&LimitHit>) {
         let a = decide(hit, self.config.mode, &self.config.rule_modes);
+        self.fold(hit, a, None);
+    }
+
+    /// Fold an already-resolved action into the sticky worst action; log only
+    /// on escalation. `reason` overrides the rule's generic description.
+    fn fold(&mut self, hit: Option<&LimitHit>, a: Action, reason: Option<&str>) {
         // A real hit always replaces a pending self_test-only line.
         if rank(a) > rank(self.worst) || (self.selftest_only && a != Action::Allow && hit.is_some()) {
             self.selftest_only = false;
             self.worst = a;
             if let Some(h) = hit {
-                self.stash(h.rule, a, describe(h.rule));
+                self.stash(h.rule, a, reason.unwrap_or_else(|| describe(h.rule)));
             }
         }
+    }
+
+    /// Like `apply`, but resolved against an explicit mode and override map
+    /// (Layer 2 uses its own independent mode, not the global one).
+    fn apply_with_mode(
+        &mut self,
+        hit: &LimitHit,
+        mode: crate::config::Mode,
+        overrides: &std::collections::BTreeMap<RuleId, crate::config::Mode>,
+        reason: &str,
+    ) -> Action {
+        let a = decide(Some(hit), mode, overrides);
+        self.fold(Some(hit), a, Some(reason));
+        a
+    }
+
+    /// Scan one request value (Layer 2). The value is inspected, never logged;
+    /// only the (truncated) variable name appears in the reason. Returns the
+    /// action for THIS value (the caller decides what to do with it).
+    fn inspect_value(&mut self, source: Source, name: &[u8], val: &[u8]) -> Action {
+        #[cfg(test)]
+        if tests::FORCE_PANIC.with(|f| f.get()) {
+            panic!("injected test panic");
+        }
+        let ins = &self.config.inspect;
+        if !ins.enabled {
+            return Action::Allow;
+        }
+        let limits = ins.limits;
+        if self.inspect_values >= limits.max_values || self.inspect_bytes >= limits.max_total_bytes {
+            return Action::Allow;
+        }
+        self.inspect_values += 1;
+        self.inspect_bytes = self.inspect_bytes.saturating_add(val.len().min(limits.max_value_bytes));
+
+        let Some(class) = scan(val, source, &limits) else {
+            return Action::Allow;
+        };
+        if !self.config.inspect.class_enabled(class) {
+            return Action::Allow;
+        }
+        let mode = self.config.inspect.effective_mode(self.config.mode);
+        // Off is absolute: no rule_modes override may re-arm the layer.
+        if mode == crate::config::Mode::Off {
+            return Action::Allow;
+        }
+        let overrides = self.config.inspect.rule_modes.clone();
+        let rule = class_rule(class);
+        let class_name = match class {
+            InspectClass::SqlInjection => "sql_injection",
+            InspectClass::PathTraversal => "path_traversal",
+            InspectClass::CommandInjection => "command_injection",
+        };
+        let src_name = match source {
+            Source::Get => "get",
+            Source::Post => "post",
+            Source::Cookie => "cookie",
+            Source::Path => "path",
+        };
+        let n = &name[..name.len().min(64)];
+        let reason = format!("{class_name} pattern in {src_name} variable '{}'", String::from_utf8_lossy(n));
+        let hit = LimitHit { rule, severity: Severity::Standard, detail: reason.clone() };
+        self.apply_with_mode(&hit, mode, &overrides, &reason)
     }
 
     /// Record the self-test marker: always a Log event, NEVER a block. A
@@ -353,6 +437,8 @@ pub unsafe extern "C" fn howdah_request_begin(
         c.log = None;
         c.selftest_only = false;
         c.input = InputState::new();
+        c.inspect_values = 0;
+        c.inspect_bytes = 0;
         c.meta = match meta.as_ref() {
             Some(m) => Meta {
                 client_ip: copy_str(m.client_ip, m.client_ip_len),
@@ -427,6 +513,53 @@ pub unsafe extern "C" fn howdah_input_var(ctx: *mut howdah_ctx, name: *const c_c
             std::slice::from_raw_parts(name as *const u8, name_len)
         };
         code((*ctx).input_var(bytes))
+    }));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// Inspect one request value (Layer 2). `source` is a `HOWDAH_SRC_*` code.
+/// The value is scanned binary-safe and NEVER logged; the log carries only the
+/// class, source and (truncated) variable name. Resolved against the
+/// independent `[inspect]` mode, so a global `block` never arms blocking here.
+/// Returns the action for this value (0 Allow, 1 Log, 2 Block); it never drops
+/// the variable. NULL ctx, unknown source or panic returns 0.
+///
+/// # Safety
+/// `ctx` NULL or live; `name`/`val` NULL or valid for their lengths.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_inspect_value(
+    ctx: *mut howdah_ctx,
+    source: i32,
+    name: *const c_char,
+    name_len: usize,
+    val: *const c_char,
+    val_len: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let src = match source {
+        HOWDAH_SRC_GET => Source::Get,
+        HOWDAH_SRC_POST => Source::Post,
+        HOWDAH_SRC_COOKIE => Source::Cookie,
+        HOWDAH_SRC_PATH => Source::Path,
+        _ => return HOWDAH_ALLOW,
+    };
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let n: &[u8] = if name.is_null() || name_len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(name as *const u8, name_len)
+        };
+        let v: &[u8] = if val.is_null() || val_len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(val as *const u8, val_len)
+        };
+        code((*ctx).inspect_value(src, n, v))
     }));
     r.unwrap_or_else(|_| {
         report_panic(ctx);
@@ -732,6 +865,95 @@ mod tests {
         assert_eq!(unsafe { howdah_input_var(c, b"a".as_ptr() as _, 1) }, 0);
         assert_eq!(unsafe { howdah_request_header(c, 1, 1) }, 0);
         FORCE_PANIC.with(|f| f.set(false));
+        unsafe { howdah_free(c) };
+    }
+
+    fn inspect(c: *mut howdah_ctx, src: i32, name: &str, val: &[u8]) -> i32 {
+        unsafe { howdah_inspect_value(c, src, name.as_ptr() as _, name.len(), val.as_ptr() as _, val.len()) }
+    }
+
+    #[test]
+    fn inspect_logs_under_global_block_when_inspect_detect() {
+        let c = init("mode = \"block\"");
+        begin(c);
+        assert_eq!(inspect(c, HOWDAH_SRC_GET, "q", b"' OR 1=1 --"), HOWDAH_LOG);
+        let line = take(c).expect("log line");
+        assert!(line.contains("\"rule\":\"sql_injection\""), "{line}");
+        assert!(line.contains("\"action\":\"log\""), "{line}");
+        assert!(line.contains("sql_injection pattern in get variable 'q'"), "{line}");
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn inspect_blocks_only_when_inspect_mode_block() {
+        let c = init("[inspect]\nmode = \"block\"");
+        begin(c);
+        assert_eq!(inspect(c, HOWDAH_SRC_GET, "q", b"' OR 1=1 --"), HOWDAH_BLOCK);
+        let line = take(c).expect("log line");
+        assert!(line.contains("\"action\":\"block\""), "{line}");
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn inspect_log_omits_value() {
+        let c = init("");
+        begin(c);
+        inspect(c, HOWDAH_SRC_POST, "q", b"' OR 1=1 --");
+        let line = take(c).expect("log line");
+        assert!(line.contains('q') && line.contains("sql_injection"), "{line}");
+        assert!(!line.contains("OR 1=1") && !line.contains("1=1"), "{line}");
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn inspect_disabled_is_allow() {
+        let c = init("[inspect]\nenabled = false");
+        begin(c);
+        assert_eq!(inspect(c, HOWDAH_SRC_GET, "q", b"' OR 1=1 --"), HOWDAH_ALLOW);
+        assert!(take(c).is_none());
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn aggregate_budget_caps_total_scan() {
+        let c = init("[inspect.limits]\nmax_values = 3");
+        begin(c);
+        for _ in 0..3 {
+            assert_eq!(inspect(c, HOWDAH_SRC_GET, "a", b"hello"), HOWDAH_ALLOW);
+        }
+        assert_eq!(inspect(c, HOWDAH_SRC_GET, "q", b"' OR 1=1 --"), HOWDAH_ALLOW);
+        assert!(take(c).is_none());
+        // a new request resets the budget
+        begin(c);
+        assert_eq!(inspect(c, HOWDAH_SRC_GET, "q", b"' OR 1=1 --"), HOWDAH_LOG);
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn global_off_silences_inspect() {
+        let c = init("mode = \"off\"");
+        begin(c);
+        assert_eq!(inspect(c, HOWDAH_SRC_GET, "q", b"' OR 1=1 --"), HOWDAH_ALLOW);
+        assert!(take(c).is_none());
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn global_off_overrides_inspect_rule_modes() {
+        let c = init("mode = \"off\"\n[inspect.rule_modes]\nsql_injection = \"block\"");
+        begin(c);
+        assert_eq!(inspect(c, HOWDAH_SRC_GET, "q", b"' OR 1=1 --"), HOWDAH_ALLOW);
+        assert!(take(c).is_none());
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn inspect_unknown_source_and_null_are_allow() {
+        assert_eq!(unsafe { howdah_inspect_value(std::ptr::null_mut(), 0, std::ptr::null(), 0, std::ptr::null(), 0) }, 0);
+        let c = init("");
+        begin(c);
+        assert_eq!(inspect(c, 99, "q", b"' OR 1=1 --"), HOWDAH_ALLOW);
+        assert_eq!(unsafe { howdah_inspect_value(c, 0, std::ptr::null(), 0, std::ptr::null(), 0) }, HOWDAH_ALLOW);
         unsafe { howdah_free(c) };
     }
 

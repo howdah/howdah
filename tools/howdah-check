@@ -359,6 +359,7 @@ cmd_detect() {
   else
     say "found $FOUND PHP install(s)"
   fi
+  say "note: layer 2 input inspection (sql_injection, path_traversal, command_injection) is log-only by default; it blocks nothing unless [inspect] mode (or a rule_modes entry) is set to block, and global howdah.mode does not arm it (howdah-check does not read your howdah.config; see docs/config.md)"
   return 0
 }
 

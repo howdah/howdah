@@ -51,5 +51,19 @@ out=$(HOWDAH_CHECK_ROOT=$T/cfg PATH=/nonexistent:/usr/bin:/bin sh "$HC" detect 2
 printf '%s\n' "$out" | grep -q 'matching release asset: cannot determine (api/version unknown)'
 check "config-only install says cannot determine" $?
 
+# Layer 2 (input inspection) is log-only by default: detect says so
+out=$(HOWDAH_CHECK_ROOT=$T/empty sh "$HC" detect 2>/dev/null)
+l2=$(printf '%s\n' "$out" | grep '^note: layer 2')
+printf '%s\n' "$l2" | grep -q 'sql_injection, path_traversal, command_injection'
+check "detect names the Layer-2 rules" $?
+printf '%s\n' "$l2" | grep -q 'log-only by default'
+check "detect marks Layer-2 rules log-only" $?
+printf '%s\n' "$l2" | grep -q 'does not arm it'
+check "Layer-2 line states global mode does not arm it" $?
+printf '%s\n' "$l2" | grep -q 'blocks nothing unless'
+check "Layer-2 line states it blocks nothing unless opted in" $?
+printf '%s\n' "$l2" | grep -qi 'default: block\|blocks by default'
+[ $? -ne 0 ]; check "Layer-2 line never claims blocking by default" $?
+
 [ $fail -eq 0 ] && echo "all passed"
 exit $fail

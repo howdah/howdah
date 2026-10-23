@@ -86,6 +86,7 @@ function cell(sapi: any) {
           <li>The CVE's <code>session.upload_progress</code> header-parsing path was <strong>not</strong> reproduced. Upload-progress on and off were both tested, to confirm Howdah works either way.</li>
           <li><strong>CVE-2012-1823 (php-cgi argument injection) is out of reach and not protected:</strong> that query is consumed by php-cgi during its own startup, before any PHP extension loads. It belongs with CVE-2019-11043 — both happen before extension code runs. Use a web-server or front-proxy rule.</li>
           <li>The input-shape and request-header limits are enforced best-effort on the response (the variable is always dropped and logged; the 403 may arrive at request shutdown on lazy-superglobal SAPIs). See <a href="/docs/configuration/">Configuration</a>.</li>
+          <li>Layer 2 (input inspection) is not covered by this table and is not in a published release yet; it arrives in the next release. It detects and logs SQL injection, path traversal and command-injection patterns in request values, is best-effort and can be bypassed, which is why it logs, and it does not block by default.</li>
           <li>Coverage results were recorded on Linux x86_64. aarch64 is build-verified; the scenario matrix has not been re-run on arm64.</li>
         </ul>
       </div>

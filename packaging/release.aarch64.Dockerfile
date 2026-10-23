@@ -23,7 +23,8 @@ FROM --platform=linux/arm64 alpine:3.21 AS clangres
 ARG CLANG_DEB=https://archive.ubuntu.com/ubuntu/pool/universe/l/llvm-toolchain-18/libclang-common-18-dev_18.1.3-1ubuntu1_amd64.deb
 ARG CLANG_DEB_SHA256=d41631bb752815a8196261d1030c096591c59678c8adfbf2e6a740a691b49e80
 RUN set -eu; apk add --no-cache curl binutils zstd tar >/dev/null; cd /tmp; \
-    curl -fsSL -o clang.deb "$CLANG_DEB"; \
+    rc() { n=0; until curl -fsSL "$@"; do n=$((n+1)); [ "$n" -ge 5 ] && return 1; echo "curl retry $n: $*" >&2; sleep 3; done; }; \
+    rc -o clang.deb "$CLANG_DEB"; \
     echo "$CLANG_DEB_SHA256  clang.deb" | sha256sum -c -; \
     mkdir -p debx && cd debx && ar x /tmp/clang.deb; \
     zstd -d -f data.tar.zst -o data.tar; tar xf data.tar; \
@@ -52,7 +53,8 @@ ARG LIBCLANG_WHEEL=https://files.pythonhosted.org/packages/3c/3d/f0ac1150280d8d2
 ARG LIBCLANG_WHEEL_SHA256=54dda940a4a0491a9d1532bf071ea3ef26e6dbaf03b5000ed94dd7174e8f9592
 COPY lab/images/libclang-modern.sh /tmp/libclang-modern.sh
 RUN set -eu; \
-    curl -fsSL -o /tmp/libclang.whl "$LIBCLANG_WHEEL"; \
+    rc() { n=0; until curl -fsSL "$@"; do n=$((n+1)); [ "$n" -ge 5 ] && return 1; echo "curl retry $n: $*" >&2; sleep 3; done; }; \
+    rc -o /tmp/libclang.whl "$LIBCLANG_WHEEL"; \
     echo "$LIBCLANG_WHEEL_SHA256  /tmp/libclang.whl" | sha256sum -c -; \
     LIBCLANG_WHEEL_URL=file:///tmp/libclang.whl sh /tmp/libclang-modern.sh; \
     rm -f /tmp/libclang-modern.sh /tmp/libclang.whl
@@ -71,7 +73,8 @@ ARG RUSTUP_VERSION=1.27.1
 ARG RUSTUP_INIT_SHA256=1cffbf51e63e634c746f741de50649bbbcbd9dbe1de363c9ecef64e278dba2b2
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
 RUN set -eu; \
-    curl -fsSL -o /tmp/rustup-init \
+    rc() { n=0; until curl -fsSL "$@"; do n=$((n+1)); [ "$n" -ge 5 ] && return 1; echo "curl retry $n: $*" >&2; sleep 3; done; }; \
+    rc -o /tmp/rustup-init \
       "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/aarch64-unknown-linux-gnu/rustup-init"; \
     echo "${RUSTUP_INIT_SHA256}  /tmp/rustup-init" | sha256sum -c -; \
     chmod +x /tmp/rustup-init; \

@@ -1,0 +1,89 @@
+name: release
+
+# Tag-triggered. Pushing a version tag (e.g. v0.1.0) builds the glibc-2.17
+# howdah.so for every supported PHP minor, signs the set with the CI signing
+# subkey, and publishes a GitHub Release with the tarballs + SHA256SUMS +
+# detached signature + the public signing key.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # create the release and upload assets
+
+jobs:
+  # ---- one glibc-2.17 tarball per PHP minor --------------------------------
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Full supported matrix. build-release.sh builds <= 8.1 from Remi EL7
+        # headers and 8.2-8.5 from PHP source, both on a glibc-2.17 (CentOS 7)
+        # base, and asserts via objdump that no glibc symbol newer than 2.17 is
+        # referenced (the build fails otherwise).
+        minor: ["5.4", "5.5", "5.6", "7.0", "7.1", "7.2", "7.3", "7.4", "8.0", "8.1", "8.2", "8.3", "8.4", "8.5"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build glibc-2.17 tarball for PHP ${{ matrix.minor }}
+        run: packaging/build-release.sh "${{ matrix.minor }}"
+
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: howdah-php${{ matrix.minor }}
+          path: packaging/out/*.tar.gz
+          if-no-files-found: error
+
+  # ---- hash, sign, and publish the whole set -------------------------------
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Collect all tarballs
+        uses: actions/download-artifact@v4
+        with:
+          path: dl
+          merge-multiple: true
+
+      - name: Gather tarballs into packaging/out
+        run: |
+          mkdir -p packaging/out
+          find dl -name '*.tar.gz' -exec cp {} packaging/out/ \;
+          ls -l packaging/out
+
+      - name: Import CI signing subkey (passphraseless, non-interactive)
+        env:
+          HOWDAH_GPG_SIGNING_KEY: ${{ secrets.HOWDAH_GPG_SIGNING_KEY }}
+        run: |
+          mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
+          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
+          gpgconf --kill gpg-agent || true
+          printf '%s\n' "$HOWDAH_GPG_SIGNING_KEY" | gpg --batch --import
+          gpg --list-secret-keys --keyid-format=long
+
+      - name: Sign (SHA256SUMS + detached signature)
+        env:
+          HOWDAH_SIGN_BATCH: "1"          # loopback pinentry
+          HOWDAH_SIGN_PASSPHRASE: ""      # the CI subkey is passphraseless
+        run: packaging/sign.sh packaging/out
+
+      - name: Ship the public key alongside the signature
+        run: cp packaging/howdah-release-signing.asc packaging/out/
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "Howdah ${GITHUB_REF_NAME}" \
+            --notes "Signed release. Verify: \`gpg --import howdah-release-signing.asc && gpg --verify SHA256SUMS.asc SHA256SUMS && sha256sum -c SHA256SUMS\`" \
+            packaging/out/*.tar.gz \
+            packaging/out/SHA256SUMS \
+            packaging/out/SHA256SUMS.asc \
+            packaging/out/howdah-release-signing.asc

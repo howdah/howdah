@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# Build Howdah release artifacts: one glibc-2.17 howdah.so per PHP minor,
+# packaged as a per-minor tarball (.so + howdah.ini + howdah-check).
+#
+#   packaging/build-release.sh [MINOR ...]
+#
+# With no arguments builds the full supported matrix. Each minor is built on a
+# CentOS 7 / glibc-2.17 base (packaging/release.Dockerfile) so the binary runs
+# on CentOS 7, Ubuntu 14.04+, Debian 8+ and newer; build-one.sh asserts with
+# `objdump -T` that no referenced glibc symbol is newer than 2.17 and fails the
+# build otherwise. Minors beyond Remi EL7's ceiling (PHP > 8.1) build their PHP
+# headers from source on the same glibc-2.17 base (listed in FROM_SOURCE below).
+#
+# Env:
+#   HOWDAH_VERSION   release version string for tarball names (default: workspace version)
+#   KEEP_IMAGE=1     reuse an existing `howdah-release` image, skip docker build
+#
+# Output: packaging/out/
+#   howdah-<version>-php<minor>-<api>-linux-x86_64.tar.gz   (per minor)
+#   build-report.tsv                                        (what was built)
+# Signing (SHA256SUMS + detached signature) is a separate step: packaging/sign.sh
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+OUT="$REPO_ROOT/packaging/out"
+IMAGE="${HOWDAH_RELEASE_IMAGE:-howdah-release}"
+
+# Full supported matrix (PHP 5.4 .. 8.5). Default build set when none given.
+ALL_MINORS=(5.4 5.5 5.6 7.0 7.1 7.2 7.3 7.4 8.0 8.1 8.2 8.3 8.4 8.5)
+# Minors whose headers Remi EL7 does not carry (PHP > 8.1): built from source.
+FROM_SOURCE_MINORS=" 8.2 8.3 8.4 8.5 "
+
+MINORS=("$@")
+[ ${#MINORS[@]} -eq 0 ] && MINORS=("${ALL_MINORS[@]}")
+
+HOWDAH_VERSION="${HOWDAH_VERSION:-$(grep -m1 '^version' "$REPO_ROOT/Cargo.toml" | sed -E 's/.*"([^"]+)".*/\1/')}"
+echo "== Howdah release build: version $HOWDAH_VERSION, minors: ${MINORS[*]}"
+
+mkdir -p "$OUT"
+
+# ---- 1. build the glibc-2.17 toolchain image -------------------------------
+if [ "${KEEP_IMAGE:-0}" = 1 ] && docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  echo "== reusing existing image $IMAGE"
+else
+  echo "== building $IMAGE (packaging/release.Dockerfile)"
+  docker build -f "$REPO_ROOT/packaging/release.Dockerfile" -t "$IMAGE" "$REPO_ROOT"
+fi
+
+# ---- 2. build each minor in a throwaway container --------------------------
+REPORT="$OUT/build-report.tsv"
+printf 'minor\tapi\tfeature\tthread_safety\tbuild\tglibc_max_ref\ttarball\n' > "$REPORT"
+built=0; failed=""
+
+for minor in "${MINORS[@]}"; do
+  echo ""
+  echo "======================================================================"
+  echo "==  building PHP $minor"
+  echo "======================================================================"
+  src_flag=""
+  case "$FROM_SOURCE_MINORS" in *" $minor "*) src_flag="--from-source" ;; esac
+
+  stage="$(mktemp -d)"
+  if docker run --rm \
+        -v "$REPO_ROOT":/src:ro \
+        -v "$stage":/out \
+        -w /src \
+        "$IMAGE" sh /src/packaging/build-one.sh "$minor" $src_flag
+  then
+    so="$(ls "$stage"/howdah-"$minor"-*.so 2>/dev/null | head -1 || true)"
+    meta="${so%.so}.meta"
+    if [ -z "$so" ] || [ ! -f "$so" ]; then
+      echo "!! PHP $minor: build-one.sh succeeded but produced no .so"; failed="$failed $minor"; rm -rf "$stage"; continue
+    fi
+    api="$(basename "$so" | sed -E 's/.*-([0-9]+)\.so/\1/')"
+
+    # ---- 3. assemble the per-minor tarball ---------------------------------
+    pkgdir="$(mktemp -d)"; root="howdah-$HOWDAH_VERSION-php$minor"
+    mkdir -p "$pkgdir/$root"
+    cp "$so" "$pkgdir/$root/howdah.so"
+    cp "$REPO_ROOT/packaging/howdah.ini" "$pkgdir/$root/howdah.ini"
+    cp "$REPO_ROOT/tools/howdah-check" "$pkgdir/$root/howdah-check"
+    chmod +x "$pkgdir/$root/howdah-check"
+    # Per-tarball provenance + verify note.
+    sed -E "s/@API@/$api/; s/@MINOR@/$minor/; s/@VERSION@/$HOWDAH_VERSION/" \
+        > "$pkgdir/$root/README.txt" <<'EOF'
+Howdah @VERSION@ -- PHP @MINOR@ build (Zend module API @API@)
+
+Contents:
+  howdah.so     the extension, built against glibc 2.17 (runs on CentOS 7,
+                Ubuntu 14.04+, Debian 8+ and newer). NTS, non-debug.
+  howdah.ini    config template (copy into your PHP SAPI's config dir)
+  howdah-check  read-only installer/verifier: `./howdah-check detect`
+
+Install:
+  1. ./howdah-check detect                 # find this PHP's extension_dir
+  2. cp howdah.so <extension_dir>/howdah.so
+  3. cp howdah.ini <php config dir>/       # e.g. /etc/php.d/ or conf.d/
+  4. restart php-fpm / apache, then: php -m | grep howdah
+
+Verify this download (see packaging/howdah-release-signing.asc in the repo):
+  gpg --import howdah-release-signing.asc
+  gpg --verify SHA256SUMS.asc SHA256SUMS
+  sha256sum -c SHA256SUMS
+EOF
+    tarball="$OUT/howdah-$HOWDAH_VERSION-php$minor-$api-linux-x86_64.tar.gz"
+    tar -C "$pkgdir" -czf "$tarball" "$root"
+    rm -rf "$pkgdir"
+
+    # record
+    gmax="$(grep -m1 '^glibc_max_ref=' "$meta" 2>/dev/null | cut -d= -f2 || echo '?')"
+    ts="$(grep -m1 '^thread_safety=' "$meta" | cut -d= -f2)"
+    bd="$(grep -m1 '^build=' "$meta" | cut -d= -f2)"
+    ft="$(grep -m1 '^feature=' "$meta" | cut -d= -f2)"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$minor" "$api" "$ft" "$ts" "$bd" "$gmax" "$(basename "$tarball")" >> "$REPORT"
+    echo "== PHP $minor OK -> $(basename "$tarball")  (api $api, $ts, $bd, glibc<=$gmax)"
+    built=$((built+1))
+  else
+    echo "!! PHP $minor FAILED"; failed="$failed $minor"
+  fi
+  rm -rf "$stage"
+done
+
+echo ""
+echo "======================================================================"
+echo "== built $built tarball(s) into $OUT"
+column -t -s$'\t' "$REPORT" || cat "$REPORT"
+if [ -n "$failed" ]; then
+  echo "== FAILED minors:$failed" >&2
+  exit 1
+fi
+echo "== next: packaging/sign.sh   (SHA256SUMS + detached GPG signature)"

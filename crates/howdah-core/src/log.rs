@@ -39,6 +39,9 @@ fn rule_name(r: RuleId) -> &'static str {
         RuleId::MaxInputKeyBytes => "max_input_key_bytes",
         RuleId::MaxRequestHeaders => "max_request_headers",
         RuleId::MaxRequestHeaderBytes => "max_request_header_bytes",
+        RuleId::SqlInjection => "sql_injection",
+        RuleId::PathTraversal => "path_traversal",
+        RuleId::CommandInjection => "command_injection",
     }
 }
 
@@ -100,6 +103,13 @@ mod tests {
             uri: "/upload.php?a=1\n\"x\"".into(),
             reason: "too many\nparts".into(),
         }
+    }
+
+    #[test]
+    fn layer2_rule_names_are_snake_case() {
+        assert_eq!(rule_name(RuleId::SqlInjection), "sql_injection");
+        assert_eq!(rule_name(RuleId::PathTraversal), "path_traversal");
+        assert_eq!(rule_name(RuleId::CommandInjection), "command_injection");
     }
 
     #[test]

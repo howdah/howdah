@@ -308,6 +308,9 @@ pub enum RuleId {
     MaxInputKeyBytes,
     MaxRequestHeaders,
     MaxRequestHeaderBytes,
+    SqlInjection,
+    PathTraversal,
+    CommandInjection,
 }
 
 impl RuleId {
@@ -320,7 +323,10 @@ impl RuleId {
             | RuleId::SelfTest
             | RuleId::MaxInputKeyBytes
             | RuleId::MaxRequestHeaders
-            | RuleId::MaxRequestHeaderBytes => Severity::Standard,
+            | RuleId::MaxRequestHeaderBytes
+            | RuleId::SqlInjection
+            | RuleId::PathTraversal
+            | RuleId::CommandInjection => Severity::Standard,
             _ => Severity::Critical,
         }
     }
@@ -474,6 +480,9 @@ mod tests {
     #[test]
     fn rule_severities() {
         assert_eq!(RuleId::MalformedMultipart.severity(), Severity::Standard);
+        assert_eq!(RuleId::SqlInjection.severity(), Severity::Standard);
+        assert_eq!(RuleId::PathTraversal.severity(), Severity::Standard);
+        assert_eq!(RuleId::CommandInjection.severity(), Severity::Standard);
         assert_eq!(RuleId::MaxParts.severity(), Severity::Critical);
         assert_eq!(RuleId::MaxFiles.severity(), Severity::Critical);
         assert_eq!(RuleId::MaxPartHeaders.severity(), Severity::Critical);

@@ -101,6 +101,9 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::MaxInputKeyBytes => "input variable key too long",
         RuleId::MaxRequestHeaders => "too many request headers",
         RuleId::MaxRequestHeaderBytes => "request header too large",
+        RuleId::SqlInjection => "possible SQL injection in request input",
+        RuleId::PathTraversal => "possible path traversal in request input",
+        RuleId::CommandInjection => "possible command injection in request input",
     }
 }
 

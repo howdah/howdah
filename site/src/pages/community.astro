@@ -1,0 +1,42 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { REPO } from '../lib/site';
+---
+<Layout
+  title="Howdah community"
+  description="Contribute to Howdah, read the code of conduct, and report security issues responsibly. Howdah is open source under MIT or Apache-2.0."
+  path="/community/"
+>
+  <div class="pagehead">
+    <div class="wrap">
+      <p class="crumbs"><a href="/">Home</a> / <span aria-current="page">Community</span></p>
+      <h1>Community</h1>
+      <p class="lede">Howdah is an independent, open-source project. Bug reports, test cases, platform notes and code are all welcome.</p>
+    </div>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <ul class="cardgrid">
+        <li><a class="card" href={REPO}><h3>Source on GitHub</h3><p>The full source: the Rust core, the per-PHP glue, the lab, and this site. Stars, issues and pull requests welcome.</p></a></li>
+        <li><a class="card" href={`${REPO}/blob/main/CONTRIBUTING.md`}><h3>Contributing guide</h3><p>How to report bugs, what we do and do not accept (defensive only, no exploit code), and how to work on the code.</p></a></li>
+        <li><a class="card" href={`${REPO}/blob/main/CODE_OF_CONDUCT.md`}><h3>Code of conduct</h3><p>Contributor Covenant 2.1. Be kind; harassment-free participation for everyone.</p></a></li>
+        <li><a class="card" href={`${REPO}/security/policy`}><h3>Security policy</h3><p>Report a vulnerability privately through GitHub. Please do not open a public issue for a suspected vulnerability.</p></a></li>
+      </ul>
+
+      <h2 style="margin-top:2.5rem">Reporting a vulnerability</h2>
+      <p>Howdah is a defensive tool, so we take reports about it seriously. Use GitHub's private vulnerability reporting (the repository's <strong>Security</strong> tab → <strong>Report a vulnerability</strong>) rather than a public issue. A bypass of a rule, a crash or hang in the extension, or a way to make Howdah itself consume excess memory are all in scope. Useful details: the Howdah version, the PHP version and SAPI, your configuration, and expected versus actual behaviour.</p>
+
+      <h2>How to help</h2>
+      <ul class="facts">
+        <li><strong>Try it and report back.</strong> Run it in detect mode on a real server and tell us what you see — especially on PHP versions or platforms the coverage table has not reached.</li>
+        <li><strong>Send platform notes.</strong> Install details for a distro, panel or PHP source we have not documented.</li>
+        <li><strong>Add test cases.</strong> A legitimate request shape that should never be blocked, or a benign reproduction of an abusive shape (structure only, never a working exploit).</li>
+        <li><strong>Improve the docs or this site.</strong> Corrections to the comparison table or coverage wording are very welcome.</li>
+      </ul>
+
+      <h2>License</h2>
+      <p>Howdah is dual-licensed under <a href={`${REPO}/blob/main/LICENSE-MIT`}>MIT</a> or <a href={`${REPO}/blob/main/LICENSE-APACHE`}>Apache-2.0</a>, at your option. Contributions are accepted under the same terms.</p>
+    </div>
+  </section>
+</Layout>

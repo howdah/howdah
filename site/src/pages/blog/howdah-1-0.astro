@@ -1,0 +1,49 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { REPO } from '../../lib/site';
+---
+<Layout
+  title="Howdah 1.0: a defensive firewall inside PHP"
+  description="Howdah 1.0 is released: apt/yum repositories, an install picker, a browser demo, and Layer-1 protection complete, on PHP 5.4 through 8.5 — including end-of-life branches."
+  path="/blog/howdah-1-0/"
+>
+  <article class="post">
+    <div class="pagehead">
+      <div class="wrap">
+        <p class="crumbs"><a href="/">Home</a> / <a href="/blog/">Blog</a> / <span aria-current="page">Howdah 1.0</span></p>
+        <h1>Howdah 1.0: a defensive firewall inside PHP</h1>
+        <p class="lede"><time datetime="2026-10-23">23 October 2026</time></p>
+      </div>
+    </div>
+
+    <div class="wrap prose">
+      <p>Howdah 1.0 is released. Howdah is an open-source, <strong>defensive</strong> web application firewall that loads into PHP itself and refuses abusive request shapes before they exhaust memory — on PHP 5.4 through 8.5, including the end-of-life branches that will never get the official fix.</p>
+
+      <h2>What's in 1.0</h2>
+      <ul class="facts">
+        <li><strong>Layer 1 complete.</strong> 0.1 shipped the critical multipart-upload limits. 1.0 adds the rest of the first layer: input-shape limits (variable count, array nesting, key length) and request-header limits, each configurable with a sensible default.</li>
+        <li><strong>apt and yum repositories</strong> at <code>pkg.howdah.org</code>, signed, so you can <code>apt-get install php8.1-howdah</code> or <code>yum install php81-howdah</code> instead of unpacking a tarball.</li>
+        <li><strong>An install picker</strong> that writes the exact install, verify and rollback commands for your OS, PHP source, version and server type.</li>
+        <li><strong>aarch64 builds</strong> alongside x86_64.</li>
+        <li><strong>A browser demo</strong> that runs the real core, compiled to WebAssembly, so you can see a verdict without installing anything.</li>
+      </ul>
+
+      <h2>Who it's for</h2>
+      <p>Sysadmins who run PHP on their own servers — especially servers stuck on old PHP. If you can upgrade or patch, do that first; Howdah is for when you cannot, or until you can. It runs entirely inside your PHP: no account, no cloud service, no outbound connections.</p>
+
+      <h2>Start in detect mode</h2>
+      <p>Howdah ships in <code>detect</code> mode. The critical resource-exhaustion limits still block (that is the point — a detect-mode rollout is never open to a part-flood during the first hours), while everything else logs so you can watch it before you let it block. When the logs look clean, switch to <code>block</code>. Check the <a href="/coverage/">coverage table</a> for your PHP version first.</p>
+
+      <h2>Honest about scope</h2>
+      <p>Howdah does one narrow thing: it refuses resource-exhaustion request shapes from inside PHP. It is not a general-purpose WAF, and it is not a replacement for patching. Every protection claim on this site links to the test or measurement behind it. We reproduce only the harmless <em>structure</em> of an attack in our tests — counts and sizes, never a working exploit — and we say plainly what we have and have not verified. Layers 2 to 4 (request inspection, runtime sink checks, post-breach containment) are the roadmap, not part of 1.0.</p>
+
+      <h2>Get it</h2>
+      <p>Head to the <a href="/install/">install picker</a>, or read the <a href="/docs/">documentation</a>. The source, the lab and this site are all on <a href={REPO}>GitHub</a>. If you try it, we would love to hear how it went — especially on PHP versions the coverage table has not reached yet.</p>
+    </div>
+  </article>
+</Layout>
+
+<style>
+  .prose { max-width: 46rem; padding-bottom: 1rem; }
+  .prose h2 { margin-top: 2rem; }
+</style>

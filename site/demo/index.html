@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Howdah in your browser</title>
+<meta name="description" content="Run the real Howdah core, compiled to WebAssembly, on sample requests. Nothing leaves your browser.">
+<style>
+  :root { color-scheme: light dark; --bg:#fbfaf7; --fg:#1b1b1b; --muted:#4a4a4a; --card:#fff; --line:#bdb8ab; --accent:#0b5cad; --allow:#0b6b2c; --log:#8a5a00; --block:#a3121a; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#16171a; --fg:#f0efeb; --muted:#c3c1ba; --card:#1f2024; --line:#55565c; --accent:#8cc2ff; --allow:#6fdc8c; --log:#f0c060; --block:#ff8a8f; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:1.0625rem/1.55 system-ui, sans-serif; }
+  main { max-width: 44rem; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
+  h1 { font-size: 1.6rem; margin: 0 0 .5rem; }
+  p { margin: .6rem 0; }
+  .note { border-left: 4px solid var(--accent); padding: .1rem .9rem; background: var(--card); }
+  fieldset { border:1px solid var(--line); background:var(--card); border-radius:6px; margin:1.25rem 0; padding:.75rem 1rem; }
+  legend { font-weight:600; padding:0 .4rem; }
+  label { display:block; padding:.4rem 0; cursor:pointer; }
+  label small { display:block; color:var(--muted); margin-left:1.6rem; }
+  input[type=radio] { margin-right:.6rem; width:1.1rem; height:1.1rem; }
+  button { font:inherit; padding:.6rem 1.2rem; border-radius:6px; border:2px solid var(--accent); background:var(--accent); color:#fff; cursor:pointer; }
+  @media (prefers-color-scheme: dark) { button { color:#0c0c0e; } }
+  :focus-visible { outline:3px solid var(--accent); outline-offset:2px; }
+  #result { margin-top:1.25rem; padding:1rem; border:2px solid var(--line); border-radius:6px; background:var(--card); }
+  #result[hidden] { display:none; }
+  .verdict { font-size:1.35rem; font-weight:700; margin:0; }
+  .verdict.allow { color:var(--allow); } .verdict.log { color:var(--log); } .verdict.block { color:var(--block); }
+  dl { margin:.6rem 0 0; display:grid; grid-template-columns:max-content 1fr; gap:.2rem 1rem; }
+  dt { color:var(--muted); } dd { margin:0; word-break:break-word; }
+  code { font-family: ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Howdah in your browser</h1>
+  <div class="note">
+    <p>This page runs the <strong>real Howdah core, compiled to WebAssembly, inside your browser</strong>. Nothing is sent anywhere: there are no network requests besides loading this page's own files, and no trackers. It is a demonstration on made-up sample requests, <strong>not a scan of your own server</strong>.</p>
+    <p>The samples are harmless: each body is built here from a structural description (counts and shapes), and contains no exploit code. Howdah runs in its default block mode.</p>
+  </div>
+
+  <form id="form">
+    <fieldset>
+      <legend>Choose a sample request</legend>
+      <div id="picker"></div>
+    </fieldset>
+    <button type="submit">Analyze with Howdah</button>
+  </form>
+
+  <section id="result" aria-live="polite" aria-atomic="true" hidden>
+    <h2 class="verdict" id="v-action"></h2>
+    <dl>
+      <dt>Rule</dt><dd id="v-rule"></dd>
+      <dt>Reason</dt><dd id="v-reason"></dd>
+      <dt>Sample</dt><dd id="v-shape"></dd>
+    </dl>
+    <p id="v-explain"></p>
+  </section>
+  <p id="error" role="alert"></p>
+</main>
+
+<script src="howdah-wasm.js"></script>
+<script src="samples.js"></script>
+<script>
+(function () {
+  var samples = window.HowdahSamples;
+  var picker = document.getElementById('picker');
+  samples.forEach(function (s, i) {
+    var l = document.createElement('label');
+    var r = document.createElement('input');
+    r.type = 'radio'; r.name = 'sample'; r.value = s.id; if (i === 0) r.checked = true;
+    var t = document.createElement('span'); t.textContent = s.title;
+    var d = document.createElement('small'); d.textContent = s.shape;
+    l.appendChild(r); l.appendChild(t); l.appendChild(d);
+    picker.appendChild(l);
+  });
+  document.getElementById('form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var err = document.getElementById('error'); err.textContent = '';
+    var id = document.querySelector('input[name=sample]:checked').value;
+    var s = samples.filter(function (x) { return x.id === id; })[0];
+    try {
+      var v = await HowdahWasm.analyze('', s.build());
+      var a = document.getElementById('v-action');
+      a.textContent = v.action.charAt(0).toUpperCase() + v.action.slice(1);
+      a.className = 'verdict ' + v.action;
+      document.getElementById('v-rule').textContent = v.rule === null ? 'none' : v.rule;
+      document.getElementById('v-reason').textContent = v.reason;
+      document.getElementById('v-shape').textContent = s.shape;
+      document.getElementById('v-explain').textContent = s.explain;
+      document.getElementById('result').hidden = false;
+    } catch (ex) {
+      err.textContent = 'Could not run the demo: ' + ex.message + '. Serve this folder over HTTP (for example python3 -m http.server) rather than opening the file directly.';
+    }
+  });
+})();
+</script>
+</body>
+</html>

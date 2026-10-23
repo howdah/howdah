@@ -13,6 +13,25 @@ fn longest_key(name: &[u8]) -> usize {
     name.split(|&b| b == b'[' || b == b']').map(<[u8]>::len).max().unwrap_or(0)
 }
 
+/// The php-cgi argument-injection shape (CVE-2012-1823): a query string with no
+/// literal `=` whose first byte after an optional run of `+`/`%20` is `-`, so
+/// php-cgi reads it as an option. A `%3d`-encoded `=` does NOT count: CGI only
+/// skips argv parsing for a literal `=`, and the encoded form is the attack.
+pub fn cgi_arg_injection(query_string: &[u8]) -> bool {
+    if query_string.contains(&b'=') {
+        return false;
+    }
+    let mut rest = query_string;
+    loop {
+        match rest {
+            [b'+', tail @ ..] => rest = tail,
+            [b'%', b'2', b'0', tail @ ..] => rest = tail,
+            _ => break,
+        }
+    }
+    rest.first() == Some(&b'-')
+}
+
 /// High-water marks over the input variables of one request.
 #[derive(Debug, Clone, Default)]
 pub struct InputState {
@@ -63,6 +82,21 @@ mod tests {
         for n in [b"a".as_slice(), b"b[c]", b"b[c][d]"] { s.note_var(n); }
         assert_eq!(s.vars(), 3);
         assert_eq!(s.max_depth(), 2);
+    }
+    #[test] fn cgi_arg_injection_fires_only_on_the_cve_shape() {
+        assert!(cgi_arg_injection(b"-s"));
+        assert!(cgi_arg_injection(b"-dallow_url_include%3d1"));
+        assert!(cgi_arg_injection(b"+-d+auto_prepend_file%3dphp://input"));
+        assert!(!cgi_arg_injection(b"a=1&b=2"));
+        assert!(!cgi_arg_injection(b"sort=-price"));
+        assert!(!cgi_arg_injection(b"q=a-b-c"));
+        assert!(!cgi_arg_injection(b""));
+        assert!(!cgi_arg_injection(b"-d=1")); // contains '=' => treated as a normal query
+    }
+    #[test] fn check_query_string_respects_is_cgi() {
+        let l = Limits::defaults();
+        assert_eq!(l.check_query_string(b"-s", true).unwrap().rule, RuleId::CgiArgInjection);
+        assert!(l.check_query_string(b"-s", false).is_none());
     }
     #[test] fn check_input_fires_in_field_order() {
         let l = Limits { max_input_vars: 2, ..Limits::defaults() };

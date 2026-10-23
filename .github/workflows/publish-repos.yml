@@ -95,6 +95,7 @@ jobs:
     needs: [build, build-aarch64]
     if: ${{ always() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
+    environment: pkg-publish
     steps:
       - uses: actions/checkout@v4
 

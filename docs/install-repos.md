@@ -80,6 +80,11 @@ sudo apt-get purge php7.4-howdah    # remove everything including the ini
 sudo systemctl reload php7.4-fpm    # or apache2
 ```
 
+The repository index lists only the most recent publish, so older versions
+cannot be pinned or rolled back to through the repo until that is changed (a
+tracked follow-up before the second release). Keep the previous package file if
+you may need to downgrade.
+
 Removal never breaks PHP: the maintainer scripts only enable/disable the module
 and never fail the transaction.
 
@@ -138,7 +143,8 @@ A locally edited ini is kept as `40-howdah.ini.rpmsave`.
 
 The repository signing key is published at `https://howdah.org/key.asc` (the
 same key that signs the GitHub release `SHA256SUMS`). Check its fingerprint
-against the one on the release page before trusting it:
+against the one on the release page before trusting it. The primary
+fingerprint is `1152 1035 C600 F638 31F8 2551 2087 B872 0997 807B`:
 
 ```sh
 curl -fsSL https://howdah.org/key.asc | gpg --show-keys --with-fingerprint

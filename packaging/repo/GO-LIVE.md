@@ -3,9 +3,20 @@
 Everything is built and validated, but nothing real has been published. These are
 the owner-only steps. Do them in order.
 
-## 1. Set the R2 token as GitHub Actions secrets
+## 1. Create the `pkg-publish` Environment and put the secrets in it
 
-Repo -> Settings -> Secrets and variables -> Actions -> New repository secret.
+The `publish` job declares `environment: pkg-publish`. That Environment is what
+makes the owner gate enforced rather than conventional, so create it first:
+Repo -> Settings -> Environments -> New environment -> `pkg-publish`, then set:
+
+- **Required reviewers**: add yourself (a human approves every run of the
+  publish job, dry runs included).
+- **Deployment branches**: restrict to `main` (selected branches).
+- **Environment secrets**: add the secrets below, and `HOWDAH_GPG_SIGNING_KEY`,
+  to this Environment rather than repo-wide, so only an approved run on `main`
+  can read them. (If `release.yml` still needs the GPG key repo-wide, keep it
+  there too.)
+
 Create an R2 API token scoped to the one package bucket with **Object Read & Write**
 (Cloudflare dashboard -> R2 -> Manage API tokens), then add:
 
@@ -57,9 +68,17 @@ Actions -> `publish-repos` -> Run workflow.
    and dry-runs the upload (prints what it would copy; writes nothing).
 2. If green, run again with **publish checked**. Upload order is packages,
    then indexes, then `Release`/`Release.gpg`/`InRelease` and
-   `repomd.xml`/`repomd.xml.asc` last. Nothing is ever deleted. Republishing
+   `repomd.xml`/`repomd.xml.asc` last. No object is ever deleted. Republishing
    a package file with changed bytes is refused (`--immutable`): bump the
    revision (`HOWDAH_DEB_REV` / `HOWDAH_RPM_REL`) or version instead.
+
+**Known limitation: the index reflects only the latest publish.** The workflow
+re-indexes just the packages built in that run. Earlier versions stay in R2 as
+objects (the pool) but drop out of the apt `Packages` and yum `repodata`
+indexes, so after a second release users cannot `apt install pkg=<oldver>` or
+roll back through the repo. This is fine for the first (1.0.0) publish.
+**Required follow-up before the second release:** seed the build from the
+existing published pool so the index keeps prior versions. Not implemented yet.
 
 The arm64/aarch64 jobs are best-effort: a failed cell only drops that
 architecture for that minor.
@@ -91,7 +110,9 @@ curl -fsSI https://pkg.howdah.org/yum/repodata/repomd.xml.asc
 
 ## Rollback of a bad publish
 
-Nothing is deleted by the workflow, so old packages stay. To retract, delete the
+The workflow never deletes objects, so old package files stay in R2 (though after
+a newer publish they are no longer listed in the index; see the limitation
+above). To retract, delete the
 affected `Release`/`InRelease`/`repomd.xml` objects (or overwrite them with the
 previous signed copies) in the R2 dashboard, then purge the Cloudflare cache for
 `/apt/dists/*` and `/yum/repodata/*`.

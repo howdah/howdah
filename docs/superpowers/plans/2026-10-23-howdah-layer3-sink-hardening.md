@@ -157,7 +157,9 @@
 
 ### Task 5: Sink-hook C shim + bindgen + MINIT install + neutralize glue
 
-**Refuse idiom (PROVEN in Task 0, 2026-10-23 on 5.6/7.4/8.3):** function neutralize = `RETVAL_FALSE` + return without calling the original (no bailout) — confirmed: blocked `system()` returns false, the command does not run, the script continues, an unmarked call still runs. **`command_exec` and `unserialize` support block via this idiom. `include`/`eval` ship DETECT-ONLY in 1.2** (opcode-neutralize deferred to the fast-follow with phar/SSRF); their detect/log path (opcode handler + `DISPATCH`) is already proven (spec §9). So this task installs the opcode handler for include/eval in **log-only** form (chain always; never neutralize), and implements block only for the two function-swap sinks.
+**Refuse idiom (PROVEN in Task 0, 2026-10-23 on 5.6/7.4/8.3):** function neutralize = `RETVAL_FALSE` + return without calling the original (no bailout) — confirmed: blocked `system()` returns false, the command does not run, the script continues, an unmarked call still runs.
+
+**SCOPE (final): this task installs ONLY the function-table-swap hooks** for the six `command_exec` functions (`system`, `exec`, `shell_exec`, `passthru`, `popen`, `proc_open`) and `unserialize` — both detect AND block (via the proven neutralize). **It installs NO `ZEND_INCLUDE_OR_EVAL` opcode handler in 1.2** — `include`/`eval` are reserved/dormant (spec §10.4, §8): reading the include path operand across the PHP 5/7/8 ABI is unproven. The `[sinks.include]`/`[sinks.eval]` config + FFI stay in place (dormant; never fire because nothing is hooked). So there is NO C opcode-handler code in `sink_hook.c` for 1.2 — only the function-table trampolines.
 
 **Files:**
 - Create: `crates/howdah-sys/sink_hook.c` (the productized hook: function-table swap for the exec family + `unserialize`; `ZEND_INCLUDE_OR_EVAL` opcode handler for include/require/eval; a `howdah_install_sink_hooks(decide_cb, emit_cb)` installer; neutralize on block per the Task-0 idiom). `#if PHP_VERSION_ID` splits the PHP 5 vs 7/8 ABIs (proven in spec §9).

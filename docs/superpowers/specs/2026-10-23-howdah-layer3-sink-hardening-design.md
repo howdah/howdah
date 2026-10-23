@@ -278,8 +278,15 @@ Stated plainly everywhere a person could assume otherwise, mirroring Layer 2 §6
   DNS rebinding — a different machine from sink hooking. Even Snuffleupagus does not do
   it. Deferred to its own design.
 
-Both are named on the site's roadmap as the Layer-3 fast-follow, so the public framing
-never implies 1.2 covers them.
+- **`include`/`eval` operand inspection.** The opcode handler fires reliably (§9) but
+  reading the include path / eval code operand across the PHP 5/7/8 ABI is fragile and
+  unproven; shipping an `include` guard without trustworthy path inspection would
+  under-deliver. Deferred until the operand read is proven on 5.6/7.4/8.3; the config and
+  FFI are already in place for it.
+
+`include`/`eval`, phar:// and SSRF are named on the site's roadmap as the Layer-3
+fast-follow, so the public framing never implies 1.2 covers them. 1.2's active guards are
+`command_exec` and `unserialize`.
 
 ## 10. Resolutions from the builder check (owner may veto)
 
@@ -319,11 +326,18 @@ unproven longjmp. Resolved: block neutralizes the call the way PHP's own
 **Task-0 refuse spike result (2026-10-23, on 5.6/7.4/8.3):** the function-swap
 neutralize (`RETVAL_FALSE` + return without calling the original) is **proven** — the
 blocked call returns false, does not run, and the script continues, on all three ABIs.
-So **`command_exec` and `unserialize` support `block` in 1.2.** The opcode-neutralize for
-`include`/`eval` was **not** pursued (fiddly per-version result-operand handling, and a
-clean fallback exists): **`include` and `eval` ship DETECT-ONLY in 1.2**, with their
-block deferred to the Layer-3 fast-follow (§8). Their detect/log path is already proven
-(§9).
+So **`command_exec` and `unserialize` support `block` in 1.2.**
+
+**Scope narrowed further (2026-10-23):** `include`/`eval` are **NOT hooked in 1.2** at
+all — not even detect. The opcode handler *fires* (proven, §9), but reading the include
+**path operand** across the PHP 5/7/8 ABI (CONST vs CV/VAR/TMP operands, per-generation
+stack macros) is known-fragile and was **not** proven, and an `include` guard without
+reliable path inspection is not worth shipping ("include of user paths" needs the path).
+So 1.2 **actively hooks only `command_exec` + `unserialize`**. The `[sinks.include]` /
+`[sinks.eval]` config and their FFI policy are built, tested and forward-compatible, but
+are **dormant/reserved** in 1.2 (no opcode handler is installed, so they never fire); the
+generated ini and docs label them "reserved — not active in 1.2." They activate in the
+Layer-3 fast-follow (§8) once the operand read is proven, together with `block` for them.
 
 **10.5 `command_exec` `allow` patterns are full-string anchored — and literal, not
 regex.** A substring match would let an `allow` pattern `ls` also permit `ls; rm -rf /`,

@@ -148,7 +148,7 @@ Everything in §5, §8 and §10:
      - Packages depend on the PHP API virtual package (e.g. `phpapi-20180731` for 7.3).
      - Signing uses an RSA key that xenial- and CentOS-7-era `apt`/`rpm` can verify.
      - Repos are **HTTPS-only** (owner decision 2026-10-22, matching the industry norm set by Docker's and Ondřej Surý's own repos). CentOS 7 negotiates TLS 1.2 to the repo host without trouble. Pre-2018 Debian/Ubuntu (16.04 and older) need `apt-transport-https` and `ca-certificates` installed first — a documented one-line prerequisite, exactly what those other third-party repos already require. GPG signatures protect package integrity regardless of transport.
-     - HTTPS-only means the package repo can sit behind a Cloudflare tunnel or any ordinary HTTPS host; it no longer needs to serve plain HTTP on port 80.
+     - HTTPS-only means the package repo can be plain static files on any ordinary HTTPS host (Cloudflare R2, see §10); it no longer needs to serve plain HTTP on port 80.
   2. **(0.1) Signed tarball** of the `.so` plus `.ini`, with SHA-256 checksums and a signature, for manual installs.
   3. **(0.1) Build from source** with `cargo` against the server's own PHP headers (`php-config`).
 - **`howdah-check` detection helper:** finds every PHP install on the box. Several PHP versions side by side is normal with Surý, Remi and control panels. For each one it reports: version, API number, NTS/ZTS, `extension_dir`, which SAPIs are present, and whether Howdah is loaded in each. **Read-only by default.**
@@ -283,8 +283,14 @@ The docs need equivalent worked examples, at least for:
 - Astro static site, deployed to GitHub Pages by GitHub Actions from the main repo's `site/` folder, on the custom domain howdah.org from day one.
 - Package repos live on `pkg.howdah.org` (HTTPS) so their hosting can change without changing users' sources lists.
 - Package repo and signing-key URLs are written permanently into users' apt sources and yum `.repo` files, so they must be final before the first release that uses them.
-- **`pkg.howdah.org` hosting (owner decision 2026-10-22): the existing `ashlar-prod` server via its Cloudflare Zero Trust tunnel, for now.** A public-hostname route (`pkg.howdah.org`) in the Zero Trust dashboard points to a local static file server (nginx or Caddy) serving the apt/yum repo tree, with **no Cloudflare Access policy** — `apt`/`yum` can't pass an auth challenge, so the hostname must be public and unauthenticated. HTTPS-only, which the tunnel provides natively. Revisit if public download traffic or Cloudflare free-plan bulk-file ToS becomes a problem; moving to a dedicated host later changes only DNS/tunnel config, not users' sources lists. Not needed until 1.0; 0.1 uses GitHub Releases tarballs.
-  - Builder notes for 1.0: keep the repo tree on its own path/volume, not mixed with ashlar-prod's app data; cap the tunnel route to that static server only; confirm Cloudflare isn't caching stale repo metadata (set short cache TTL or bypass for `Release`/`Packages`/`repomd.xml`).
+- **`pkg.howdah.org` hosting (owner decision 2026-10-22): a public Cloudflare R2 bucket on the custom domain `pkg.howdah.org`.** This replaces the earlier plan to self-host on `ashlar-prod` behind its Cloudflare tunnel. There is no server to run or patch, nothing is shared with ashlar-prod, downloads (egress) are free, and Cloudflare's edge absorbs download spikes after a disclosure. R2 is part of Cloudflare's Developer Platform, which is where the CDN terms send large files, so the free-plan bulk-file concern goes away. The repo is static files (apt `dists/` + `pool/`, yum `repodata/` + packages), so no Worker or server code is needed, and the custom domain provides HTTPS. The free tier (10 GB-month storage, 1M writes and 10M reads a month, free egress) covers 1.0 comfortably. Moving to another host later changes only DNS, not users' sources lists. Not needed until 1.0; 0.1 uses GitHub Releases tarballs.
+  - Builder notes for 1.0:
+    - CI publishes with an R2 API token scoped to this one bucket ("Object Read & Write", S3-compatible API), stored as a CI secret, using `rclone` or `aws s3 sync`. Signing stays in CI (§9): the bucket only ever receives already-signed files, so a leaked token can replace files but can't forge signatures.
+    - R2 has no atomic swap. Upload in dependency order: packages first, then index files, then `InRelease`/`Release`/`Release.gpg` and `repomd.xml` last. Don't delete superseded packages in the same publish, so clients mid-update don't hit 404s.
+    - Caching: Cloudflare caches some file extensions by default, `.gz` included, which can pair a stale `Packages.gz` with a fresh `InRelease` ("Hash Sum mismatch"). Add cache rules: `pool/` and package files long (version-named, never change); `dists/` and `repodata/` bypass or about a 1-minute TTL.
+    - The `pkg` hostname must be public and unchallenged: no Cloudflare Access policy and no bot-fight or challenge rules on it, because `apt`/`yum` can't pass a challenge.
+    - Public buckets have no directory listing; apt and yum don't need one.
+    - Tooling: `reprepro` or `aptly` for the apt tree, `createrepo_c` for yum.
 
 ## 11. What success looks like
 
@@ -302,7 +308,7 @@ The docs need equivalent worked examples, at least for:
 - How bindings are generated and organised per PHP version; repo layout; CI matrix.
 - Exact default limits, chosen from measurements and the false-positive corpus.
 - `howdah-check` design (language, distribution).
-- Hosting for `pkg.howdah.org` (GitHub Pages, GitHub Releases behind a redirect, or OSS package hosting such as Cloudsmith), as long as plain-HTTP apt works.
+- The apt/yum repo tooling and the CI publish job for `pkg.howdah.org`. Hosting itself is decided: Cloudflare R2 (§10).
 - Site information architecture details and copy, within §10.
 
 ## 13. Owner actions / setup status
@@ -313,4 +319,8 @@ The docs need equivalent worked examples, at least for:
   - **Primary fingerprint:** `11521035C600F63831F825512087B8720997807B`
   - Public key: `howdah-signing-public.asc` → will be published at `howdah.org/key.asc` and shipped with releases.
   - Owner backs up the master secret + revocation certificate offline. At CI setup (Task 13), only the signing subkey goes to CI and the primary secret is removed from online keyrings.
+- ⬜ **Cloudflare R2 for `pkg.howdah.org`** (needed before 1.0, not 0.1):
+  - Move howdah.org's nameservers from Namecheap to Cloudflare (free plan), in the same Cloudflare account that will own the bucket; R2 custom domains require that. Keep the GitHub Pages records for `howdah.org`/`www` as "DNS only" (grey cloud) so GitHub can still issue its certificate. Checked 2026-10-22: howdah.org still uses Namecheap's nameservers.
+  - Create the R2 bucket (e.g. `howdah-pkg`) and connect the custom domain `pkg.howdah.org`. R2 may ask for a payment method before enabling, even on the free tier.
+  - Create an R2 API token scoped to that bucket with Object Read & Write, for CI (§10 builder notes).
 - Optional: add howdah.dev as a redirect to howdah.org (howdah.dev looked free on 2026-10-22).

@@ -323,6 +323,10 @@ is deliberately **not** part of `matrix-results.tsv` / `coverage.json`.
   detection signal.
 - **The logged event omits the value.** Only the rule, source and variable
   name are recorded, never the payload bytes (checked in the lab run below).
+  This covers the matched GET, POST and cookie value. For the PATH source, the
+  request path appears in the event's `uri` field exactly as it does for every
+  Howdah event: the request target is always logged, and it is not decoded
+  form, body or cookie input.
 
 ## What each class looks for
 

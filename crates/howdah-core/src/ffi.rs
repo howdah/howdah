@@ -235,6 +235,10 @@ impl howdah_ctx {
             return Action::Allow;
         }
         let mode = self.config.inspect.effective_mode(self.config.mode);
+        // Off is absolute: no rule_modes override may re-arm the layer.
+        if mode == crate::config::Mode::Off {
+            return Action::Allow;
+        }
         let overrides = self.config.inspect.rule_modes.clone();
         let rule = class_rule(class);
         let class_name = match class {
@@ -928,6 +932,15 @@ mod tests {
     #[test]
     fn global_off_silences_inspect() {
         let c = init("mode = \"off\"");
+        begin(c);
+        assert_eq!(inspect(c, HOWDAH_SRC_GET, "q", b"' OR 1=1 --"), HOWDAH_ALLOW);
+        assert!(take(c).is_none());
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn global_off_overrides_inspect_rule_modes() {
+        let c = init("mode = \"off\"\n[inspect.rule_modes]\nsql_injection = \"block\"");
         begin(c);
         assert_eq!(inspect(c, HOWDAH_SRC_GET, "q", b"' OR 1=1 --"), HOWDAH_ALLOW);
         assert!(take(c).is_none());

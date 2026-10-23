@@ -124,6 +124,7 @@ impl Config {
     pub fn from_toml(s: &str) -> Result<Config, ConfigError> {
         let raw: RawConfig = toml::from_str(s).map_err(|e| ConfigError(e.to_string()))?;
         raw.limits.validate().map_err(ConfigError)?;
+        raw.inspect.limits.validate().map_err(ConfigError)?;
         Ok(Config {
             mode: raw.mode,
             limits: raw.limits,
@@ -199,6 +200,12 @@ self_test = "off"
     fn zero_limit_rejected() {
         let e = Config::from_toml("[limits]\nmax_parts = 0").unwrap_err();
         assert!(e.to_string().contains("max_parts"), "{e}");
+    }
+
+    #[test]
+    fn zero_inspect_limit_rejected() {
+        let e = Config::from_toml("[inspect.limits]\nmax_values = 0").unwrap_err();
+        assert!(e.to_string().contains("max_values"), "{e}");
     }
 
     #[test]

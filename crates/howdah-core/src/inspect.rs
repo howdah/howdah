@@ -35,6 +35,21 @@ impl InspectLimits {
             max_values: 2000,
         }
     }
+
+    /// Reject configurations that would silently disable scanning (any limit of 0).
+    pub fn validate(&self) -> Result<(), String> {
+        let fields = [
+            ("max_value_bytes", self.max_value_bytes),
+            ("max_total_bytes", self.max_total_bytes),
+            ("max_values", self.max_values),
+        ];
+        for (name, v) in fields {
+            if v == 0 {
+                return Err(format!("inspect.limits.{name} must be greater than 0"));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

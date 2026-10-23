@@ -24,6 +24,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::Config;
+use crate::input::InputState;
 use crate::limits::{LimitHit, RuleId, Severity};
 use crate::log::{log_line, new_request_id, EventRecord};
 use crate::multipart::{Event, MultipartState};
@@ -79,6 +80,8 @@ pub struct howdah_ctx {
     log: Option<String>,
     /// True while the only stashed line is the self_test marker (a real hit replaces it).
     selftest_only: bool,
+    /// Per-request input-shape counters (vars, headers); reset in `request_begin`.
+    input: InputState,
 }
 
 fn describe(r: RuleId) -> &'static str {
@@ -134,6 +137,7 @@ impl howdah_ctx {
             worst: Action::Allow,
             log: None,
             selftest_only: false,
+            input: InputState::new(),
         }
     }
 
@@ -242,6 +246,38 @@ impl howdah_ctx {
         self.worst
     }
 
+    fn input_var(&mut self, name: &[u8]) -> Action {
+        #[cfg(test)]
+        if tests::FORCE_PANIC.with(|f| f.get()) {
+            panic!("injected test panic");
+        }
+        self.input.note_var(name);
+        let hit = self.config.limits.check_input(&self.input);
+        self.apply(hit.as_ref());
+        self.worst
+    }
+
+    fn query_string(&mut self, qs: &[u8], is_cgi: bool) -> Action {
+        #[cfg(test)]
+        if tests::FORCE_PANIC.with(|f| f.get()) {
+            panic!("injected test panic");
+        }
+        let hit = self.config.limits.check_query_string(qs, is_cgi);
+        self.apply(hit.as_ref());
+        self.worst
+    }
+
+    fn request_header(&mut self, name_len: usize, value_len: usize) -> Action {
+        #[cfg(test)]
+        if tests::FORCE_PANIC.with(|f| f.get()) {
+            panic!("injected test panic");
+        }
+        self.input.note_header(name_len, value_len);
+        let hit = self.config.limits.check_input(&self.input);
+        self.apply(hit.as_ref());
+        self.worst
+    }
+
     fn panic_note(&mut self) {
         // Best effort; must not itself unwind out of the boundary.
         // Do not clobber an already-stashed real Log/Block line.
@@ -320,6 +356,7 @@ pub unsafe extern "C" fn howdah_request_begin(
         c.worst = Action::Allow;
         c.log = None;
         c.selftest_only = false;
+        c.input = InputState::new();
         c.meta = match meta.as_ref() {
             Some(m) => Meta {
                 client_ip: copy_str(m.client_ip, m.client_ip_len),
@@ -369,6 +406,80 @@ pub unsafe extern "C" fn howdah_request_end(ctx: *mut howdah_ctx) -> i32 {
         return HOWDAH_ALLOW;
     }
     let r = catch_unwind(AssertUnwindSafe(|| code((*ctx).end())));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// Record one request variable name (GET/POST/COOKIE key) and run the
+/// input-shape checks. The name is inspected, never logged. Returns the most
+/// severe action so far this request (0 Allow, 1 Log, 2 Block). Panic or NULL
+/// ctx returns 0.
+///
+/// # Safety
+/// `ctx` NULL or live; `name` NULL or valid for `name_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_input_var(ctx: *mut howdah_ctx, name: *const c_char, name_len: usize) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let bytes: &[u8] = if name.is_null() || name_len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(name as *const u8, name_len)
+        };
+        code((*ctx).input_var(bytes))
+    }));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// Check the raw query string; `is_cgi != 0` enables the php-cgi argument
+/// injection check (CVE-2012-1823). Returns the most severe action so far this
+/// request (0 Allow, 1 Log, 2 Block). Panic or NULL ctx returns 0.
+///
+/// # Safety
+/// `ctx` NULL or live; `qs` NULL or valid for `qs_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_query_string(
+    ctx: *mut howdah_ctx,
+    qs: *const c_char,
+    qs_len: usize,
+    is_cgi: i32,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let bytes: &[u8] = if qs.is_null() || qs_len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(qs as *const u8, qs_len)
+        };
+        code((*ctx).query_string(bytes, is_cgi != 0))
+    }));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// Record one request header by LENGTHS ONLY (names and values never cross the
+/// ABI) and run the header count/size checks. Returns the most severe action so
+/// far this request (0 Allow, 1 Log, 2 Block). Panic or NULL ctx returns 0.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_request_header(ctx: *mut howdah_ctx, name_len: usize, value_len: usize) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| code((*ctx).request_header(name_len, value_len))));
     r.unwrap_or_else(|_| {
         report_panic(ctx);
         HOWDAH_ALLOW
@@ -629,6 +740,46 @@ mod tests {
         assert!(line.contains("panic caught"));
         begin(c);
         assert_eq!(feed(c, BODY), 0, "ctx usable after a caught panic");
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn input_var_flood_blocks_and_logs_json() {
+        let c = init("[limits]\nmax_input_vars = 2\n");
+        begin(c);
+        for n in ["a", "b", "c"] {
+            unsafe { howdah_input_var(c, n.as_ptr() as _, n.len()) };
+        }
+        let line = take(c).unwrap();
+        assert!(line.contains("\"rule\":\"max_input_vars\""), "{line}");
+        assert!(line.contains("\"action\":\"block\""), "{line}");
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn cgi_arg_injection_blocks_only_under_cgi() {
+        let c = init("");
+        begin(c);
+        assert_eq!(unsafe { howdah_query_string(c, b"-s".as_ptr() as _, 2, 1) }, 2);
+        unsafe { howdah_free(c) };
+        let c = init("");
+        begin(c);
+        assert_eq!(unsafe { howdah_query_string(c, b"-s".as_ptr() as _, 2, 0) }, 0);
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn new_entrypoints_null_and_panic_safe() {
+        assert_eq!(unsafe { howdah_input_var(std::ptr::null_mut(), std::ptr::null(), 0) }, 0);
+        assert_eq!(unsafe { howdah_query_string(std::ptr::null_mut(), std::ptr::null(), 0, 1) }, 0);
+        assert_eq!(unsafe { howdah_request_header(std::ptr::null_mut(), 0, 0) }, 0);
+        let c = init("");
+        begin(c);
+        FORCE_PANIC.with(|f| f.set(true));
+        assert_eq!(unsafe { howdah_input_var(c, b"a".as_ptr() as _, 1) }, 0);
+        assert_eq!(unsafe { howdah_query_string(c, b"a".as_ptr() as _, 1, 1) }, 0);
+        assert_eq!(unsafe { howdah_request_header(c, 1, 1) }, 0);
+        FORCE_PANIC.with(|f| f.set(false));
         unsafe { howdah_free(c) };
     }
 

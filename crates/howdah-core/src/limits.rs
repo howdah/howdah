@@ -10,6 +10,7 @@
 
 use serde::Deserialize;
 
+use crate::input::InputState;
 use crate::multipart::{Event, MultipartState};
 
 /// Resource limits applied to multipart bodies.
@@ -33,6 +34,12 @@ pub struct Limits {
     /// (PHP default 8 MiB) so it never fires before PHP's own limit on normal
     /// uploads; the 256 MiB default is far above typical `post_max_size`.
     pub max_parse_memory_bytes: usize,
+    /// Maximum number of request input variables (GET/POST/cookie names).
+    pub max_input_vars: usize,
+    /// Maximum array nesting depth of any one variable name (`a[b][c]` = 2).
+    pub max_input_nesting_depth: usize,
+    /// Maximum bytes of any single variable name or array key.
+    pub max_input_key_bytes: usize,
 }
 
 impl Limits {
@@ -81,6 +88,14 @@ impl Limits {
             // 256 MiB total body: well above PHP's default post_max_size (8 MiB)
             // and common raised values, below host memory exhaustion.
             max_parse_memory_bytes: 256 * 1024 * 1024,
+            // Provisional (confirmed against the corpus later): double stock PHP
+            // max_input_vars (1000), so stock-config forms never trip it.
+            max_input_vars: 2000,
+            // Real forms nest a handful of levels; 64 is far beyond legitimate
+            // use yet well below depths that stress recursive array handling.
+            max_input_nesting_depth: 64,
+            // Same generous bound as field names: keys are identifiers.
+            max_input_key_bytes: 1024,
         }
     }
 
@@ -94,6 +109,9 @@ impl Limits {
             ("max_field_name_bytes", self.max_field_name_bytes),
             ("max_filename_bytes", self.max_filename_bytes),
             ("max_parse_memory_bytes", self.max_parse_memory_bytes),
+            ("max_input_vars", self.max_input_vars),
+            ("max_input_nesting_depth", self.max_input_nesting_depth),
+            ("max_input_key_bytes", self.max_input_key_bytes),
         ];
         for (name, v) in fields {
             if v == 0 {
@@ -155,6 +173,41 @@ impl Limits {
         self.check_fed_bytes(state.max_part_data_seen().max(state.total_fed_bytes()))
     }
 
+    /// Check request input-shape high-water marks against the limits, in
+    /// field order (var count, nesting depth, key bytes); first hit wins.
+    pub fn check_input(&self, st: &InputState) -> Option<LimitHit> {
+        let hit = |rule: RuleId, detail: String| {
+            Some(LimitHit { rule, severity: rule.severity(), detail })
+        };
+        if st.vars() > self.max_input_vars as u64 {
+            return hit(
+                RuleId::MaxInputVars,
+                format!("{} input variables exceeds limit {}", st.vars(), self.max_input_vars),
+            );
+        }
+        if st.max_depth() > self.max_input_nesting_depth {
+            return hit(
+                RuleId::MaxInputNestingDepth,
+                format!(
+                    "array nesting depth {} exceeds limit {}",
+                    st.max_depth(),
+                    self.max_input_nesting_depth
+                ),
+            );
+        }
+        if st.max_key_bytes() > self.max_input_key_bytes {
+            return hit(
+                RuleId::MaxInputKeyBytes,
+                format!(
+                    "input key of {} bytes exceeds limit {}",
+                    st.max_key_bytes(),
+                    self.max_input_key_bytes
+                ),
+            );
+        }
+        None
+    }
+
     /// Check a byte total against `max_parse_memory_bytes` (total body bytes
     /// processed). `check` already applies this using the state's totals.
     pub fn check_fed_bytes(&self, total_fed: u64) -> Option<LimitHit> {
@@ -211,6 +264,9 @@ pub enum RuleId {
     MalformedMultipart,
     UploadProgressAbuse,
     SelfTest,
+    MaxInputVars,
+    MaxInputNestingDepth,
+    MaxInputKeyBytes,
 }
 
 impl RuleId {
@@ -218,9 +274,10 @@ impl RuleId {
     /// parser disagreeing with an unusual legit client must not block by default.
     pub fn severity(self) -> Severity {
         match self {
-            RuleId::MalformedMultipart | RuleId::UploadProgressAbuse | RuleId::SelfTest => {
-                Severity::Standard
-            }
+            RuleId::MalformedMultipart
+            | RuleId::UploadProgressAbuse
+            | RuleId::SelfTest
+            | RuleId::MaxInputKeyBytes => Severity::Standard,
             _ => Severity::Critical,
         }
     }

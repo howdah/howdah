@@ -93,6 +93,9 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::MalformedMultipart => "malformed or truncated multipart body",
         RuleId::UploadProgressAbuse => "upload progress abuse",
         RuleId::SelfTest => "self test",
+        RuleId::MaxInputVars => "too many input variables",
+        RuleId::MaxInputNestingDepth => "input array nesting too deep",
+        RuleId::MaxInputKeyBytes => "input variable key too long",
     }
 }
 

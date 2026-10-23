@@ -1,0 +1,225 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { PKG, KEY_FPR, RELEASES } from '../lib/site';
+
+const MINORS = ['5.4','5.5','5.6','7.0','7.1','7.2','7.3','7.4','8.0','8.1','8.2','8.3','8.4','8.5'];
+---
+<Layout
+  title="Install Howdah — pick your OS, PHP and server"
+  description="Get the exact install, verify and rollback commands for Howdah on your OS, PHP version, PHP source and server type (FPM, Apache, CGI) — apt, yum, or a signed tarball."
+  path="/install/"
+>
+  <div class="pagehead">
+    <div class="wrap">
+      <p class="crumbs"><a href="/">Home</a> / <span aria-current="page">Install</span></p>
+      <h1>Install Howdah</h1>
+      <p class="lede">Choose your system and get the exact commands to install, verify and roll back — one build per PHP minor version. Start in <code>detect</code> mode; the critical limits still block.</p>
+    </div>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <form id="picker" class="picker" aria-label="Choose your setup">
+        <fieldset>
+          <legend>1. Operating system</legend>
+          <label><input type="radio" name="os" value="debian" checked /> Debian / Ubuntu <small>Ubuntu 16.04–24.04, Debian 11–12 — installs with <b>apt</b></small></label>
+          <label><input type="radio" name="os" value="rhel" /> RHEL / CentOS / Alma / Rocky <small>CentOS 7, Alma/Rocky 8–9 (Remi layout) — installs with <b>yum/dnf</b></small></label>
+          <label><input type="radio" name="os" value="other" /> Other / panel / stock PHP <small>Amazon Linux, cPanel, Plesk, CloudLinux, older distros — install from the <b>signed tarball</b></small></label>
+        </fieldset>
+
+        <fieldset data-when-os="debian">
+          <legend>2. Where your PHP comes from</legend>
+          <label><input type="radio" name="src_deb" value="sury" checked /> Surý PPA / deb.sury.org <small>The usual source for modern PHP on Debian/Ubuntu</small></label>
+          <label><input type="radio" name="src_deb" value="distro" /> The distribution's own PHP <small>Same package format; use the tarball if your API number has no matching build</small></label>
+        </fieldset>
+
+        <fieldset data-when-os="debian" hidden>
+          <legend>Ubuntu 16.04 (xenial)?</legend>
+          <label><input type="checkbox" name="xenial" value="1" /> This is Ubuntu 16.04 <small>Uses the older apt key method (apt 1.2 needs <code>apt-transport-https</code> and <code>apt-key</code>)</small></label>
+        </fieldset>
+
+        <fieldset>
+          <legend><span data-os-step>2</span>. PHP version</legend>
+          <label for="minor">PHP minor version (from <code>php -v</code>)</label>
+          <select id="minor" name="minor">
+            {MINORS.map((m) => <option value={m} selected={m === '8.1'}>{m}</option>)}
+          </select>
+        </fieldset>
+
+        <fieldset>
+          <legend><span data-os-step2>3</span>. Server type (SAPI)</legend>
+          <label><input type="radio" name="sapi" value="fpm" checked /> PHP-FPM <small>The common setup behind Nginx or Apache</small></label>
+          <label><input type="radio" name="sapi" value="apache" /> Apache mod_php <small>prefork mpm</small></label>
+          <label><input type="radio" name="sapi" value="cgi" /> php-cgi / FastCGI <small>See the note about CVE-2012-1823 below</small></label>
+        </fieldset>
+      </form>
+
+      <h2 id="result-heading">Your commands</h2>
+      <p class="js-note" data-nojs>Showing the default: Debian/Ubuntu + Surý + PHP 8.1 + PHP-FPM. With JavaScript, the commands below update as you change the choices above. Without it, follow the full per-platform guide in the <a href="/docs/">docs</a>.</p>
+      <div id="result" aria-live="polite" aria-labelledby="result-heading">
+        <!-- Server-rendered default (works with no JavaScript). The script replaces this. -->
+        <ol class="steps" id="result-steps">
+          <li>
+            <h3>Add the signed apt repository</h3>
+            <p>The key is pinned to this repository only.</p>
+            <pre tabindex="0"><code>sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://howdah.org/key.asc | sudo tee /etc/apt/keyrings/howdah.asc &gt;/dev/null
+echo "deb [signed-by=/etc/apt/keyrings/howdah.asc] {PKG}/apt stable main" \
+  | sudo tee /etc/apt/sources.list.d/howdah.list</code></pre>
+          </li>
+          <li>
+            <h3>Install the package for your PHP</h3>
+            <pre tabindex="0"><code>sudo apt-get update
+sudo apt-get install php8.1-howdah</code></pre>
+            <p>The package installs only against a PHP with the matching ABI, and enables the module for PHP 8.1.</p>
+          </li>
+          <li>
+            <h3>Verify it is loaded, then reload your server</h3>
+            <pre tabindex="0"><code>php -m | grep -i howdah
+php --ri howdah          <span class="c"># Howdah =&gt; enabled, Mode =&gt; detect</span>
+sudo systemctl reload php8.1-fpm</code></pre>
+          </li>
+          <li>
+            <h3>Roll back at any time</h3>
+            <pre tabindex="0"><code>sudo phpdismod -v 8.1 howdah        <span class="c"># stop loading, keep the package</span>
+sudo apt-get purge php8.1-howdah    <span class="c"># or remove everything</span>
+sudo systemctl reload php8.1-fpm</code></pre>
+          </li>
+        </ol>
+      </div>
+
+      <div class="note" id="cgi-note" hidden>
+        <h3>A note for php-cgi / FastCGI</h3>
+        <p>Howdah protects the request-parsing path the same way under CGI. It cannot cover <strong>CVE-2012-1823</strong> (php-cgi argument injection): that query string is consumed by php-cgi during its own startup, <em>before</em> any PHP extension loads, so no in-PHP firewall can act on it. Use a web-server or front-proxy rule, or a patched php-cgi, for that one. See the <a href="/coverage/">coverage page</a>.</p>
+      </div>
+
+      <p class="legend">The signing key is at <code>https://howdah.org/key.asc</code> — the same key that signs the release <code>SHA256SUMS</code>. Check its primary fingerprint, <code>{KEY_FPR}</code>, before trusting it. Package and metadata signatures are both enforced.</p>
+    </div>
+  </section>
+</Layout>
+
+<script define:vars={{ PKG, RELEASES }}>
+  const form = document.getElementById('picker');
+  const result = document.getElementById('result-steps');
+  const cgiNote = document.getElementById('cgi-note');
+  const jsNote = document.querySelector('[data-nojs]');
+  if (jsNote) jsNote.textContent = 'These commands update as you change the choices above. One build per PHP minor version.';
+
+  const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const val = (name) => form.elements[name] && form.elements[name].value;
+  const checked = (name) => form.elements[name] && form.elements[name].checked;
+
+  // Build one <li> with a heading and a code block (comments marked with ⍘ → .c span).
+  function step(title, body, lines) {
+    const code = lines.map((l) => {
+      const i = l.indexOf('# ');
+      if (i > 0) return `${esc(l.slice(0, i))}<span class="c">${esc(l.slice(i))}</span>`;
+      if (l.startsWith('# ')) return `<span class="c">${esc(l)}</span>`;
+      return esc(l);
+    }).join('\n');
+    return `<li><h3>${esc(title)}</h3>${body ? `<p>${body}</p>` : ''}<pre tabindex="0"><code>${code}</code></pre></li>`;
+  }
+
+  function render() {
+    const os = val('os');
+    const minor = val('minor');          // e.g. 8.1
+    const xy = minor.replace('.', '');    // e.g. 81
+    const sapi = val('sapi');
+    cgiNote.hidden = sapi !== 'cgi';
+
+    // show/hide os-conditional fieldsets + the xenial question
+    form.querySelectorAll('[data-when-os]').forEach((fs) => {
+      const show = fs.getAttribute('data-when-os') === os;
+      // the xenial fieldset is the second debian one — toggle both with os
+      fs.hidden = !show;
+    });
+
+    let steps = '';
+    if (os === 'debian') {
+      const xenial = checked('xenial');
+      const fpmReload = `sudo systemctl reload php${minor}-fpm`;
+      const reload = sapi === 'apache' ? 'sudo systemctl reload apache2'
+                    : sapi === 'cgi' ? '# restart your FastCGI process manager'
+                    : fpmReload;
+      if (xenial) {
+        steps += step('Prerequisites for Ubuntu 16.04', 'apt 1.2 cannot fetch HTTPS without these.',
+          ['sudo apt-get update', 'sudo apt-get install -y apt-transport-https ca-certificates curl']);
+        steps += step('Add the repository (xenial key method)', '',
+          ['curl -fsSL https://howdah.org/key.asc | sudo apt-key add -',
+           `echo "deb ${PKG}/apt stable main" | sudo tee /etc/apt/sources.list.d/howdah.list`]);
+      } else {
+        steps += step('Add the signed apt repository', 'The key is pinned to this repository only.',
+          ['sudo install -d -m 0755 /etc/apt/keyrings',
+           'curl -fsSL https://howdah.org/key.asc | sudo tee /etc/apt/keyrings/howdah.asc >/dev/null',
+           `echo "deb [signed-by=/etc/apt/keyrings/howdah.asc] ${PKG}/apt stable main" | sudo tee /etc/apt/sources.list.d/howdah.list`]);
+      }
+      steps += step('Install the package for your PHP', `Installs only against a matching PHP ABI, and enables the module for PHP ${minor}.`,
+        ['sudo apt-get update', `sudo apt-get install php${minor}-howdah`]);
+      steps += step('Verify it is loaded, then reload your server', '',
+        ['php -m | grep -i howdah', 'php --ri howdah          # Howdah => enabled, Mode => detect', reload]);
+      steps += step('Roll back at any time', '',
+        [`sudo phpdismod -v ${minor} howdah        # stop loading, keep the package`,
+         `sudo apt-get purge php${minor}-howdah    # or remove everything`, reload]);
+    } else if (os === 'rhel') {
+      const reload = sapi === 'apache' ? 'sudo systemctl reload httpd'
+                    : sapi === 'cgi' ? '# restart your FastCGI process manager'
+                    : `sudo systemctl reload php${xy}-php-fpm`;
+      steps += step('Import the key and add the yum repository', 'Both package and metadata signatures are enforced.',
+        ['sudo rpm --import https://howdah.org/key.asc',
+         'sudo tee /etc/yum.repos.d/howdah.repo >/dev/null <<\'REPO\'',
+         '[howdah]', 'name=Howdah (defensive WAF for PHP)', `baseurl=${PKG}/yum`,
+         'enabled=1', 'gpgcheck=1', 'repo_gpgcheck=1', 'gpgkey=https://howdah.org/key.asc', 'REPO']);
+      steps += step('Install the package (Remi layout)', `Requires php${xy}-php-common from Remi. Use dnf on 8/9.`,
+        [`sudo yum install php${xy}-howdah`]);
+      steps += step('Verify it is loaded, then reload your server', '',
+        [`/opt/remi/php${xy}/root/usr/bin/php -m | grep -i howdah`,
+         `/opt/remi/php${xy}/root/usr/bin/php --ri howdah`, reload]);
+      steps += step('Roll back at any time', 'A locally edited ini is kept as 40-howdah.ini.rpmsave.',
+        [`sudo yum remove php${xy}-howdah`, reload]);
+    } else {
+      // tarball / manual
+      const reload = sapi === 'apache' ? 'sudo systemctl reload apache2   # or httpd'
+                    : sapi === 'cgi' ? '# restart your FastCGI process manager'
+                    : `sudo systemctl reload php${minor}-fpm`;
+      steps += step('Find your PHP builds (changes nothing)', 'howdah-check lists every PHP install and the exact tarball to download.',
+        ['curl -fsSLO https://github.com/howdah/howdah/releases/latest/download/howdah-check',
+         'chmod +x howdah-check', './howdah-check detect',
+         '# -> PHP ' + minor + '.x, API <nnnnnnnn>, NTS, <extension_dir>, SAPIs: ...']);
+      steps += step('Download, verify the signature, then install', 'Match the tarball to your PHP minor and Zend API number (the API line above).',
+        ['B=https://github.com/howdah/howdah/releases/latest/download',
+         `T=howdah-1.0.0-php${minor}-<api>-linux-$(uname -m).tar.gz`,
+         'curl -fLO $B/$T -O $B/SHA256SUMS -O $B/SHA256SUMS.asc -O $B/howdah-release-signing.asc',
+         'sha256sum -c --ignore-missing SHA256SUMS',
+         'gpg --import howdah-release-signing.asc',
+         'gpg --verify SHA256SUMS.asc SHA256SUMS',
+         'tar xzf $T',
+         `sudo cp howdah-1.0.0-php${minor}/howdah.so  "$(php-config --extension-dir)/"`,
+         `sudo cp howdah-1.0.0-php${minor}/howdah.ini <your PHP conf.d dir, e.g. /etc/php/${minor}/mods-available/>`]);
+      steps += step('Enable and verify', 'Howdah ships in detect mode; the critical limits still block.',
+        ['php --ri howdah', 'howdah-check web https://your.site/', reload]);
+      steps += step('Roll back', 'Remove the ini line (or the conf.d file) and reload.', [reload]);
+    }
+
+    result.innerHTML = steps;
+    // keep the os-step legend numbers sensible (debian has an extra "source" step)
+    const osHasSource = os === 'debian';
+    document.querySelectorAll('[data-os-step]').forEach((e) => e.textContent = osHasSource ? '3' : '2');
+    document.querySelectorAll('[data-os-step2]').forEach((e) => e.textContent = osHasSource ? '4' : '3');
+  }
+
+  form.addEventListener('change', render);
+  render();
+</script>
+
+<style>
+  .picker { display: grid; gap: 1.25rem; grid-template-columns: 1fr; margin-bottom: 2.5rem; }
+  @media (min-width: 48rem) { .picker { grid-template-columns: 1fr 1fr; } }
+  .picker fieldset { border: 1px solid var(--rule); background: var(--surface); border-radius: 10px; margin: 0; padding: .75rem 1.1rem 1rem; }
+  .picker legend { font-weight: 600; padding: 0 .4rem; font-family: var(--display); }
+  .picker label { display: block; padding: .45rem 0; cursor: pointer; min-height: 44px; }
+  .picker label small { display: block; color: var(--muted); margin-left: 1.9rem; font-size: .85rem; }
+  .picker input[type=radio], .picker input[type=checkbox] { margin-right: .7rem; width: 1.15rem; height: 1.15rem; vertical-align: middle; }
+  .picker select { font: inherit; padding: .5rem .6rem; border-radius: 8px; border: 2px solid var(--rule); background: var(--bg); color: var(--ink); min-height: 44px; width: 100%; max-width: 16rem; margin-top: .4rem; }
+  .picker b { font-weight: 600; color: var(--ink); }
+  .js-note { font-size: .9rem; color: var(--muted); }
+</style>

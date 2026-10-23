@@ -80,8 +80,8 @@ function cell(sapi: any) {
       <div class="note">
         <h3>Honest limits of this table</h3>
         <ul class="facts">
-          <li>Apache <code>mod_php</code> was tested on the versions whose cell says so (7.4 and 8.1); for others the non-CLI check was php-fpm.</li>
-          <li>PHP 5.4 was tested on PHP's built-in server only (its php-fpm column is skipped — no <code>cgi-fcgi</code> in the 5.4 image).</li>
+          <li>Apache <code>mod_php</code> and php-fpm were both tested on every minor whose cell shows a result — 5.6 and 7.0 through 8.5. PHP 5.4 and 5.5 are the only exceptions (next notes).</li>
+          <li>PHP 5.4 was tested on PHP's built-in CLI server only: its stock image has no <code>cgi-fcgi</code> (php-fpm skipped) and there is no <code>php:5.4-apache</code> image.</li>
           <li>{coverage.notRunMinors.length} minors were not independently run: {coverage.notRunMinors.join(', ')}. They share a generation's code path with a version that passed — a reason to expect they work, not a test result, and <strong>not</strong> claimed as passing.</li>
           <li>The CVE's <code>session.upload_progress</code> header-parsing path was <strong>not</strong> reproduced. Upload-progress on and off were both tested, to confirm Howdah works either way.</li>
           <li><strong>CVE-2012-1823 (php-cgi argument injection) is out of reach and not protected:</strong> that query is consumed by php-cgi during its own startup, before any PHP extension loads. It belongs with CVE-2019-11043 — both happen before extension code runs. Use a web-server or front-proxy rule.</li>

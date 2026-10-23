@@ -325,10 +325,15 @@ clean fallback exists): **`include` and `eval` ship DETECT-ONLY in 1.2**, with t
 block deferred to the Layer-3 fast-follow (§8). Their detect/log path is already proven
 (§9).
 
-**10.5 `command_exec` `allow` patterns are full-string anchored.** A substring match
-would let an `allow` pattern `ls` also permit `ls; rm -rf /`, gutting the one place
-Layer 3 actively blocks. Resolved: patterns match the **entire** command string
-(implicit `^…$`); operators write complete patterns.
+**10.5 `command_exec` `allow` patterns are full-string anchored — and literal, not
+regex.** A substring match would let an `allow` pattern `ls` also permit `ls; rm -rf /`,
+gutting the one place Layer 3 actively blocks. Resolved: patterns match the **entire**
+command string (implicit `^…$`). And — to keep the no-regex ethos Layer 2 established
+(`howdah-core` has no `regex` dependency; its scanners are hand-rolled linear-time) — a
+pattern is an **anchored literal string with an optional single trailing `*`** meaning
+"any suffix": `id` matches only `id`; `/usr/bin/convert *` matches any command starting
+with `/usr/bin/convert `. No regex, no mid-pattern wildcards, trivially linear, no new
+dependency. (The design's earlier "regexes" wording is superseded by this.)
 
 ## 9. Spike record (evidence, 2026-10-23)
 

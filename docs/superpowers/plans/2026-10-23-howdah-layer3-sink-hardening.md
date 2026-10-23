@@ -64,14 +64,13 @@
   - `pub enum SinkId { CommandExec, Include, Eval, Unserialize }`
   - `pub enum SinkOutcome { Allow, Log, Block }` (policy outcome before mode resolution: `Allow` = on allowlist / benign; `Log`/`Block` = matched, caller resolves against mode).
   - Per-sink policy fns, all **linear-time, no backtracking**, operating on `&[u8]`:
-    - `pub fn command_allowed(cmd: &[u8], allow: &[AnchoredPattern]) -> bool` — true iff `cmd` matches one pattern **as a full-string anchored match**.
+    - `pub fn command_allowed(cmd: &[u8], allow: &[String]) -> bool` — true iff `cmd` matches one pattern. A pattern is an **anchored literal** matched against the WHOLE command, UNLESS it ends in a single `*`, which matches any suffix: `"id"` matches only `id`; `"/usr/bin/convert *"` matches any command beginning `/usr/bin/convert `. **No regex, no mid-pattern wildcards** — a trailing `*` is the only metacharacter (a literal `*` is not needed in a command allowlist). Hand-rolled, trivially linear. (spec §10.5)
     - `pub fn include_allowed(path: &[u8], allow_paths: &[String]) -> bool` — true iff the normalized `path` lies under one of `allow_paths` (prefix on a normalized absolute path). Empty `allow_paths` ⇒ the include sink is inert (caller treats as Allow; see Task 3/4).
     - `pub fn unserialize_classes(payload: &[u8]) -> UnserializeScan` — a bounded forward pass returning whether the payload names any class (`O:`/`C:` tokens) and, if so, the class names found (capped count/length); plain data ⇒ no classes.
-  - `pub struct AnchoredPattern` wrapping a compiled `regex::Regex` anchored with `^(?:…)$` (compiled once from the config strings; a bad pattern is rejected at config load — see Task 3).
-- Consumes: `regex` (already a dep from Layer 2) for the anchored command patterns; no backtracking (Rust `regex` is linear-time).
+- Consumes: **nothing new** — no `regex`/`aho-corasick`. `howdah-core` stays dependency-light (serde, toml, serde_json) and keeps Layer 2's deliberate no-regex, hand-rolled-linear-time stance. The command matcher and unserialize scan are hand-rolled.
 
 - [ ] **Step 1: Write failing tests** in `sinks.rs`:
-  - `command_allow_is_anchored_whole_string` — with `allow = ["ls", "/usr/bin/convert .*"]`: `command_allowed(b"ls", …) == true`, `command_allowed(b"ls; rm -rf /", …) == false`, `command_allowed(b"/usr/bin/convert a b", …) == true`, `command_allowed(b"x/usr/bin/convert", …) == false`.
+  - `command_allow_is_anchored_whole_string` — with `allow = ["id", "/usr/bin/convert *"]`: `command_allowed(b"id", …) == true`, `command_allowed(b"id; rm -rf /", …) == false`, `command_allowed(b"/usr/bin/convert a b", …) == true`, `command_allowed(b"x/usr/bin/convert a", …) == false`, `command_allowed(b"/usr/bin/convert", …) == false` (the space after `convert` is required by the pattern).
   - `include_under_allow_paths` — `include_allowed(b"/var/www/app/tpl/x.php", &["/var/www/app".into()]) == true`; `include_allowed(b"/var/www/app/../../etc/passwd", …) == false` (normalized); `include_allowed(b"/tmp/x.php", …) == false`.
   - `unserialize_plain_data_is_allow` — `unserialize_classes(b"a:1:{i:0;s:3:\"abc\";}")` reports **no classes**; `unserialize_classes(b"O:8:\"stdClass\":0:{}")` reports class `stdClass`; `unserialize_classes(b"C:3:\"Foo\":0:{}")` reports class `Foo`.
   - `unserialize_scan_is_bounded` — a multi-megabyte payload returns within a generous time budget (prefix/'count-capped').
@@ -114,14 +113,14 @@
   - `SinkConfig` default: `enabled = true`, `mode = Mode::Detect`.
   - `pub fn SinkConfig::effective_mode(&self, sink: SinkId, global: Mode) -> Mode` — `Off` if `global == Off` or `!enabled`; else the per-sink mode if set, else `self.mode`. (Mirrors `InspectConfig::effective_mode`; the global `block` never arms a sink.)
   - `Config` gains `pub sinks: SinkConfig`; `safe_defaults()` sets it to default.
-  - Config load **compiles and validates** the `command_exec.allow` patterns (a bad regex is a `ConfigError`, like a zero limit) and rejects unknown keys.
+  - Config load **validates** the `command_exec.allow` patterns (a `*` anywhere but the final character is a `ConfigError`, like a zero limit) and rejects unknown keys. No regex compilation.
 
 - [ ] **Step 1: Write failing tests:**
   - `sinks_defaults_detect_enabled_unserialize_off` — empty TOML → `sinks.enabled`, `sinks.mode == Detect`, `command_exec`/`include`/`eval` effective `Detect`, **`unserialize` effective `Off`**.
   - `global_block_does_not_arm_sinks` — `mode = "block"` with no `[sinks]` → `effective_mode(CommandExec, Block) == Detect` (NOT Block). **Load-bearing.**
   - `global_off_disables_sinks` — `effective_mode(CommandExec, Off) == Off`.
   - `per_sink_mode_overrides_section_mode` — `[sinks]\nmode="off"\n[sinks.command_exec]\nmode="block"` → `effective_mode(CommandExec, Block) == Block`, `effective_mode(Include, Block) == Off`.
-  - `bad_command_allow_regex_rejected` — `[sinks.command_exec]\nallow=["("]` → `ConfigError`.
+  - `mid_wildcard_command_pattern_rejected` — `[sinks.command_exec]\nallow=["a*b"]` → `ConfigError` (a `*` is only permitted as the final character; this catches an operator expecting regex/mid-glob semantics). `allow=["ok *"]` and `allow=["exact"]` are accepted.
   - `sinks_unknown_key_rejected` — `[sinks]\nnope = 1` is an error.
 - [ ] **Step 2: Run, verify fail.**
 - [ ] **Step 3: Implement** `SinkConfig` + sub-structs, add to `Config`/`RawConfig`/`safe_defaults`, `effective_mode`, allow-pattern compilation in `from_toml`.
@@ -146,7 +145,7 @@
 - [ ] **Step 1: Write failing tests** (helper `sink(c, id, name, arg) -> i32` over the ABI, plus a `take_sink` for the dedicated slot):
   - `sink_logs_under_global_block_when_sinks_detect` — `mode="block"`, default sinks; `sink(c, COMMAND_EXEC, "system", b"id")` returns `HOWDAH_LOG`; the sink line has `"rule":"command_exec"`, `"action":"log"`, function `system`.
   - `sink_blocks_only_when_sink_mode_block` — `[sinks.command_exec]\nmode="block"`; a non-allowlisted command → `HOWDAH_BLOCK`; line `"action":"block"`.
-  - `command_allow_silences` — `[sinks.command_exec]\nmode="block"\nallow=["^id$"]`; `sink(c, COMMAND_EXEC, "system", b"id")` → `HOWDAH_ALLOW`, no sink line.
+  - `command_allow_silences` — `[sinks.command_exec]\nmode="block"\nallow=["id"]`; `sink(c, COMMAND_EXEC, "system", b"id")` → `HOWDAH_ALLOW`, no sink line.
   - `sink_log_omits_argument` — `sink(c, COMMAND_EXEC, "system", b"cat /etc/shadow")`; line contains `system` and `command_exec`, and does **not** contain `shadow` or `/etc/`.
   - `multiple_sink_hits_each_emit` — three `sink(...)` calls each produce a drainable line (take between calls); and a sink hit does not clobber a pending Layer-1/2 `log` line (stash a Layer-1 line via an input-var flood first, then a sink hit, assert both are retrievable from their own slots).
   - `unserialize_sink_off_by_default_is_allow` — default config; `sink(c, UNSERIALIZE, "unserialize", b"O:8:\"stdClass\":0:{}")` → `HOWDAH_ALLOW`, no line.
@@ -201,7 +200,7 @@
 - An `include` of a path outside `allow_paths` (with `allow_paths` set) logs `"rule":"include"`; a path inside is silent.
 - `unserialize` is **silent by default** (sink off); with `[sinks.unserialize] mode="detect"`, an `O:`-payload logs `"rule":"unserialize"` with the class name, never the payload.
 - With `howdah.mode = block` but `sinks.mode` unset, a guarded `system()` still **runs and only logs** (global block does not arm).
-- With `[sinks.command_exec] mode="block"`, a non-allowlisted `system('id')` is **neutralized**: returns false, `id` does not run, and the script **continues** to print a following marker; an `allow=["^id$"]` call runs normally.
+- With `[sinks.command_exec] mode="block"`, a non-allowlisted `system('id')` is **neutralized**: returns false, `id` does not run, and the script **continues** to print a following marker; an `allow=["id"]` call runs normally.
 
 - [ ] **Step 1:** Write `sinks_container.sh`: build `howdah-ext`, load it, run PHP CLI/built-in-server snippets for each assertion, grepping the event log.
 - [ ] **Step 2:** Write `sinks.sh` host driver (image check + `docker run -v …:ro`), mirroring `inspect.sh`.

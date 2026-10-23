@@ -40,7 +40,7 @@ const compare = [
       <p class="lede">Upload-part floods are the shape of the PHP2Shell attack. Howdah is a firewall that loads into PHP itself, so it protects even end-of-life PHP (5.4 to 8.1) that will never get the official fix — on the versions tested in the coverage table.</p>
       <p class="fine">Built for sysadmins who run PHP on their own servers, including servers stuck on old PHP. Howdah is defensive only: it recognizes and refuses abusive requests, nothing else.</p>
       <div class="cta">
-        <a class="btn primary" href="/install/">Install Howdah 1.0</a>
+        <a class="btn primary" href="/install/">Install Howdah 1.1</a>
         <a class="btn ghost" href="/coverage/">See exactly what has been tested</a>
         <a class="btn ghost" href="/demo/">Try the demo</a>
       </div>
@@ -84,7 +84,7 @@ const compare = [
 
   <section id="enforces">
     <div class="wrap">
-      <h2>What Howdah 1.0 enforces</h2>
+      <h2>Layer 1 — what Howdah enforces</h2>
       <p>These are the Layer-1 default limits. A request that crosses a limit has the offending data dropped and is logged; in block mode (or for a Critical rule in any mode) it is also refused with HTTP 403/413 and a request ID that matches the log line. Every limit is configurable in a TOML file. Numbers below are the shipped defaults.</p>
       <div class="cols two" style="margin-top:1.5rem">
         <div>
@@ -123,6 +123,41 @@ const compare = [
         </div>
       </div>
       <p class="legend" style="margin-top:1.5rem"><strong>Modes &amp; severity.</strong> Critical rules (the unambiguous resource-exhaustion shapes) block even in <code>detect</code> mode; Standard rules log in detect and block only in <code>block</code> mode. This is why the recommended &ldquo;start in detect&rdquo; rollout never leaves you open to PHP2Shell during the first hours. Full directive and rule reference: <a href="/docs/configuration/">Configuration</a>.</p>
+    </div>
+  </section>
+
+  <section id="inspection">
+    <div class="wrap">
+      <h2>Layer 2 — what Howdah inspects <span class="pill ok">1.1 · log-only</span></h2>
+      <p>Layer 1 limits the <em>shape</em> of a request. Layer 2 looks at the <em>content</em> of decoded request values: GET query parameters, POST fields, cookies and the URL path, through the same request hook Layer 1 uses. <strong>It detects and logs; it does not block by default.</strong></p>
+      <div class="cols two" style="margin-top:1.5rem">
+        <div>
+          <h3>Three classes of pattern</h3>
+          <div class="tablewrap" tabindex="0" role="region" aria-label="Layer 2 detection classes (scrolls sideways on narrow screens)">
+            <table>
+              <caption class="sr-only">Layer 2 detection classes with illustrative shapes</caption>
+              <thead><tr><th scope="col">Class</th><th scope="col">Rule name</th><th scope="col">Example shape</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">SQL injection</th><td><code>sql_injection</code></td><td><code>&#39; OR 1=1 --</code></td></tr>
+                <tr><th scope="row">Path traversal</th><td><code>path_traversal</code></td><td><code>../../etc/passwd</code></td></tr>
+                <tr><th scope="row">Command / code injection</th><td><code>command_injection</code></td><td><code>; cat /etc/passwd</code></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="legend">The examples illustrate each shape; they are not a complete list of what is matched. Cross-site scripting (XSS) is <strong>not</strong> covered.</p>
+          <h3 style="margin-top:1.5rem">How detection works</h3>
+          <p>A small, high-confidence signature scan that runs in linear time, so there is no catastrophic backtracking. Work is bounded per value and per request, so the scan itself cannot be turned into a denial of service; values past a budget are not scanned.</p>
+        </div>
+        <div>
+          <h3>Log-first, on purpose</h3>
+          <p>Layer 2 has its own <code>inspect.mode</code>, which defaults to <code>detect</code> (log only). It is independent of the global <code>howdah.mode</code>: setting <code>howdah.mode = block</code> does <strong>not</strong> arm it. To block, an operator sets <code>inspect.mode</code>, or one class, to <code>block</code> explicitly.</p>
+          <h3 style="margin-top:1.5rem">What a detection looks like</h3>
+          <p>One JSON log line carrying the rule class, the source (<code>get</code>, <code>post</code>, <code>cookie</code> or <code>path</code>) and the variable name. The matched value is never logged.</p>
+          <pre tabindex="0"><code>{`{"ts":"2026-10-23T09:41:02Z","id":"91ab3f","rule":"sql_injection","action":"log","ip":"203.0.113.7","method":"GET","uri":"/search.php","reason":"sql_injection pattern in get variable 'q'"}`}</code></pre>
+          <p class="legend">Illustrative. The query string is stripped from the logged <code>uri</code>; for a path detection the path itself is the logged URI.</p>
+        </div>
+      </div>
+      <p class="legend" style="margin-top:1.5rem"><strong>Honest caveat.</strong> Signature inspection is best-effort and can be bypassed, which is exactly why Layer 2 logs rather than blocks. Use the log to see what is happening, and fix the application (parameterized queries, path normalization, no shell calls on user input). To configure or enable it, see the <code>[inspect]</code> section of the <a href="/docs/configuration/#layer-2-inspection">configuration reference</a>.</p>
     </div>
   </section>
 

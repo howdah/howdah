@@ -86,6 +86,24 @@ self_test           = "off"</code></pre>
       </div>
       <p class="legend">Defaults are validated by the cross-version lab matrix and the false-positive corpus (zero-block at every value above). Rationale for each is in <a href={`${REPO}/blob/main/docs/config.md`}>docs/config.md</a> and the measurements in <a href={`${REPO}/blob/main/docs/coverage-data.md`}>docs/coverage-data.md</a>.</p>
 
+      <h2 id="layer-2-inspection">Layer 2 — input inspection (<code>[inspect]</code>)</h2>
+      <p><strong>These rules only log; they do not block any request by default.</strong> Layer 2 scans decoded GET, POST, cookie and path values for SQL-injection, path-traversal and command-injection shapes. <code>inspect.mode</code> is <strong>independent</strong> of the global <code>howdah.mode</code>: a global <code>howdah.mode = block</code> does <strong>not</strong> arm Layer 2. To block, set <code>inspect.mode</code> (or one class under <code>[inspect.rule_modes]</code>) to <code>"block"</code> explicitly. Signature inspection is best-effort and can be bypassed, which is why it logs rather than blocks. Layer 2 adds no php.ini directives.</p>
+      <pre tabindex="0"><code>[inspect]
+enabled   = true        <span class="c"># master on/off for Layer 2</span>
+mode      = "detect"    <span class="c"># detect = log only (default); block; off</span>
+sqli      = true        <span class="c"># per-class toggles</span>
+traversal = true
+cmdi      = true
+
+[inspect.limits]
+max_value_bytes = 16384     <span class="c"># scan at most this many bytes of one value</span>
+max_total_bytes = 2097152   <span class="c"># per-request aggregate scan budget</span>
+max_values      = 2000      <span class="c"># per-request value count budget</span>
+
+[inspect.rule_modes]        <span class="c"># optional per-class override of inspect.mode</span>
+<span class="c"># sql_injection = "block"   # example only; also path_traversal, command_injection</span></code></pre>
+      <p class="legend">The <code>[inspect]</code> table lives in the TOML file named by <code>howdah.config</code>, not in <code>howdah.ini</code>. A <code>[inspect.rule_modes]</code> entry overrides <code>inspect.mode</code> for that class only. Values past a scan budget are not scanned. Events carry the rule, source and variable name, never the matched value. Full reference: <a href={`${REPO}/blob/main/docs/config.md`}>docs/config.md</a>.</p>
+
       <h2>Rule modes and severity</h2>
       <p>Each <code>[rules]</code> key is a rule name set to <code>block</code>, <code>detect</code>, or <code>off</code>. Rules carry a severity:</p>
       <div class="cols two">
@@ -96,6 +114,7 @@ self_test           = "off"</code></pre>
         <div class="card">
           <h3>Standard</h3>
           <p>{standard.join(', ')}. These log in <code>detect</code> and block only in <code>block</code> mode — the shapes an unusual-but-legitimate client can hit.</p>
+          <p>Layer 2 adds <code>sql_injection</code>, <code>path_traversal</code> and <code>command_injection</code>, also severity Standard but <strong>log-only</strong>: they are governed by <code>inspect.mode</code>, not the global mode, so <code>mode = "block"</code> does not make them block.</p>
         </div>
       </div>
       <p class="legend">A few byte-limit <strong>rule</strong> names end <code>_len</code> where the matching <code>[limits]</code> <strong>directive</strong> ends <code>_bytes</code> (for example the rule <code>max_filename_len</code> for the directive <code>max_filename_bytes</code>).</p>

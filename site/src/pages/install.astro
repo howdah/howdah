@@ -1,6 +1,6 @@
 ---
 import Layout from '../layouts/Layout.astro';
-import { PKG, KEY_FPR, RELEASES } from '../lib/site';
+import { PKG, KEY_FPR, RELEASES, VERSION } from '../lib/site';
 
 const MINORS = ['5.4','5.5','5.6','7.0','7.1','7.2','7.3','7.4','8.0','8.1','8.2','8.3','8.4','8.5'];
 ---
@@ -100,7 +100,7 @@ sudo systemctl reload php8.1-fpm</code></pre>
   </section>
 </Layout>
 
-<script define:vars={{ PKG, RELEASES }}>
+<script define:vars={{ PKG, RELEASES, VERSION }}>
   const form = document.getElementById('picker');
   const result = document.getElementById('result-steps');
   const cgiNote = document.getElementById('cgi-note');
@@ -191,14 +191,14 @@ sudo systemctl reload php8.1-fpm</code></pre>
          '# -> PHP ' + minor + '.x, API <nnnnnnnn>, NTS, <extension_dir>, SAPIs: ...']);
       steps += step('Download, verify the signature, then install', 'Match the tarball to your PHP minor and Zend API number (the API line above).',
         ['B=https://github.com/howdah/howdah/releases/latest/download',
-         `T=howdah-1.0.0-php${minor}-<api>-linux-$(uname -m).tar.gz`,
+         `T=howdah-${VERSION}-php${minor}-<api>-linux-$(uname -m).tar.gz`,
          'curl -fLO $B/$T -O $B/SHA256SUMS -O $B/SHA256SUMS.asc -O $B/howdah-release-signing.asc',
          'sha256sum -c --ignore-missing SHA256SUMS',
          'gpg --import howdah-release-signing.asc',
          'gpg --verify SHA256SUMS.asc SHA256SUMS',
          'tar xzf $T',
-         `sudo cp howdah-1.0.0-php${minor}/howdah.so  "$(php-config --extension-dir)/"`,
-         `sudo cp howdah-1.0.0-php${minor}/howdah.ini <your PHP conf.d dir, e.g. /etc/php/${minor}/mods-available/>`]);
+         `sudo cp howdah-${VERSION}-php${minor}/howdah.so  "$(php-config --extension-dir)/"`,
+         `sudo cp howdah-${VERSION}-php${minor}/howdah.ini <your PHP conf.d dir, e.g. /etc/php/${minor}/mods-available/>`]);
       steps += step('Enable and verify', 'Howdah ships in detect mode; the critical limits still block.',
         ['php --ri howdah', 'howdah-check web https://your.site/', reload]);
       steps += step('Roll back', 'Remove the ini line (or the conf.d file) and reload.', [reload]);

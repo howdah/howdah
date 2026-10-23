@@ -34,6 +34,15 @@ SQL injection or XSS, and it does not fix the underlying PHP bug. We do not
 claim it blocks CVE-2026-109618 on a stock configuration; see
 [docs/coverage.md](docs/coverage.md) for what has actually been tested.
 
+## Coming in the next release (1.1): Layer 2 input inspection
+
+Layer 2 is implemented in the codebase but is **not in any published release
+yet** (1.0.0 is Layer 1 only). It inspects decoded GET/POST/cookie/path values
+for SQL injection, path traversal and command/code injection. It **detects and
+logs; it does not block by default**, and the matched value is never logged.
+Signature inspection is best-effort and can be bypassed. See the `[inspect]`
+section of [docs/config.md](docs/config.md) and the [CHANGELOG](CHANGELOG.md).
+
 ## PHP versions
 
 Built to target PHP 5.4 through 8.5 on Linux (NTS builds; CLI, FPM and Apache

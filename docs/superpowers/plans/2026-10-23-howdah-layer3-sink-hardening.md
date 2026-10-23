@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - **Log-first, never block by default — and a global `howdah.mode = block` must NOT arm Layer 3.** Layer-3 rules are `Severity::Standard`, resolved against `sinks.mode` (default `detect` = log) via a `SinkConfig::effective_mode` that ignores the global `block`, exactly like `InspectConfig`. Only an explicit `sinks.mode = block` (or a per-sink mode) blocks. Global `off` disables everything. (spec §2.3, §5.3, §10.2)
-- **Block = neutralize-and-continue, NOT bailout.** A blocked sink suppresses the call, returns false/NULL, emits a PHP warning + a log line, and lets execution continue. No `zend_bailout` mid-VM. (spec §5.4, §10.4)
+- **Block = neutralize-and-continue, NOT bailout.** A blocked sink suppresses the call, returns false/NULL, emits a PHP warning + a log line, and lets execution continue. No `zend_bailout` mid-VM. (spec §5.4, §10.4). **Proven (Task 0) for the function-swap sinks only: `command_exec` and `unserialize` support `block`; `include` and `eval` ship DETECT-ONLY in 1.2** — their block (opcode-neutralize) is deferred to the fast-follow. Setting `[sinks.include]`/`[sinks.eval]` `mode = "block"` therefore behaves as `detect` in 1.2 and the config docs say so.
 - **Per-hit logging, emitted at the call site.** Each sink hit writes its own line immediately (dedicated sink slot), outside the Layer-1/2 sticky `worst`/single-slot verdict, so nothing is dropped and the RSHUTDOWN 403 path never double-fires. (spec §5.5, §10.1)
 - **Never log the sink argument.** A Layer-3 event carries sink + function/construct name (+ class name for `unserialize`, a type not user data) only. The `log::EventRecord` privacy test must still pass unchanged. (spec §5.5)
 - **`command_exec` `allow` patterns are full-string anchored** (`^…$`); a substring match is a security hole. (spec §10.5)
@@ -158,7 +158,7 @@
 
 ### Task 5: Sink-hook C shim + bindgen + MINIT install + neutralize glue
 
-**Refuse idiom (proven in Task 0):** _<fill from Task 0: function = RETVAL_FALSE + return; opcode = (chosen idiom) OR include/eval block = detect-only fallback>_
+**Refuse idiom (PROVEN in Task 0, 2026-10-23 on 5.6/7.4/8.3):** function neutralize = `RETVAL_FALSE` + return without calling the original (no bailout) — confirmed: blocked `system()` returns false, the command does not run, the script continues, an unmarked call still runs. **`command_exec` and `unserialize` support block via this idiom. `include`/`eval` ship DETECT-ONLY in 1.2** (opcode-neutralize deferred to the fast-follow with phar/SSRF); their detect/log path (opcode handler + `DISPATCH`) is already proven (spec §9). So this task installs the opcode handler for include/eval in **log-only** form (chain always; never neutralize), and implements block only for the two function-swap sinks.
 
 **Files:**
 - Create: `crates/howdah-sys/sink_hook.c` (the productized hook: function-table swap for the exec family + `unserialize`; `ZEND_INCLUDE_OR_EVAL` opcode handler for include/require/eval; a `howdah_install_sink_hooks(decide_cb, emit_cb)` installer; neutralize on block per the Task-0 idiom). `#if PHP_VERSION_ID` splits the PHP 5 vs 7/8 ABIs (proven in spec §9).

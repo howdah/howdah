@@ -315,8 +315,15 @@ only.
 **10.4 Block = neutralize-and-continue, not bailout (reshapes §5.4).** The spike proved
 install + chain, not the refuse path, and a `zend_bailout` deep in the VM mid-call is an
 unproven longjmp. Resolved: block neutralizes the call the way PHP's own
-`disable_functions` does (suppress, return false/NULL, warn + log), no bailout. A Task-0
-refuse spike confirms it on 5.6/7.4/8.3 before the real build.
+`disable_functions` does (suppress, return false/NULL, warn + log), no bailout.
+**Task-0 refuse spike result (2026-10-23, on 5.6/7.4/8.3):** the function-swap
+neutralize (`RETVAL_FALSE` + return without calling the original) is **proven** — the
+blocked call returns false, does not run, and the script continues, on all three ABIs.
+So **`command_exec` and `unserialize` support `block` in 1.2.** The opcode-neutralize for
+`include`/`eval` was **not** pursued (fiddly per-version result-operand handling, and a
+clean fallback exists): **`include` and `eval` ship DETECT-ONLY in 1.2**, with their
+block deferred to the Layer-3 fast-follow (§8). Their detect/log path is already proven
+(§9).
 
 **10.5 `command_exec` `allow` patterns are full-string anchored.** A substring match
 would let an `allow` pattern `ls` also permit `ls; rm -rf /`, gutting the one place

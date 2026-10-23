@@ -5,6 +5,24 @@ is reproduced by committed scripts; no payload or exploit is used — all fixtur
 reproduce only the harmless *structure* of a PHP2Shell-shaped upload (part/field
 counts and sizes).
 
+**Headline coverage claim:** Howdah blocks abusive multipart part/file floods
+(the PHP2Shell attack *shape*) before memory exhaustion, at default limits, on
+every PHP version and SAPI run. This is NOT a claim that "Howdah blocks
+CVE-2026-109618 on stock config."
+
+**Scope caveat (read before STEP 1).** Our fixtures reproduce the harmless
+part/field-flood *structure* only, counted via the rfc1867 callback. We did NOT
+reproduce CVE-2026-109618's `session.upload_progress` header-parsing memory path,
+which the advisory says exhausts memory on DEFAULT config. So every "stock is not
+a threat" statement below is a statement about the flood *shape we built*, not
+about the actual CVE — we make NO claim about whether the real CVE is contained
+on a stock PHP box. What we DID measure: (a) stock PHP's own
+`max_input_vars`/`max_file_uploads` bound the flood shape we built (peak ≤33 MB);
+(b) on a box with those caps raised, the same shape reaches 127–173 MB and
+Howdah's count-based limits block it at defaults with a ~45× margin; (c) Howdah
+protects EOL PHP (5.x/7.x) that will never receive the official fix. The exact
+CVE mechanism should be re-verified against the official advisory (design §1).
+
 - STEP 1 gate (defaults vs memory): `lab/integration/step1_memory_container.sh`,
   `lab/integration/step1_raised_container.sh`; raw numbers in
   `lab/integration/step1-results/*.tsv`.
@@ -33,11 +51,15 @@ the defense; the count + length rules above are the real gate.
 Measured peak worker RSS (`/proc/<pid>/status:VmHWM`, which survives the block's
 `zend_bailout`) for a shaped request on PHP 5.6 / 7.3 / 8.4, NTS.
 
-### On a STOCK box the shaped flood is NOT a memory threat
+### On a STOCK box the reproduced part/field-FLOOD SHAPE is contained by PHP's own caps
+
+(Scope: this is about the part/field-flood *structure* we built — NOT the
+CVE-2026-109618 `session.upload_progress` header-parsing path, which we did not
+reproduce. See the scope caveat above.)
 
 Stock config (`memory_limit=128M`, `post_max_size=8M`, `max_input_vars=1000`,
-`max_file_uploads=20`): PHP's own caps hold peak RSS flat regardless of N, and
-on PHP 8.x additionally gate the rfc1867 callback:
+`max_file_uploads=20`): for our flood shape, PHP's own caps hold peak RSS flat
+regardless of N, and on PHP 8.x additionally gate the rfc1867 callback:
 
 | PHP | shape | parts sent | $_FILES/$_POST seen | peak RSS | Howdah (defaults) |
 |---|---|---|---|---|---|
@@ -47,10 +69,12 @@ on PHP 8.x additionally gate the rfc1867 callback:
 | 8.4 | field | 50000 | 1000 | 32 MB | not blocked (FORMDATA gated at 1000) — no threat |
 | 8.4 | file  | 50000 | 20   | 32 MB | not blocked (gated at 20) — no threat |
 
-So on stock config peak RSS never exceeds ~33 MB (vs the 128M limit) whether or
-not Howdah blocks: PHP's `max_input_vars`/`max_file_uploads` contain both the
-memory AND (on 8.x) the callback. There is nothing to exhaust and nothing to
-block. **The defense does not depend on these PHP caps** — see next.
+So for our flood shape on stock config, peak RSS never exceeds ~33 MB (vs the
+128M limit) whether or not Howdah blocks: PHP's `max_input_vars`/`max_file_uploads`
+contain both the memory AND (on 8.x) the callback for *this structure*. There is
+nothing for Howdah to add on this shape at stock caps. (This says nothing about
+the CVE's header-parsing path, which we did not reproduce.) **The defense does
+not depend on these PHP caps** — see next.
 
 ### On a RAISED-cap box the flood IS a DoS, and Howdah blocks it
 
@@ -69,21 +93,26 @@ The undefended file-flood reaches 127–173 MB inside an 8 MiB request — a gen
 memory-exhaustion DoS. At DEFAULT limits Howdah blocks every flood, holding the
 defended peak to 27–55 MB, well under 128M.
 
-### Verdict: defaults are correct, no lowering required
+### Verdict: defaults block the reproduced flood shape; no lowering required
 
-Reaching 128M needs ~90000 parts; `max_parts=2000` / `max_files=200` fire ~45×
-earlier, so the memory never climbs. Per the gate's own lowering criterion
-("if the attack drives memory toward 128M with FEWER parts than max_parts"),
-the answer is NO on every version, so `Limits::defaults()` is kept unchanged and
-the justification is recorded in `crates/howdah-core/src/limits.rs`.
+For the reproduced part/field-flood shape, reaching 128M needs ~90000 parts;
+`max_parts=2000` / `max_files=200` fire ~45× earlier, so the memory never climbs.
+Per the gate's own lowering criterion ("if the attack drives memory toward 128M
+with FEWER parts than max_parts"), the answer is NO on every version, so
+`Limits::defaults()` is kept unchanged and the justification is recorded in
+`crates/howdah-core/src/limits.rs`. (This verdict is scoped to the flood shape we
+built; it is not a verdict on CVE-2026-109618's header-parsing path, which was not
+reproduced here and should be re-verified against the advisory — design §1.)
 
 Callback-vs-PHP-caps confirmation (brief requirement):
 - `FORMDATA` fires **past** `max_input_vars` on 5.6/7.3 even at stock; on 8.x it
   is gated at `max_input_vars`, but raising the cap makes it fire past → blocked.
 - `FILE_START` is gated at `max_file_uploads` on all versions, but raising the
   cap makes it fire past → blocked at `max_files`.
-- In every case the gating cap also caps memory, so the no-block cases are
-  no-threat cases; the defense engages exactly when the threat exists.
+- For this flood shape, the gating cap also caps memory, so the no-block cases
+  are (for this shape) no-threat cases; Howdah's limits engage exactly when those
+  caps are raised. (Again, scoped to the reproduced shape, not the CVE's
+  header-parsing path.)
 
 ## STEP 2/3 — cross-version matrix & false-positive corpus
 
@@ -113,7 +142,8 @@ on every version (the real-exposure config; see STEP 1).
 | 8.1.34 | 14/14 PASS | 14/14 PASS | 14/14 PASS |
 | 8.4.27 | 14/14 PASS | 14/14 PASS | not-run (note 2) |
 
-Total this pass: 154 PASS / 0 FAIL / 7 SKIP (the 5.4 fpm row).
+Total this pass: 182 PASS / 0 FAIL / 7 SKIP (the 5.4 fpm row) — 154 cli+fpm plus
+28 apache (7.4 and 8.1, 14 each).
 
 - **client_ip**: populated and asserted exactly (`203.0.113.9` under fpm, `127.0.0.1`
   under apache). The PHP CLI built-in server does not expose `REMOTE_ADDR` via

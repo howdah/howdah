@@ -38,12 +38,15 @@ pub struct Limits {
 impl Limits {
     /// Default limits, VALIDATED by the Task-12 cross-version gate (not merely
     /// starting points). Measured on a stock box (memory_limit=128M,
-    /// post_max_size=8M) across PHP 5.6/7.3/8.4:
+    /// post_max_size=8M) across PHP 5.6/7.3/8.4 against a part/field-flood SHAPE
+    /// (structure only; this is NOT CVE-2026-109618's session.upload_progress
+    /// header-parsing path, which was not reproduced -- see docs/coverage-data.md):
     ///
-    /// * On stock config PHP's OWN caps (max_file_uploads=20, max_input_vars=1000)
-    ///   hold the shaped flood's peak worker RSS flat at ~20-33 MiB and, on PHP
-    ///   8.x, gate the rfc1867 callback entirely -- so the flood is already
-    ///   contained and there is nothing for Howdah to block.
+    /// * For that flood shape on stock config, PHP's OWN caps (max_file_uploads=20,
+    ///   max_input_vars=1000) hold peak worker RSS flat at ~20-33 MiB and, on PHP
+    ///   8.x, gate the rfc1867 callback entirely -- so this shape is already
+    ///   contained and there is nothing for Howdah to add (no claim is made about
+    ///   the CVE's header-parsing path on stock config).
     /// * The real exposure is a box with those caps RAISED. There the callback
     ///   fires unbounded and, within the stock 8 MiB post body, the undefended
     ///   flood drives peak RSS to ~127 MiB (8.4) / ~173 MiB (5.6) -- a genuine

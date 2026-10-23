@@ -29,8 +29,8 @@ const ranDate = (coverage.generated || '').slice(0, 10);
   <header>
   <div class="status" role="note" aria-label="Project status">
     <div class="wrap">
-      <strong>Pre-release</strong>
-      <p>Howdah is under active development. Release 0.1 is not published yet, so nothing here is ready for a production server. This page describes what 0.1 is being built and tested to do.</p>
+      <strong>Released</strong>
+      <p><a href={REPO + '/releases/tag/v0.1.0'}>Howdah 0.1.0 is released.</a> It is an early 0.x release: the scope is deliberately narrow (multipart limits) and defaults may still change. Start in detect mode and read the coverage table for what has been tested.</p>
     </div>
   </div>
 
@@ -67,7 +67,8 @@ const ranDate = (coverage.generated || '').slice(0, 10);
         <p class="lede">That is the shape of the PHP2Shell attack. Howdah is a firewall that loads into PHP itself, so it protects even end-of-life PHP (5.4 to 8.1) that will not get the official fix, on the versions tested in the table below.</p>
         <p class="fine">Built for sysadmins who run PHP on their own servers, including servers stuck on old PHP versions. Howdah is defensive only: it recognizes and refuses abusive requests, nothing else.</p>
         <div class="cta">
-          <a class="btn primary" href="#coverage">See exactly what has been tested</a>
+          <a class="btn primary" href={REPO + '/releases/tag/v0.1.0'}>Download 0.1.0</a>
+          <a class="btn ghost" href="#coverage">See exactly what has been tested</a>
           <a class="btn ghost" href={REPO}>View on GitHub</a>
         </div>
       </div>
@@ -194,7 +195,7 @@ const ranDate = (coverage.generated || '').slice(0, 10);
     <section id="install">
       <div class="wrap">
         <h2>Install, verify, roll back</h2>
-        <p>These are the manual steps planned for 0.1: a signed tarball per PHP minor version. Package repositories (apt, yum) arrive later. The example is PHP 7.3 with PHP-FPM on Ubuntu 16.04; other setups use the same steps with different paths. <strong>Nothing is released yet</strong>, so treat this as a preview of the experience.</p>
+        <p>Version 0.1.0 is installed by hand from a signed tarball, one per PHP minor version, from the <a href={REPO + '/releases/tag/v0.1.0'}>v0.1.0 release page</a>. Package repositories (apt, yum) are not available yet. The example is PHP 7.3 with PHP-FPM on Ubuntu 16.04; other setups use the same steps with different paths. Start in detect mode, and check the <a href="#coverage">coverage table</a> for your PHP version first.</p>
         <ol class="steps">
           <li>
             <h3>See which PHP you have</h3>
@@ -204,13 +205,20 @@ howdah-check detect
 <span class="c"># -> PHP 7.3.33, API 20180731, NTS, /usr/lib/php/20180731, SAPIs: cli fpm</span></code></pre>
           </li>
           <li>
-            <h3>Verify the download, then install it</h3>
-            <p>Check the signed checksums, then copy the extension and its config into place.</p>
-<pre tabindex="0"><code>sha256sum -c --ignore-missing SHA256SUMS
+            <h3>Download, verify, then install</h3>
+            <p>Pick the tarball whose name matches your PHP minor version and Zend API number (the <code>API</code> line above; it is also in <code>php -i | grep 'PHP API'</code>). Download it with <code>SHA256SUMS</code>, <code>SHA256SUMS.asc</code> and <code>howdah-release-signing.asc</code> (the public key) from the release page, then check the checksum and the signature before installing. The signing key's primary fingerprint is <code>1152 1035 C600 F638 31F8 2551 2087 B872 0997 807B</code>; compare it with what <code>gpg</code> prints.</p>
+<pre tabindex="0"><code>B=https://github.com/howdah/howdah/releases/download/v0.1.0
+T=howdah-0.1.0-php7.3-20180731-linux-x86_64.tar.gz
+curl -fLO $B/$T -O $B/SHA256SUMS -O $B/SHA256SUMS.asc -O $B/howdah-release-signing.asc
+
+sha256sum -c --ignore-missing SHA256SUMS
+gpg --import howdah-release-signing.asc
 gpg --verify SHA256SUMS.asc SHA256SUMS
-tar xzf howdah-0.1.0-php7.3-20180731-linux-x86_64.tar.gz
+
+tar xzf $T
 sudo cp howdah-0.1.0-php7.3/howdah.so /usr/lib/php/20180731/
 sudo cp howdah-0.1.0-php7.3/howdah.ini /etc/php/7.3/mods-available/
+sudo install -m 0755 howdah-0.1.0-php7.3/howdah-check /usr/local/bin/
 <span class="c"># or build from source against your PHP headers with cargo and php-config</span></code></pre>
           </li>
           <li>

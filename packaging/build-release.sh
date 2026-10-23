@@ -14,9 +14,13 @@
 # Env:
 #   HOWDAH_VERSION   release version string for tarball names (default: workspace version)
 #   KEEP_IMAGE=1     reuse an existing `howdah-release` image, skip docker build
+#   HOWDAH_ARCH      target arch: x86_64 (default) or aarch64. aarch64 builds in
+#                    packaging/release.aarch64.Dockerfile under --platform linux/arm64
+#                    (QEMU locally, native on an arm64 runner); every minor uses
+#                    from-source PHP headers (Remi has no aarch64 EL7 packages).
 #
 # Output: packaging/out/
-#   howdah-<version>-php<minor>-<api>-linux-x86_64.tar.gz   (per minor)
+#   howdah-<version>-php<minor>-<api>-linux-<arch>.tar.gz   (per minor; arch = x86_64|aarch64)
 #   howdah-check                                            (standalone, top-level)
 #   build-report.tsv                                        (what was built)
 # Signing (SHA256SUMS + detached signature) is a separate step: packaging/sign.sh
@@ -24,7 +28,23 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="$REPO_ROOT/packaging/out"
-IMAGE="${HOWDAH_RELEASE_IMAGE:-howdah-release}"
+
+# Target arch. x86_64 (default) is exactly the historical behavior; aarch64
+# swaps the Dockerfile, image name, docker --platform and tarball suffix.
+ARCH="${HOWDAH_ARCH:-x86_64}"
+case "$ARCH" in
+  x86_64)
+    IMAGE="${HOWDAH_RELEASE_IMAGE:-howdah-release}"
+    DOCKERFILE="$REPO_ROOT/packaging/release.Dockerfile"
+    PLATFORM_ARGS=()
+    ;;
+  aarch64)
+    IMAGE="${HOWDAH_RELEASE_IMAGE:-howdah-release-aarch64}"
+    DOCKERFILE="$REPO_ROOT/packaging/release.aarch64.Dockerfile"
+    PLATFORM_ARGS=(--platform linux/arm64)
+    ;;
+  *) echo "FATAL: unsupported HOWDAH_ARCH '$ARCH' (x86_64|aarch64)" >&2; exit 2 ;;
+esac
 
 # Full supported matrix (PHP 5.4 .. 8.5). Default build set when none given.
 ALL_MINORS=(5.4 5.5 5.6 7.0 7.1 7.2 7.3 7.4 8.0 8.1 8.2 8.3 8.4 8.5)
@@ -45,11 +65,31 @@ php_src_pin() {
   esac
 }
 
+# aarch64 has no Remi EL7 packages, so EVERY minor builds from source headers.
+# Same rules as php_src_pin (real current patch + sha256) for the minors the
+# x86_64 path takes from Remi (5.4 .. 8.1); 8.2+ reuse php_src_pin.
+php_src_pin_aarch64() {
+  case "$1" in
+    5.4) echo "5.4.45 25bc4723955f4e352935258002af14a14a9810b491a19400d76fcdfa9d04b28f" ;;
+    5.5) echo "5.5.38 4f458c9b504269615715a62f182b7c2f89bb8284f484befc221b56a1571b506e" ;;
+    5.6) echo "5.6.40 56fb9878d12fdd921f6a0897e919f4e980d930160e154cbde2cc6d9206a27cac" ;;
+    7.0) echo "7.0.33 d71a6ecb6b13dc53fed7532a7f8f949c4044806f067502f8fb6f9facbb40452a" ;;
+    7.1) echo "7.1.33 0055f368ffefe51d5a4483755bd17475e88e74302c08b727952831c5b2682ea2" ;;
+    7.2) echo "7.2.34 8b2777c741e83f188d3ca6d8e98ece7264acafee86787298fae57e05d0dddc78" ;;
+    7.3) echo "7.3.33 9a369c32c6f52036b0a890f290327f148a1904ee66aa56e2c9a7546da6525ec8" ;;
+    7.4) echo "7.4.33 5a2337996f07c8a097e03d46263b5c98d2c8e355227756351421003bea8f463e" ;;
+    8.0) echo "8.0.30 449d2048fcb20a314d8c218097c6d1047a9f1c5bb72aa54d5d3eba0a27a4c80c" ;;
+    8.1) echo "8.1.34 3c5b060ec8e0d5dd1d8237823f3161cc8bc5342aab3c46893eba9857759c4bfa" ;;
+    *)   php_src_pin "$1" ;;
+  esac
+}
+
 MINORS=("$@")
 [ ${#MINORS[@]} -eq 0 ] && MINORS=("${ALL_MINORS[@]}")
 
 HOWDAH_VERSION="${HOWDAH_VERSION:-$(grep -m1 '^version' "$REPO_ROOT/Cargo.toml" | sed -E 's/.*"([^"]+)".*/\1/')}"
 echo "== Howdah release build: version $HOWDAH_VERSION, minors: ${MINORS[*]}"
+[ "$ARCH" = x86_64 ] || echo "== target arch: $ARCH"
 
 mkdir -p "$OUT"
 
@@ -57,8 +97,8 @@ mkdir -p "$OUT"
 if [ "${KEEP_IMAGE:-0}" = 1 ] && docker image inspect "$IMAGE" >/dev/null 2>&1; then
   echo "== reusing existing image $IMAGE"
 else
-  echo "== building $IMAGE (packaging/release.Dockerfile)"
-  docker build -f "$REPO_ROOT/packaging/release.Dockerfile" -t "$IMAGE" "$REPO_ROOT"
+  echo "== building $IMAGE (packaging/$(basename "$DOCKERFILE"))"
+  docker build ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} -f "$DOCKERFILE" -t "$IMAGE" "$REPO_ROOT"
 fi
 
 # ---- 2. build each minor in a throwaway container --------------------------
@@ -72,7 +112,8 @@ for minor in "${MINORS[@]}"; do
   echo "==  building PHP $minor"
   echo "======================================================================"
   src_flag=""; src_env=()
-  if pin="$(php_src_pin "$minor")"; then
+  pin_fn=php_src_pin; [ "$ARCH" = x86_64 ] || pin_fn=php_src_pin_aarch64
+  if pin="$("$pin_fn" "$minor")"; then
     src_flag="--from-source"
     src_env=(-e "HOWDAH_PHP_SRC_VERSION=${pin%% *}" -e "HOWDAH_PHP_SRC_SHA256=${pin##* }")
     echo "   (from-source headers: PHP ${pin%% *})"
@@ -80,6 +121,8 @@ for minor in "${MINORS[@]}"; do
 
   stage="$(mktemp -d)"
   if docker run --rm \
+        ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} \
+        -e "HOWDAH_ARCH=$ARCH" \
         -v "$REPO_ROOT":/src:ro \
         -v "$stage":/out \
         -w /src \
@@ -122,7 +165,7 @@ Verify this download (see packaging/howdah-release-signing.asc in the repo):
   gpg --verify SHA256SUMS.asc SHA256SUMS
   sha256sum -c SHA256SUMS
 EOF
-    tarball="$OUT/howdah-$HOWDAH_VERSION-php$minor-$api-linux-x86_64.tar.gz"
+    tarball="$OUT/howdah-$HOWDAH_VERSION-php$minor-$api-linux-$ARCH.tar.gz"
     tar -C "$pkgdir" -czf "$tarball" "$root"
     rm -rf "$pkgdir"
 

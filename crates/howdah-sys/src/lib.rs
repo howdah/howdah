@@ -13,3 +13,10 @@
 #![allow(clippy::all, improper_ctypes, dead_code)]
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+
+extern "C" {
+    /// `ZEND_MODULE_BUILD_ID` from the compiled-against PHP headers (via
+    /// `shim.c`): the per-generation ABI tag the loader checks. Points at a
+    /// static C string literal; never freed.
+    pub fn howdah_sys_build_id() -> *const ::std::ffi::c_char;
+}

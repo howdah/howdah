@@ -28,6 +28,17 @@ fn main() {
     assert!(out.status.success(), "`{php_config} --includes` failed");
     let includes = String::from_utf8(out.stdout).expect("php-config output not UTF-8");
 
+    // Compile the C shim (ZEND_MODULE_BUILD_ID) against the same headers.
+    println!("cargo:rerun-if-changed=shim.c");
+    let mut shim = cc::Build::new();
+    shim.file("shim.c").warnings(false);
+    for inc in includes.split_whitespace() {
+        if let Some(dir) = inc.strip_prefix("-I") {
+            shim.include(dir);
+        }
+    }
+    shim.compile("howdah_sys_shim");
+
     let bindings = bindgen::Builder::default()
         .header("wrapper.h")
         .clang_args(includes.split_whitespace())
@@ -39,10 +50,12 @@ fn main() {
         .allowlist_type("multipart_event_.*|php_rfc1867_.*")
         .allowlist_function("php_rfc1867_.*|rfc1867_.*")
         // Module startup machinery.
-        .allowlist_type("_?zend_module_entry|_?zend_function_entry|zend_ini_entry|_?zend_ini_entry")
+        .allowlist_type("_?zend_module_entry|_?zend_function_entry|zend_ini_entry|_?zend_ini_entry|_?zend_ini_entry_def")
         .allowlist_function("zend_register_ini_entries|zend_unregister_ini_entries|zend_parse_parameters|php_info_print_table_.*")
+        // Reading registered ini entries, and request termination.
+        .allowlist_function("zend_ini_string|zend_ini_long|_?zend_bailout")
         // SAPI.
-        .allowlist_type("_?sapi_module_struct|sapi_request_info|_?sapi_globals_struct")
+        .allowlist_type("_?sapi_module_struct|sapi_request_info|_?sapi_globals_struct|_?sapi_header_struct")
         .allowlist_var("sapi_module|sapi_globals")
         .allowlist_function("sapi_.*")
         // Module-entry constants the glue must fill in (macros; absent ones are ignored).

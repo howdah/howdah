@@ -9,9 +9,11 @@ license.workspace = true
 # No default feature: a plain `cargo build` never needs PHP headers.
 # Enable exactly one of these, inside an environment whose `php-config`
 # (or $PHP_CONFIG) matches that PHP generation.
-php5 = ["dep:bindgen"]
-php7 = ["dep:bindgen"]
-php8 = ["dep:bindgen"]
+php5 = ["dep:bindgen", "dep:cc"]
+php7 = ["dep:bindgen", "dep:cc"]
+php8 = ["dep:bindgen", "dep:cc"]
 
 [build-dependencies]
 bindgen = { version = "0.71", optional = true }
+# Compiles shim.c (ZEND_MODULE_BUILD_ID) against the selected PHP's headers.
+cc = { version = "1", optional = true }

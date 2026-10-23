@@ -3,9 +3,7 @@
 All notable changes to Howdah are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] - planned for 1.1.0
-
-Not yet in any published release.
+## [1.1.0] - 2026-10-23
 
 ### Added
 - Layer 2 input inspection: content inspection of decoded GET, POST, cookie and

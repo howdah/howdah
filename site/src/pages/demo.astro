@@ -1,0 +1,138 @@
+---
+import Layout from '../layouts/Layout.astro';
+
+// Sample metadata for the no-JS render — mirrors site/demo/samples.js (which
+// supplies the actual request bodies when JavaScript runs the real core).
+const samples = [
+  { id: 'normal', title: 'Normal upload form', shape: 'Three text fields and one small file.', expect: 'Allow' },
+  { id: 'flood', title: 'Part flood (PHP2Shell-shaped)', shape: 'About 2,500 tiny empty parts — structure only, no payload.', expect: 'Block · max_parts' },
+  { id: 'malformed', title: 'Malformed multipart', shape: 'A part with no Content-Disposition header.', expect: 'Block · malformed_multipart' },
+  { id: 'filename', title: 'Oversized filename', shape: 'A filename 600 characters long (limit: 512 bytes).', expect: 'Block · max_filename_len' },
+];
+---
+<Layout
+  title="Howdah demo — run the real core in your browser"
+  description="Pick a sample request and see what Howdah would do. The actual Howdah core, compiled to WebAssembly, runs in your browser — nothing is sent to any server."
+  path="/demo/"
+>
+  <div class="pagehead">
+    <div class="wrap">
+      <p class="crumbs"><a href="/">Home</a> / <span aria-current="page">Demo</span></p>
+      <h1>Try Howdah in your browser</h1>
+      <p class="lede">Pick a sample request and see Howdah's verdict. This runs the <strong>real</strong> Howdah core, compiled to WebAssembly, right here in your browser — nothing is sent to any server, and this is not a scan of your site.</p>
+    </div>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <div class="cols two">
+        <div>
+          <form id="demo" aria-label="Choose a sample request">
+            <fieldset>
+              <legend>Sample request (benign; shape only)</legend>
+              {samples.map((s, i) => (
+                <label>
+                  <input type="radio" name="sample" value={s.id} checked={i === 0} />
+                  {s.title}
+                  <small>{s.shape} &mdash; expected: {s.expect}</small>
+                </label>
+              ))}
+            </fieldset>
+            <p><button type="button" id="run" class="btn primary" disabled>Loading core&hellip;</button></p>
+          </form>
+          <p class="legend" id="load-note">The WebAssembly core (~430&nbsp;KB) loads when you first run a sample. Default configuration: block mode.</p>
+        </div>
+
+        <div>
+          <div id="result" class="result" aria-live="polite" aria-labelledby="result-h">
+            <h2 id="result-h" style="font-size:1.2rem;margin-top:0">Verdict</h2>
+            <p class="verdict-empty">Choose a sample and select <strong>Run</strong> to see what Howdah does.</p>
+          </div>
+          <noscript>
+            <div class="note">
+              <h3>JavaScript is off</h3>
+              <p>The live demo runs the core in your browser, which needs JavaScript. The expected verdict for each sample is listed beside it on the left. To see the real logic without the demo, read the <a href="/coverage/">coverage page</a> and the <a href="/docs/configuration/">rule reference</a>.</p>
+            </div>
+          </noscript>
+        </div>
+      </div>
+
+      <p class="legend">The samples recreate only the harmless <em>structure</em> of each request — counts and sizes, never a working exploit. The verdict, rule name and reason come straight from the same core that ships in the extension.</p>
+    </div>
+  </section>
+</Layout>
+
+<script is:inline src="/demo/howdah-wasm.js"></script>
+<script is:inline src="/demo/samples.js"></script>
+<script is:inline>
+  (function () {
+    var form = document.getElementById('demo');
+    var runBtn = document.getElementById('run');
+    var result = document.getElementById('result');
+    var loadNote = document.getElementById('load-note');
+    var H = window.HowdahWasm;
+    var samples = window.HowdahSamples || [];
+    var byId = {};
+    samples.forEach(function (s) { byId[s.id] = s; });
+
+    function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+    function selected() {
+      var r = form.elements['sample'];
+      return (r && (r.value || (r[0] && Array.prototype.filter.call(r, function (x) { return x.checked; })[0].value))) || 'normal';
+    }
+
+    if (!H || !samples.length) {
+      runBtn.textContent = 'Demo unavailable';
+      return;
+    }
+    runBtn.disabled = false;
+    runBtn.textContent = 'Run in your browser';
+
+    function show(verdict) {
+      var action = (verdict.action || 'allow').toLowerCase();
+      var cls = action === 'block' ? 'block' : action === 'detect' ? 'log' : 'allow';
+      var label = action === 'block' ? 'Blocked' : action === 'detect' ? 'Logged (detect)' : 'Allowed';
+      result.innerHTML =
+        '<h2 id="result-h" style="font-size:1.2rem;margin-top:0">Verdict</h2>' +
+        '<p class="verdict ' + cls + '">' + label + '</p>' +
+        '<dl>' +
+        '<dt>Action</dt><dd>' + esc(verdict.action || 'allow') + '</dd>' +
+        '<dt>Rule</dt><dd>' + esc(verdict.rule || '—') + '</dd>' +
+        '<dt>Reason</dt><dd>' + esc(verdict.reason || 'within all limits') + '</dd>' +
+        '</dl>';
+    }
+
+    function run() {
+      var s = byId[selected()];
+      if (!s) return;
+      runBtn.disabled = true;
+      runBtn.textContent = 'Running…';
+      Promise.resolve()
+        .then(function () { return H.analyze('', s.build()); })
+        .then(function (verdict) { show(verdict); })
+        .catch(function (e) {
+          result.innerHTML = '<h2 id="result-h" style="font-size:1.2rem;margin-top:0">Verdict</h2>' +
+            '<p class="verdict block">Could not run</p><p>' + esc(e && e.message || e) + '</p>';
+        })
+        .then(function () { runBtn.disabled = false; runBtn.textContent = 'Run in your browser'; loadNote.textContent = 'Running the real core locally — nothing left your browser.'; });
+    }
+
+    runBtn.addEventListener('click', run);
+    // Pre-warm the wasm so the first run is instant (best-effort).
+    H.load('/demo/howdah_wasm.wasm').catch(function () {});
+  })();
+</script>
+
+<style>
+  #demo fieldset { border: 1px solid var(--rule); background: var(--surface); border-radius: 10px; margin: 0 0 1rem; padding: .75rem 1.1rem 1rem; }
+  #demo legend { font-weight: 600; font-family: var(--display); padding: 0 .4rem; }
+  #demo label { display: block; padding: .5rem 0; cursor: pointer; min-height: 44px; }
+  #demo label small { display: block; color: var(--muted); margin-left: 1.9rem; font-size: .85rem; }
+  #demo input[type=radio] { margin-right: .7rem; width: 1.15rem; height: 1.15rem; vertical-align: middle; }
+  .result { background: var(--surface); border: 2px solid var(--rule); border-radius: 10px; padding: 1.1rem 1.3rem; min-height: 8rem; }
+  .verdict { font-size: 1.5rem; font-weight: 700; font-family: var(--display); margin: .2rem 0 .6rem; }
+  .verdict.allow { color: var(--ok); } .verdict.log { color: var(--hot); } .verdict.block { color: var(--no); }
+  .verdict-empty { color: var(--muted); }
+  .result dl { margin: .4rem 0 0; display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; }
+  .result dt { color: var(--muted); font-size: .9rem; } .result dd { margin: 0; overflow-wrap: anywhere; }
+</style>

@@ -52,9 +52,9 @@ done
 check() {
   : > "$LOG"
   if [ "$2" = GET ]; then
-    code=$(curl -s -o "$WORK/r.txt" -w '%{http_code}' -G --data-urlencode "q=$4" http://127.0.0.1:8090/)
+    code=$(curl -s -o "$WORK/r.txt" -w '%{http_code}' -G --data-urlencode "q=$4" http://127.0.0.1:8090/) || fail "curl failed"
   else
-    code=$(curl -s -o "$WORK/r.txt" -w '%{http_code}' --data-urlencode "q=$4" http://127.0.0.1:8090/)
+    code=$(curl -s -o "$WORK/r.txt" -w '%{http_code}' --data-urlencode "q=$4" http://127.0.0.1:8090/) || fail "curl failed"
   fi
   [ "$code" = 200 ] || fail "$1 $2: expected 200 (log-only), got $code"
   grep -q '^OK ' "$WORK/r.txt" || fail "$1 $2: app did not run"
@@ -74,9 +74,9 @@ done
 # benign: realistic free text must produce no event at all
 : > "$LOG"
 for v in "operating system (Linux)" "Thanks; update your profile" "name=O'Brien" "reports/2024/q1.pdf" 'use `foo` here'; do
-  code=$(curl -s -o "$WORK/r.txt" -w '%{http_code}' -G --data-urlencode "q=$v" http://127.0.0.1:8090/)
+  code=$(curl -s -o "$WORK/r.txt" -w '%{http_code}' -G --data-urlencode "q=$v" http://127.0.0.1:8090/) || fail "curl failed"
   [ "$code" = 200 ] || fail "benign GET '$v': got $code"
-  code=$(curl -s -o "$WORK/r.txt" -w '%{http_code}' --data-urlencode "q=$v" http://127.0.0.1:8090/)
+  code=$(curl -s -o "$WORK/r.txt" -w '%{http_code}' --data-urlencode "q=$v" http://127.0.0.1:8090/) || fail "curl failed"
   [ "$code" = 200 ] || fail "benign POST '$v': got $code"
 done
 if [ -s "$LOG" ]; then fail "benign requests produced events"; fi

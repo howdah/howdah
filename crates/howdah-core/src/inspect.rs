@@ -229,19 +229,12 @@ fn stacked_statement(s: &[u8], j: usize) -> bool {
     false
 }
 
-const BINARIES: [&[u8]; 14] = [
+const BINARIES:[&[u8]; 14] = [
     b"cat", b"ls", b"id", b"whoami", b"uname", b"wget", b"curl", b"nc", b"ncat", b"bash", b"sh",
     b"ping", b"python", b"perl",
 ];
 const SINKS: [&[u8]; 8] = [
-    b"system",
-    b"exec",
-    b"shell_exec",
-    b"passthru",
-    b"proc_open",
-    b"popen",
-    b"eval",
-    b"assert",
+    b"system", b"exec", b"shell_exec", b"passthru", b"proc_open", b"popen", b"eval", b"assert",
 ];
 
 fn cmdi(s: &[u8]) -> bool {
@@ -319,10 +312,7 @@ mod tests {
         );
         assert_eq!(scan(b"admin'--", Source::Post, &d()), Some(SqlInjection));
         assert_eq!(scan(b"\" OR 'a'='a", Source::Get, &d()), Some(SqlInjection));
-        assert_eq!(
-            scan(b"x; DROP TABLE t", Source::Get, &d()),
-            Some(SqlInjection)
-        );
+        assert_eq!(scan(b"x; DROP TABLE t", Source::Get, &d()), Some(SqlInjection));
         for v in [
             &b"1; DELETE FROM users"[..],
             b"1; update users set admin=1",
@@ -339,20 +329,10 @@ mod tests {
 
     #[test]
     fn traversal_caught() {
+        assert_eq!(scan(b"../../etc/passwd", Source::Get, &d()), Some(PathTraversal));
+        assert_eq!(scan(b"/proc/self/environ", Source::Get, &d()), Some(PathTraversal));
         assert_eq!(
-            scan(b"../../etc/passwd", Source::Get, &d()),
-            Some(PathTraversal)
-        );
-        assert_eq!(
-            scan(b"/proc/self/environ", Source::Get, &d()),
-            Some(PathTraversal)
-        );
-        assert_eq!(
-            scan(
-                b"php://filter/convert.base64-encode/resource=x",
-                Source::Get,
-                &d()
-            ),
+            scan(b"php://filter/convert.base64-encode/resource=x", Source::Get, &d()),
             Some(PathTraversal)
         );
     }
@@ -367,18 +347,8 @@ mod tests {
 
     #[test]
     fn cmdi_caught() {
-        for v in [
-            &b"; cat /etc/passwd"[..],
-            b"$(id)",
-            b"`whoami`",
-            b"system('ls')",
-        ] {
-            assert_eq!(
-                scan(v, Source::Get, &d()),
-                Some(CommandInjection),
-                "{:?}",
-                v
-            );
+        for v in [&b"; cat /etc/passwd"[..], b"$(id)", b"`whoami`", b"system('ls')"] {
+            assert_eq!(scan(v, Source::Get, &d()), Some(CommandInjection), "{:?}", v);
         }
     }
 

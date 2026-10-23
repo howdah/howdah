@@ -201,7 +201,7 @@ Memory measurements and the reasoning behind the default limits are in
 
 Layer 2 **detects and logs** SQLi, path-traversal and command-injection
 *shapes* in GET/POST/cookie/path values; it does **not** block by default and
-is best-effort, so it can be bypassed. Lab-verified end to end on PHP 8.3 and
-7.4 (cli-server); the scanners are version-independent, so matching is the
+is best-effort, so it can be bypassed. Lab-verified end to end (GET and POST only) on PHP 8.3 and
+7.4 (cli-server); the scanners are version-independent, so matching should be the
 same on 5.4-8.5. Details: [coverage-data.md](coverage-data.md#howdah-10-layer-2-input-inspection-coverage-data-task-8). It is not part of the
 tables above.

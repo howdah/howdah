@@ -359,6 +359,6 @@ payload bytes; and benign GET and POST requests produced zero events.
 
 Other versions and SAPIs were **not** run for Layer 2. The scanners are
 version-independent pure Rust in `howdah-core`, with no PHP calls inside them,
-so matching behavior is identical across PHP 5.4-8.5. The version-dependent
+so matching behavior should be identical across PHP 5.4-8.5 (an inference, not a per-version lab result). The version-dependent
 part is only the input-filter hook wiring, which was exercised on the two
 versions above.

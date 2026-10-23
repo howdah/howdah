@@ -105,7 +105,7 @@ pub unsafe extern "C" fn get_module() -> *mut sys::zend_module_entry {
         name: NAME.as_ptr() as *const c_char,
         module_startup_func: Some(minit),
         module_shutdown_func: Some(mshutdown),
-        request_startup_func: Some(rinit),
+        request_startup_func: None,
         request_shutdown_func: Some(rshutdown),
         info_func: Some(minfo),
         version: VERSION.as_ptr() as *const c_char,
@@ -166,76 +166,6 @@ pub(crate) unsafe fn maybe_begin() {
     );
     // ip/method/uri outlive this call's request_begin, which copies them.
     // (BEGUN was latched at the top, before the re-entrant sapi_getenv.)
-}
-
-/// Request startup (RINIT): the php-cgi argument-injection virtual patch
-/// (CVE-2012-1823). Runs once at the start of every request, BEFORE the script.
-/// Only under the php-cgi / php-cgi-fcgi SAPI does the argv-injection bug exist,
-/// so we refuse a query string of the vulnerable shape here, before PHP hands it
-/// to the CGI binary as command-line arguments. Under any other SAPI the core is
-/// called with `is_cgi=0` and the patch never fires.
-///
-/// RINIT is bailout-safe (it runs before the script), so on a Block we emit the
-/// 403 and `zend_bailout` right here — the only refusal-before-script path in the
-/// glue. The whole body is panic-guarded (fail-open); the longjmp happens only
-/// AFTER `catch_unwind` returns, never across it.
-///
-/// # Safety
-/// Called by PHP once per request at startup; `CTX` is live.
-unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
-    let decision = catch_unwind(AssertUnwindSafe(|| cgi_check())).unwrap_or(None);
-    if let Some((status, request_id)) = decision {
-        // Refuse before the script runs. Mark the request ended so the post-bail
-        // RSHUTDOWN does not end/respond a second time (mirrors the multipart
-        // END path, which sets ENDED before its own bail).
-        ENDED = true;
-        rfc1867::emit_and_bail(status, request_id); // never returns (longjmp)
-    }
-    SUCCESS
-}
-
-/// The CGI virtual-patch check, run inside RINIT's panic guard. Begins the core
-/// request (idempotent; the input_filter has usually begun it already), reads
-/// the SAPI name and raw query string from the SAPI globals (both may be NULL),
-/// and runs the core's query-string check with `is_cgi` set ONLY for the exact
-/// php-cgi SAPI names. On Block it writes the log line and returns the response
-/// (status, request_id) for the caller to emit-and-bail with. `None` otherwise.
-unsafe fn cgi_check() -> Option<(c_int, String)> {
-    maybe_begin();
-
-    // is_cgi is EXACT-match: only the php-cgi binary (`cgi`) and its FastCGI
-    // front-end (`cgi-fcgi`) carry the CVE-2012-1823 argv-injection bug. We must
-    // NOT substring-match "cgi": php-fpm reports `fpm-fcgi` and is not affected,
-    // and a substring match would be a false positive on every FPM request.
-    let name = rfc1867::cbytes((*ptr::addr_of!(sys::sapi_module)).name);
-    let is_cgi = matches!(name.as_slice(), b"cgi" | b"cgi-fcgi");
-
-    let ri = (*ptr::addr_of!(sys::sapi_globals)).request_info;
-    let (qs_ptr, qs_len) = cstr_ptr_len(ri.query_string);
-
-    let action = core::howdah_query_string(CTX, qs_ptr, qs_len, is_cgi as c_int);
-    if action != core::HOWDAH_BLOCK {
-        return None;
-    }
-
-    // Blocked: write the log line (as the multipart END path does) and hand the
-    // response back so RINIT can emit it and bail with no live Rust values.
-    let line = rfc1867::take_log_line();
-    if let Some(l) = line.as_deref() {
-        response::write_log_line(l);
-    }
-    let (rule, request_id) = line.as_deref().map(rfc1867::parse_line).unwrap_or_default();
-    let status = if rule.is_empty() { 403 } else { response::status_for_rule(&rule) };
-    Some((status, request_id))
-}
-
-/// A NUL-terminated C string as a `(ptr, len)` pair for the core; NULL -> (NULL, 0).
-unsafe fn cstr_ptr_len(p: *const c_char) -> (*const c_char, usize) {
-    if p.is_null() {
-        (ptr::null(), 0)
-    } else {
-        (p, CStr::from_ptr(p).to_bytes().len())
-    }
 }
 
 /// Request shutdown (RSHUTDOWN): the unified end-of-request. Runs after every
@@ -558,7 +488,7 @@ unsafe extern "C" fn minfo(_module: *mut sys::zend_module_entry) {
     );
     row(
         b"Layer-1 limits\0",
-        b"multipart, input-shape, request-header, cgi-arg-injection\0",
+        b"multipart, input-shape, request-header\0",
     );
     sys::php_info_print_table_end();
 }

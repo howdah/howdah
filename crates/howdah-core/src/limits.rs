@@ -14,7 +14,7 @@
 
 use serde::Deserialize;
 
-use crate::input::{cgi_arg_injection, InputState};
+use crate::input::InputState;
 use crate::multipart::{Event, MultipartState};
 
 /// Resource limits applied to multipart bodies.
@@ -247,16 +247,6 @@ impl Limits {
         None
     }
 
-    /// Refuse the php-cgi argument-injection query-string shape (CVE-2012-1823).
-    /// Only meaningful under a CGI SAPI, so `is_cgi` gates it.
-    pub fn check_query_string(&self, qs: &[u8], is_cgi: bool) -> Option<LimitHit> {
-        (is_cgi && cgi_arg_injection(qs)).then(|| LimitHit {
-            rule: RuleId::CgiArgInjection,
-            severity: RuleId::CgiArgInjection.severity(),
-            detail: "php-cgi option-injection query string".to_string(),
-        })
-    }
-
     /// Check a byte total against `max_parse_memory_bytes` (total body bytes
     /// processed). `check` already applies this using the state's totals.
     pub fn check_fed_bytes(&self, total_fed: u64) -> Option<LimitHit> {
@@ -316,7 +306,6 @@ pub enum RuleId {
     MaxInputVars,
     MaxInputNestingDepth,
     MaxInputKeyBytes,
-    CgiArgInjection,
     MaxRequestHeaders,
     MaxRequestHeaderBytes,
 }

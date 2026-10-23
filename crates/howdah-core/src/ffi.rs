@@ -101,7 +101,6 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::MaxInputKeyBytes => "input variable key too long",
         RuleId::MaxRequestHeaders => "too many request headers",
         RuleId::MaxRequestHeaderBytes => "request header too large",
-        RuleId::CgiArgInjection => "php-cgi argument injection (CVE-2012-1823)",
     }
 }
 
@@ -253,16 +252,6 @@ impl howdah_ctx {
         }
         self.input.note_var(name);
         let hit = self.config.limits.check_input(&self.input);
-        self.apply(hit.as_ref());
-        self.worst
-    }
-
-    fn query_string(&mut self, qs: &[u8], is_cgi: bool) -> Action {
-        #[cfg(test)]
-        if tests::FORCE_PANIC.with(|f| f.get()) {
-            panic!("injected test panic");
-        }
-        let hit = self.config.limits.check_query_string(qs, is_cgi);
         self.apply(hit.as_ref());
         self.worst
     }
@@ -431,36 +420,6 @@ pub unsafe extern "C" fn howdah_input_var(ctx: *mut howdah_ctx, name: *const c_c
             std::slice::from_raw_parts(name as *const u8, name_len)
         };
         code((*ctx).input_var(bytes))
-    }));
-    r.unwrap_or_else(|_| {
-        report_panic(ctx);
-        HOWDAH_ALLOW
-    })
-}
-
-/// Check the raw query string; `is_cgi != 0` enables the php-cgi argument
-/// injection check (CVE-2012-1823). Returns the most severe action so far this
-/// request (0 Allow, 1 Log, 2 Block). Panic or NULL ctx returns 0.
-///
-/// # Safety
-/// `ctx` NULL or live; `qs` NULL or valid for `qs_len` bytes.
-#[no_mangle]
-pub unsafe extern "C" fn howdah_query_string(
-    ctx: *mut howdah_ctx,
-    qs: *const c_char,
-    qs_len: usize,
-    is_cgi: i32,
-) -> i32 {
-    if ctx.is_null() {
-        return HOWDAH_ALLOW;
-    }
-    let r = catch_unwind(AssertUnwindSafe(|| {
-        let bytes: &[u8] = if qs.is_null() || qs_len == 0 {
-            &[]
-        } else {
-            std::slice::from_raw_parts(qs as *const u8, qs_len)
-        };
-        code((*ctx).query_string(bytes, is_cgi != 0))
     }));
     r.unwrap_or_else(|_| {
         report_panic(ctx);
@@ -757,27 +716,13 @@ mod tests {
     }
 
     #[test]
-    fn cgi_arg_injection_blocks_only_under_cgi() {
-        let c = init("");
-        begin(c);
-        assert_eq!(unsafe { howdah_query_string(c, b"-s".as_ptr() as _, 2, 1) }, 2);
-        unsafe { howdah_free(c) };
-        let c = init("");
-        begin(c);
-        assert_eq!(unsafe { howdah_query_string(c, b"-s".as_ptr() as _, 2, 0) }, 0);
-        unsafe { howdah_free(c) };
-    }
-
-    #[test]
     fn new_entrypoints_null_and_panic_safe() {
         assert_eq!(unsafe { howdah_input_var(std::ptr::null_mut(), std::ptr::null(), 0) }, 0);
-        assert_eq!(unsafe { howdah_query_string(std::ptr::null_mut(), std::ptr::null(), 0, 1) }, 0);
         assert_eq!(unsafe { howdah_request_header(std::ptr::null_mut(), 0, 0) }, 0);
         let c = init("");
         begin(c);
         FORCE_PANIC.with(|f| f.set(true));
         assert_eq!(unsafe { howdah_input_var(c, b"a".as_ptr() as _, 1) }, 0);
-        assert_eq!(unsafe { howdah_query_string(c, b"a".as_ptr() as _, 1, 1) }, 0);
         assert_eq!(unsafe { howdah_request_header(c, 1, 1) }, 0);
         FORCE_PANIC.with(|f| f.set(false));
         unsafe { howdah_free(c) };

@@ -408,38 +408,6 @@ run_fpm() {
   fpm_stop
 }
 
-# --- Task 9: php-cgi argument-injection virtual patch (CVE-2012-1823) --------
-# Runs ONLY where a real php-cgi binary exists (Ruling 10). The safe case
-# (query carries a literal '='; RINIT fires and does NOT block) is a true
-# false-positive guard. The FIRE case is recorded honestly: see the detail.
-run_cgi() {
-  command -v php-cgi >/dev/null 2>&1 || { record cgi cgi_available SKIP "no php-cgi binary in image"; return; }
-  _sn=$(php-cgi -v 2>/dev/null | sed -n '1s/.*(\(cgi[^)]*\)).*/\1/p')
-  cgi() { # $1 query -> echoes "HTTP|bodyfile"
-    _o="$WORK/cgi.resp"
-    env -i REDIRECT_STATUS=1 SCRIPT_FILENAME="$WORK/index.php" SCRIPT_NAME=/index.php \
-      QUERY_STRING="$1" REQUEST_METHOD=GET SERVER_PROTOCOL=HTTP/1.1 GATEWAY_INTERFACE=CGI/1.1 \
-      REMOTE_ADDR=203.0.113.9 \
-      php-cgi -d extension="$WORK/howdah.so" -d howdah.log="$LOG" > "$WORK/cgi.raw" 2>/dev/null
-    _code=$(sed -n 's/^Status: *\([0-9][0-9][0-9]\).*/\1/p' "$WORK/cgi.raw" | head -1); [ -z "$_code" ] && _code=200
-    awk 'f{print} /^\r?$/{f=1}' "$WORK/cgi.raw" > "$_o"; echo "$_code|$_o"
-  }
-  # Safe: a legitimate query with a literal '=' must pass (no block, 200).
-  : > "$LOG"; r=$(cgi 'q=a-b'); c=${r%%|*}
-  if [ "$c" = 200 ] && ! grep -q '"action":"block"' "$LOG"; then record cgi cgi_arg_safe PASS "http=200 no block (sapi=$_sn)";
-  else record cgi cgi_arg_safe FAIL "http=$c blocks=$(grep -c '"action":"block"' "$LOG")"; fi
-  # Fire path: QUERY_STRING=-s (argv-injection shape). Observed: php-cgi consumes
-  # the query as CLI args in its own startup, BEFORE any module request hook, so
-  # the RINIT virtual patch is never reached (confirmed on php-cgi 5.4.16, which
-  # is itself already patched). Record the real outcome; do NOT fake a PASS.
-  : > "$LOG"; r=$(cgi '-s'); c=${r%%|*}
-  if grep -q '"rule":"cgi_arg_injection"' "$LOG"; then
-    record cgi cgi_arg_injection PASS "http=$c blocked (sapi=$_sn)"
-  else
-    record cgi cgi_arg_injection SKIP "fire-path not reached: php-cgi ($_sn) consumes argv-injection query before module RINIT; only patched php-cgi available (core-unit-tested)"
-  fi
-}
-
 for s in $SAPIS; do
   case "$s" in
     cli) run_cli ;;
@@ -447,8 +415,5 @@ for s in $SAPIS; do
     *)   record "$s" all SKIP "unsupported in this image" ;;
   esac
 done
-# CGI virtual patch is SAPI-specific (needs the php-cgi binary); run it once per
-# version regardless of the cli/fpm selection.
-run_cgi
 echo "== [$PHPVER] matrix rows ==" >&2
 grep "^$PHPVER	" "$RESULTS" >&2 || true

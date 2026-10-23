@@ -33,7 +33,7 @@ Shape only — no payloads (design §9). Regenerate with `sh make-corpus.sh`.
 | `input/large_form.urlencoded` | 1500 urlencoded fields | large real form; under `max_input_vars=2000`, above stock PHP 1000 |
 | `input/nested_form.urlencoded` | survey/matrix fields, max depth 5 | ordinary nested form; far under `max_input_nesting_depth=64` |
 | `input/ordinary_headers.txt` | 50 normal request headers | typical browser/proxy header set; under `max_request_headers=200` |
-| `input/safe_queries.txt` | query strings with `-` (`sort=-price`, `q=a-b-c`, …) | each carries a literal `=` and none starts with `-`, so `cgi_arg_injection` never fires |
+| `input/safe_queries.txt` | ordinary query strings with `-` (`sort=-price`, `q=a-b-c`, …) | normal queries that must pass untouched; no query-string rule exists to false-positive on them |
 
 If any item ever trips a limit, the fix is to lower/adjust the offending default
 or rule — never to accept the false positive.

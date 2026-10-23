@@ -83,13 +83,13 @@ Rule names: `max_parts`, `max_files`, `max_part_headers`, `max_part_header_bytes
 `max_field_name_len`, `max_filename_len`, `parse_memory_budget`,
 `malformed_multipart`, `upload_progress_abuse`, `self_test`, `max_input_vars`,
 `max_input_nesting_depth`, `max_input_key_bytes`, `max_request_headers`,
-`max_request_header_bytes`, `cgi_arg_injection`. (A few byte-limit **rule**
+`max_request_header_bytes`. (A few byte-limit **rule**
 names end `_len` where the matching `[limits]` **directive** ends `_bytes`.)
 
 Rules carry a **severity**:
 
 - **Critical** rules (`max_parts`, `max_files`, `max_input_vars`,
-  `max_input_nesting_depth`, `cgi_arg_injection`, and the byte/memory limits)
+  `max_input_nesting_depth`, and the byte/memory limits)
   block even when the global `mode` is `detect` — a detect-mode deployment still
   refuses the unambiguous resource-exhaustion shapes. Set the rule to `off` to
   fully disable it.

@@ -19,8 +19,9 @@ nesting depth, key length) and request *headers* (count, size). Tables 3 and 4
 report their per-version/SAPI status from the same matrix. Read the per-rule
 caveats below: the input/header rules mitigate by **dropping** offending
 variables and logging, and their 403 response is **best-effort** (it may land at
-request shutdown, after the script, on JIT-globals SAPIs). The php-cgi
-argument-injection virtual patch (CVE-2012-1823) is **not** claimed as working
+request shutdown, after the script, on JIT-globals SAPIs). php-cgi
+argument injection (CVE-2012-1823) is **out of reach** from inside PHP — the
+exploit is consumed before any extension hook runs — so it is **not** protected
 (see Table 4 and caveat 7).
 
 ## What is NOT claimed
@@ -132,7 +133,7 @@ that populate superglobals lazily. See caveats 5–7.
 | **CVE-2023-0662** — too-many-parts memory DoS | `max_parts` (2000) | Blocked wherever Table 1's field/part-flood column is green; same scenario, cross-referenced. |
 | **Hash-collision / variable flood** (symbol-table DoS) | `max_input_vars` (2000) | Var-dropped + logged, then best-effort 403; Enforced on the SAPIs in Table 3's `max_input_vars` column. |
 | **Array-nesting DoS** (deep `a[b][c]…`) | `max_input_nesting_depth` (64) | Var-dropped + logged, then best-effort 403; Enforced on the SAPIs in Table 3's nesting column. |
-| **CVE-2012-1823** — php-cgi argument injection | `cgi_arg_injection` (virtual patch) | Detection is unit-tested in the core (`cgi_arg_injection`), and the legitimate-`-`-in-query guard **passes** under the real CGI SAPI (PASS). The **fire path is NOT verified** and the patch does **not** block the attack on the only php-cgi available (5.4.16): that build is itself already patched, and the argv-injection query shape is consumed by php-cgi during its own startup **before** our module's RINIT runs, so the virtual patch never fires. No vulnerable php-cgi was available to test against. **Not claimed as blocking CVE-2012-1823.** See caveat 7. |
+| **CVE-2012-1823** — php-cgi argument injection | *(none — out of reach)* | **NOT protected.** The exploit works only under the php-cgi SAPI, where php-cgi consumes the argv-injection query string during its **own startup — before any PHP extension, module, or request (RINIT) hook loads** — so no in-PHP check can ever fire for the attack shape. Like CVE-2019-11043, this happens before extension code runs and is outside what a PHP extension can defend. See caveat 7. |
 
 ## Honest caveats
 
@@ -166,16 +167,15 @@ that populate superglobals lazily. See caveats 5–7.
    explicitly. An app that never touches `$_SERVER` on a JIT-globals SAPI can
    leave the header limit unexercised. The limit is counted exactly once the
    vars exist.
-7. **The php-cgi virtual patch (CVE-2012-1823) is NOT verified to block the
-   attack, and on the tested build does not.** The `cgi_arg_injection` detection
-   is unit-tested in the core and the legitimate-`-`-in-query false-positive
-   guard passes under the real CGI SAPI, but the only php-cgi in the lab
-   (5.4.16) is itself already patched *and* consumes an argv-injection query
-   ("`-s`", "`-d…`") during its own startup **before** any module request hook
-   runs — so our RINIT-based patch is never reached. We make **no claim** that
-   Howdah blocks CVE-2012-1823 via this path; a vulnerable php-cgi would be
-   needed to settle whether the `-d…`-RCE variant (which does continue to the
-   request) can be caught in RINIT, and none was available.
+7. **CVE-2012-1823 (php-cgi argument injection) is out of reach and NOT
+   protected.** Lab testing proved the argv-injection query shape ("`-s`",
+   "`-d…`") is consumed by php-cgi during its **own startup — before any PHP
+   extension, module, or request (RINIT) hook loads** — so a check from inside a
+   PHP extension can never fire for the attack. A configurable rule that can
+   never fire would be a false promise, so the virtual patch was removed. This
+   CVE belongs with CVE-2019-11043: both happen before extension code runs and
+   are outside what Howdah, as a PHP extension, can defend. Use a web-server or
+   front-proxy rule (or a patched php-cgi) to cover it.
 8. Linux x86_64, NTS builds only.
 
 ## Reproduce

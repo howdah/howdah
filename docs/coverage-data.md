@@ -195,12 +195,12 @@ version/SAPI matrix, plus the extended false-positive corpus. Reproduced by
 `lab/integration/matrix.sh` (cli+fpm) and `SAPIS=apache ... APPEND=1` (apache);
 raw rows in `lab/integration/matrix-results.tsv`.
 
-**Full-matrix totals this pass: 365 rows — 340 PASS / 0 FAIL / 25 SKIP.** The 25
-SKIPs are all expected and documented (not failures): the 5.4 php-fpm column
-(no `cgi-fcgi` in the 5.4 image, 7 rows), the CLI header scenarios (2 per
-version × 6 = 12, deliberately asserted only under fpm/apache), and the CGI rows
-on images without a php-cgi binary (5 `cgi_available` + the 5.4 `cgi_arg_injection`
-fire-path, 6 rows).
+**Full-matrix totals this pass: 358 rows — 339 PASS / 0 FAIL / 19 SKIP.** (The
+7 former CGI rows were dropped — see "CVE-2012-1823" below — so this pass is 7
+rows fewer than the previous one.) The 19 SKIPs are all expected and documented
+(not failures): the 5.4 php-fpm column (no `cgi-fcgi` in the 5.4 image, 7 rows)
+and the CLI header scenarios (2 per version × 6 = 12, deliberately asserted only
+under fpm/apache).
 
 ## New scenarios (per SAPI)
 
@@ -213,7 +213,6 @@ fire-path, 6 rows).
   block (block mode) / log (`request_headers_flood_detect`, detect mode) +
   `max_request_headers`. **Standard.** Driven over REAL headers on php-fpm (via
   the fcgi `HTTP_*` env) and Apache (via `curl -H`) — closing the Task-8 gap.
-- `cgi_arg_safe` / `cgi_arg_injection` → only where a `php-cgi` binary exists.
 
 ## Enforcement timing — best-effort response (measured)
 
@@ -245,28 +244,25 @@ that never reads `$_SERVER` on a JIT-globals SAPI leaves the header limit
 unexercised. This is why the CLI header scenarios are SKIP (not asserted) and the
 header rules are validated on fpm + Apache.
 
-## CVE-2012-1823 (php-cgi argument injection) — NOT verified; does not fire
+## CVE-2012-1823 (php-cgi argument injection) — out of reach; NOT protected
 
-The `cgi_arg_injection` detection is unit-tested in the core, and the
-legitimate-`-`-in-query false-positive guard **passes** under the real CGI SAPI
-(`cgi_arg_safe` PASS on 5.4.16, `sapi=cgi-fcgi`). But the **fire path was proven
-unreachable** in the only available environment:
+Howdah does **not** protect against CVE-2012-1823, and no rule for it ships. Lab
+testing proved the defense **cannot** work from inside a PHP extension:
 
-- The only php-cgi in the lab images is PHP **5.4.16**, which is **already
-  patched** against CVE-2012-1823 (it ran the script normally for `-s`, `-i`,
-  `-d…%3d…`, `-T1` instead of acting on the injected option).
-- More fundamentally, for every argv-injection query shape (no literal `=`,
-  leading `-`), php-cgi consumes the query string as command-line arguments
-  **during its own SAPI startup, before any module request-startup hook runs** —
-  so our RINIT-based virtual patch is **never reached** (confirmed by
-  instrumentation: RINIT fires for a benign `?x=1` query but not for `?-s`).
+- For every argv-injection query shape (no literal `=`, leading `-`), php-cgi
+  consumes the query string as command-line arguments **during its own SAPI
+  startup, before any PHP extension, module, or request-startup (RINIT) hook
+  loads** — so any check from inside an extension is **never reached** (confirmed
+  by instrumentation: RINIT fired for a benign `?x=1` query but not for `?-s`).
+- The only php-cgi in the lab images, PHP **5.4.16**, is itself **already
+  patched** against the CVE, so no vulnerable build was available to test a fire
+  path against in any case.
 
-Conclusion: the RINIT-based patch **does not block** the argv-injection attack on
-the tested build, and whether the `-d…`-RCE variant (which does continue to the
-request) could be caught in RINIT on a *vulnerable* php-cgi is **untested** (none
-available). Per Ruling 10 we did not build a new image for one rule; the status
-is documented plainly and **no protection is claimed**. This is a candidate for a
-redesign (intercept before php-cgi's getopt) — flagged to the controller.
+Because a configurable rule that can never fire is a false promise (Howdah's
+no-overclaim rule), the earlier RINIT virtual patch was **removed**. CVE-2012-1823
+belongs with CVE-2019-11043: both are triggered before any extension code runs
+and are outside what Howdah, as a PHP extension, can defend. Cover this CVE at
+the web server / front proxy, or run a patched php-cgi.
 
 ## Regression caught by the matrix: CLI-server block-state leak (fixed)
 
@@ -293,7 +289,7 @@ DEFAULT limits:
 | `large_form.urlencoded` | 1500 urlencoded fields | `max_input_vars=2000` |
 | `nested_form.urlencoded` | survey/matrix fields, max depth 5 | `max_input_nesting_depth=64` |
 | `ordinary_headers.txt` | 50 normal request headers | `max_request_headers=200` |
-| `safe_queries.txt` | `sort=-price`, `q=a-b-c`, `filter=a-b&order=-date`, … | `cgi_arg_injection` (literal `=`, no leading `-`) |
+| `safe_queries.txt` | `sort=-price`, `q=a-b-c`, `filter=a-b&order=-date`, … | ordinary queries; no query-string rule exists |
 
 All produced HTTP 200 with zero `action:block` lines on every SAPI run. The
 defaults in `crates/howdah-core/src/limits.rs` are therefore **kept unchanged**;

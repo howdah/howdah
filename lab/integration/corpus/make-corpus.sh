@@ -123,9 +123,9 @@ f="$IN/ordinary_headers.txt"; : > "$f"
   lf 'Upgrade-Insecure-Requests: 1'; } >> "$f"
 i=0; while [ "$i" -lt 44 ]; do lf "X-App-Header-$i: value-$i"; i=$((i+1)); done >> "$f"
 
-# D. Query strings that legitimately contain '-' in normal positions. Each must
-#    NOT trip the cgi_arg_injection virtual patch (every one carries a literal
-#    '=' and none starts with '-'). One query string per line, LF-terminated.
+# D. Query strings that legitimately contain '-' in normal positions. These are
+#    ordinary queries that must pass untouched (Howdah has no query-string rule).
+#    One query string per line, LF-terminated.
 f="$IN/safe_queries.txt"; : > "$f"
 { lf 'sort=-price'
   lf 'q=a-b-c'

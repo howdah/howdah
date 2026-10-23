@@ -16,6 +16,7 @@
 //! no PHP headers needed); the PHP glue is feature-gated.
 
 pub mod feeder;
+pub mod ini_config;
 
 #[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]
 mod module;

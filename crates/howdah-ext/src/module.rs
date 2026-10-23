@@ -221,24 +221,51 @@ unsafe extern "C" fn minit(_type: c_int, module_number: c_int) -> c_int {
     MODULE_NUMBER = module_number;
     register_ini(module_number);
 
-    // Load core config from howdah.config (a TOML path). Missing/unreadable =>
-    // the core falls back to safe defaults (block mode, critical limits on).
     let cfg_path = ini_string(b"howdah.config\0");
+    let log = ini_string(b"howdah.log\0");
+    let ini_mode = ini_string(b"howdah.mode\0");
+
+    // Config precedence:
+    //  * A howdah.config FILE, when present, is authoritative — its own `mode`
+    //    wins over the howdah.mode ini (and limits/rules come from it).
+    //  * With NO config file (the shipped path: howdah.mode set, howdah.config
+    //    empty), synthesize the core config from the ini so howdah.mode actually
+    //    takes effect — otherwise off/detect would silently become Block. The
+    //    howdah.log destination is carried into the synthesized config too, but
+    //    the glue's own log wiring (LOG_PATH below) is what actually writes, and
+    //    is set unconditionally regardless of this branch.
+    // Fail-safe: genuinely broken/unreadable config still yields the core's safe
+    // defaults (Block) — we fail toward protection, never toward Off.
+    let mode_disp;
     let ctx = match cfg_path.as_deref().and_then(read_file) {
-        Some(bytes) => core::howdah_init(bytes.as_ptr() as *const c_char, bytes.len()),
-        None => core::howdah_init(ptr::null(), 0),
+        Some(bytes) => {
+            mode_disp = format!(
+                "(set by howdah.config file: {})",
+                cfg_path.as_deref().unwrap_or("")
+            );
+            core::howdah_init(bytes.as_ptr() as *const c_char, bytes.len())
+        }
+        None => {
+            // No config file: resolve howdah.mode (note PHP maps bareword
+            // off/no/false/none -> "" -> None => Off; unset keeps the registered
+            // default "block") and synthesize a core config so the ini mode
+            // actually takes effect.
+            let choice = crate::ini_config::resolve_mode(ini_mode.as_deref());
+            let toml = crate::ini_config::synth_config(choice.toml_mode(), log.as_deref());
+            mode_disp = choice.display().to_string();
+            core::howdah_init(toml.as_ptr() as *const c_char, toml.len())
+        }
     };
     CTX = ctx;
 
-    // Log destination.
-    LOG_PATH = ini_string(b"howdah.log\0").map(|p| CString::new(p).unwrap_or_default());
+    // Log destination (glue-level: this is what actually writes the log line).
+    LOG_PATH = log.clone().map(|p| CString::new(p).unwrap_or_default());
 
-    // Display strings for `php --ri howdah` / phpinfo().
-    DISP_MODE = Some(cstring(ini_string(b"howdah.mode\0").as_deref().unwrap_or("block")));
-    DISP_CONFIG = Some(cstring(cfg_path.as_deref().unwrap_or("(none; safe defaults)")));
-    DISP_LOG = Some(cstring(
-        ini_string(b"howdah.log\0").as_deref().unwrap_or("(stderr)"),
-    ));
+    // Display strings for `php --ri howdah` / phpinfo(): reflect the EFFECTIVE
+    // config source, so the Mode row never disagrees with real behavior.
+    DISP_MODE = Some(cstring(&mode_disp));
+    DISP_CONFIG = Some(cstring(cfg_path.as_deref().unwrap_or("(none; mode from howdah.mode ini)")));
+    DISP_LOG = Some(cstring(log.as_deref().unwrap_or("(stderr)")));
 
     // Chain the multipart callback: save whatever is installed (e.g. session
     // upload-progress) and install ours above it.

@@ -6,12 +6,12 @@ import { REPO, PKG } from '../lib/site';
 const rows = coverage.rows;
 const ranDate = (coverage.generated || '').slice(0, 10);
 
-// Four-layer model (design §3). Layer 1 is what 1.0 delivers. Layer 2 is
-// implemented but unreleased (status 'next', log-only); 3–4 are the roadmap.
+// Four-layer model (design §3). Layer 1 shipped in 1.0, Layer 2 in 1.1
+// (status 'released', log-only); 3–4 are the roadmap.
 // Non-active layers are dimmed so the page never implies they are in 1.0.
 const layers = [
   { n: 1, name: 'Request parsing', covers: 'Upload/multipart floods (PHP2Shell), input-variable floods, deeply nested arrays, oversized headers — refused while PHP parses the request.', status: 'active' },
-  { n: 2, name: 'Request inspection', covers: 'Content inspection of decoded GET/POST/cookie/path values for SQL injection, path traversal and command/code injection. It detects and logs; it does not block by default.', status: 'next' },
+  { n: 2, name: 'Request inspection', covers: 'Content inspection of decoded GET/POST/cookie/path values for SQL injection, path traversal and command/code injection. It detects and logs; it does not block by default.', status: 'released' },
   { n: 3, name: 'Runtime checks', covers: 'Guarding dangerous sinks: exec/system, include of user paths, unserialize/phar, SSRF.', status: 'planned' },
   { n: 4, name: 'After a breach', covers: 'Blocking execution of PHP from upload dirs, webshell behaviour, unexpected outbound connections.', status: 'planned' },
 ];
@@ -52,7 +52,7 @@ const compare = [
       <div>
         <h2>What is Howdah, and why the name?</h2>
         <p>Howdah is a native extension for PHP. When a web request arrives, PHP starts parsing it before any of your code runs. Howdah watches that parsing step and refuses requests that are built to exhaust memory, while PHP is still working through them.</p>
-        <p>Version 1.0 completes Howdah's first layer: limits on <code>multipart/form-data</code> uploads, on the number and shape of input variables, and on request headers. The critical resource-exhaustion limits block by default, even in detect mode; everything else starts in log-only mode so you can watch it before you let it block.</p>
+        <p>Version 1.0 completes Howdah's first layer: limits on <code>multipart/form-data</code> uploads, on the number and shape of input variables, and on request headers. The critical resource-exhaustion limits block by default, even in detect mode; everything else starts in log-only mode so you can watch it before you let it block. Version 1.1 adds Layer 2, which inspects request content for injection patterns and logs them; it does not block by default.</p>
         <p>It is not a replacement for patching. Upgrade PHP when you can. Use Howdah when you cannot, or until you can.</p>
       </div>
       <aside class="card" aria-labelledby="howdah-word">
@@ -66,13 +66,13 @@ const compare = [
   <section id="how" class="alt">
     <div class="wrap">
       <h2>How it works: four layers</h2>
-      <p>Howdah's protection is organised in four layers. <strong>Version 1.0 delivers Layer 1 in full.</strong> Layer 2 is implemented in the codebase but is not in any published release yet: it is coming in the next release (1.1), and it detects and logs; it does not block by default. Layers 3 and 4 are the roadmap, and this page never claims they are here yet.</p>
+      <p>Howdah's protection is organised in four layers. <strong>Version 1.0 delivered Layer 1; version 1.1 adds Layer 2.</strong> Layer 2 detects and logs SQL injection, path traversal and command/code injection in request values; it does not block by default. Layers 3 and 4 are the roadmap, and this page never claims they are here yet.</p>
       <ol class="layers" aria-label="The four protection layers; a request flows from the top down">
         {layers.map((l) => (
           <li class={l.status}>
             <span class="lnum" aria-hidden="true">{l.n}</span>
             <div>
-              <h3>Layer {l.n}: {l.name} {l.status === 'active' ? <span class="pill ok">Active in 1.0</span> : l.status === 'next' ? <span class="pill na">Next release · log-only</span> : <span class="pill na">Planned</span>}</h3>
+              <h3>Layer {l.n}: {l.name} {l.status === 'active' ? <span class="pill ok">Active in 1.0</span> : l.status === 'released' ? <span class="pill ok">Active in 1.1 · log-only</span> : <span class="pill na">Planned</span>}</h3>
               <p>{l.covers}</p>
             </div>
           </li>
@@ -233,8 +233,8 @@ sudo apt-get update &amp;&amp; sudo apt-get install php8.1-howdah</code></pre>
   /* Four-layer diagram: a top-down stack the request flows through. */
   .layers { list-style: none; margin: 1.5rem 0 0; padding: 0; display: grid; gap: .6rem; counter-reset: none; }
   .layers > li { display: flex; gap: 1rem; align-items: flex-start; background: var(--surface); border: 1px solid var(--rule); border-left: 5px solid var(--rule); border-radius: 10px; padding: 1rem 1.2rem; }
-  .layers > li.active { border-left-color: var(--hot); }
-  .layers > li.planned, .layers > li.next { opacity: .72; }
+  .layers > li.active, .layers > li.released { border-left-color: var(--hot); }
+  .layers > li.planned { opacity: .72; }
   .layers .lnum { font: 700 1.3rem/1 var(--display); color: var(--hot); flex: none; width: 1.5rem; text-align: center; margin-top: .15rem; }
   .layers h3 { margin: 0 0 .25rem; font-size: 1.1rem; display: flex; flex-wrap: wrap; gap: .5rem; align-items: baseline; }
   .layers p { margin: 0; font-size: .95rem; color: var(--muted); max-width: none; }

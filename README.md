@@ -9,9 +9,10 @@ tool: it recognizes and blocks abusive input. It is not a hacking tool, and it
 is not a replacement for patching PHP. Upgrade when you can; use Howdah when you
 can't, or until you can.
 
-> **Status: 1.0.0 is released (Layer 1: request-parsing limits).** Signed tarballs for PHP
-> 5.4 to 8.5 are on the [v1.0.0 release page](https://github.com/howdah/howdah/releases/tag/v1.0.0).
-> Defaults may still change; Layers 2 to 4 are not in this release.
+> **Status: 1.1.0 is released** — Layer 1 (request-parsing limits) plus Layer 2 (input
+> inspection, log-only). Signed tarballs for PHP 5.4 to 8.5 are on the
+> [v1.1.0 release page](https://github.com/howdah/howdah/releases/tag/v1.1.0).
+> Defaults may still change; Layers 3 and 4 are the roadmap.
 > Start in `detect` mode. Not every PHP version has been tested:
 > see [docs/coverage.md](docs/coverage.md). Install, verify and rollback steps
 > are on the project site (built from `site/`).
@@ -29,15 +30,16 @@ older issues such as CVE-2023-0662) before they exhaust worker memory.
   (`howdah-ext`), with unwinding panics caught at the FFI boundary.
 - Logs are privacy-conscious: shape and counts, not request contents.
 
-What it does **not** do: in the published 1.0 it is not a general WAF and does not scan
-request content for attack patterns, and it does not fix the underlying PHP bug. Layer 2 (coming in the next release, see below) detects and logs SQL injection, path traversal and command/code injection in request values; it does not detect XSS and does not block by default. We do not
+What it does **not** do: it is not a general-purpose signature WAF, it does not fix the
+underlying PHP bug, and it does not detect XSS. Layer 2 (in 1.1, see below) detects and logs
+SQL injection, path traversal and command/code injection in request values, but it does not
+block by default — Layer 1's request-shape limits remain the only rules that block out of the box. We do not
 claim it blocks CVE-2026-109618 on a stock configuration; see
 [docs/coverage.md](docs/coverage.md) for what has actually been tested.
 
-## Coming in the next release (1.1): Layer 2 input inspection
+## Layer 2: input inspection (in 1.1)
 
-Layer 2 is implemented in the codebase but is **not in any published release
-yet** (1.0.0 is Layer 1 only). It inspects decoded GET/POST/cookie/path values
+Layer 2 ships in 1.1. It inspects decoded GET/POST/cookie/path values
 for SQL injection, path traversal and command/code injection. It **detects and
 logs; it does not block by default**, and the matched value is never logged.
 Signature inspection is best-effort and can be bypassed. See the `[inspect]`

@@ -58,7 +58,10 @@ for (const minor of ALL_MINORS) {
   const ver = verByMinor[minor];
   if (!ver) {
     const nr = notRun.find((n) => n.minor === minor);
-    rows.push({ minor, version: null, status: 'not-run', why: nr ? nr.why.replace(/ \(build .*\)$/, '') : 'no lab base image yet', sapis: {}, tested: [] });
+    const why = minor === '5.5'
+      ? 'Not tested yet: no test image could be built for 5.5.'
+      : 'Not tested yet: no test environment built.';
+    rows.push({ minor, version: null, status: 'not-run', why, sapis: {}, tested: [] });
     continue;
   }
   const sapis = {};
@@ -120,9 +123,10 @@ let md = `# Howdah 0.1 coverage table
 ## What is claimed
 
 Howdah blocks abusive multipart part/file floods (the PHP2Shell attack
-*shape*) before PHP allocates the memory, and the matrix below shows it on every
-PHP version and SAPI that was actually run. That includes EOL PHP (5.x, 7.x,
-8.0, 8.1) that will never get the official fix.
+*shape*) before they exhaust memory, and the matrix below shows it on every
+PHP version and SAPI that was actually run. That includes end-of-life PHP (the 5.x,
+7.x and 8.1 versions in the table) that, according to public reports, will not get
+the official fix. 8.2 to 8.5 are not described as end-of-life here.
 
 ## What is NOT claimed
 
@@ -136,7 +140,7 @@ PHP version and SAPI that was actually run. That includes EOL PHP (5.x, 7.x,
   33 MB or less). Howdah's value on that shape is strongest where an admin has
   **raised those caps** (undefended peak 127-173 MB for a file flood against a
   128 MB limit; Howdah's defaults fire about 45 times earlier than memory would
-  run out), and on **EOL PHP** with no official fix.
+  run out), and on **end-of-life PHP** with no official fix.
 - Re-verify the exact CVE mechanism against the official advisories
   (GHSA-w8hw-w9fx-j79w, GHSA-6wmf-4rv5-p3rp, php.net).
 
@@ -155,7 +159,7 @@ configuration) so PHP's multipart callback fires on every version.
 `;
 for (const r of rows) {
   let status;
-  if (!r.version) status = 'Not run: ' + r.why;
+  if (!r.version) status = r.why;
   else {
     status = 'Run on ' + r.tested.map((s) => SAPI_LABEL[s]).join(', ');
     const missing = SAPIS.filter((s) => !r.tested.includes(s));

@@ -50,7 +50,7 @@
       "minor": "5.5",
       "version": null,
       "status": "not-run",
-      "why": "upstream php:5.5-fpm image pull broken (milestone-0 finding); no lab base image",
+      "why": "Not tested yet: no test image could be built for 5.5.",
       "sapis": {},
       "tested": []
     },
@@ -97,7 +97,7 @@
       "minor": "7.0",
       "version": null,
       "status": "not-run",
-      "why": "no lab base image yet",
+      "why": "Not tested yet: no test environment built.",
       "sapis": {},
       "tested": []
     },
@@ -105,7 +105,7 @@
       "minor": "7.1",
       "version": null,
       "status": "not-run",
-      "why": "no lab base image yet",
+      "why": "Not tested yet: no test environment built.",
       "sapis": {},
       "tested": []
     },
@@ -113,7 +113,7 @@
       "minor": "7.2",
       "version": null,
       "status": "not-run",
-      "why": "no lab base image yet",
+      "why": "Not tested yet: no test environment built.",
       "sapis": {},
       "tested": []
     },
@@ -202,7 +202,7 @@
       "minor": "8.0",
       "version": null,
       "status": "not-run",
-      "why": "no lab base image yet",
+      "why": "Not tested yet: no test environment built.",
       "sapis": {},
       "tested": []
     },
@@ -252,7 +252,7 @@
       "minor": "8.2",
       "version": null,
       "status": "not-run",
-      "why": "no lab base image yet",
+      "why": "Not tested yet: no test environment built.",
       "sapis": {},
       "tested": []
     },
@@ -260,7 +260,7 @@
       "minor": "8.3",
       "version": null,
       "status": "not-run",
-      "why": "no lab base image yet",
+      "why": "Not tested yet: no test environment built.",
       "sapis": {},
       "tested": []
     },
@@ -307,7 +307,7 @@
       "minor": "8.5",
       "version": null,
       "status": "not-run",
-      "why": "no lab base image yet",
+      "why": "Not tested yet: no test environment built.",
       "sapis": {},
       "tested": []
     }

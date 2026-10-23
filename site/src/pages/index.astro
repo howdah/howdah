@@ -15,7 +15,7 @@ const ranDate = (coverage.generated || '').slice(0, 10);
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Howdah: a defensive firewall for PHP</title>
-  <meta name="description" content="Howdah is an open-source, defensive firewall that loads into PHP itself. It blocks abusive multipart upload floods before PHP allocates the memory, including on old PHP versions that will never get the official fix." />
+  <meta name="description" content="Howdah is an open-source, defensive firewall that loads into PHP itself. It blocks abusive multipart upload floods before they exhaust memory, including on end-of-life PHP (5.4 to 8.1) that will not get the official fix." />
   <meta name="color-scheme" content="light dark" />
   <meta name="theme-color" content="#14112a" media="(prefers-color-scheme: dark)" />
   <meta name="theme-color" content="#f7f1e5" media="(prefers-color-scheme: light)" />
@@ -62,9 +62,9 @@ const ranDate = (coverage.generated || '').slice(0, 10);
   <main id="main">
     <div class="hero">
       <div class="wrap">
-        <p class="eyebrow">Open source &middot; defensive &middot; PHP 5.4 to 8.5</p>
-        <h1>Howdah blocks abusive multipart <em>part/file floods</em> before PHP allocates the memory.</h1>
-        <p class="lede">That is the shape of the PHP2Shell attack. Howdah is a firewall that loads into PHP itself, so it protects even end-of-life PHP (5.4 to 8.5) that will never get the official fix.</p>
+        <p class="eyebrow">Open source &middot; defensive &middot; built for PHP 5.4 to 8.5 (see coverage for what is tested)</p>
+        <h1>Howdah blocks abusive multipart <em>part/file floods</em> before they exhaust memory.</h1>
+        <p class="lede">That is the shape of the PHP2Shell attack. Howdah is a firewall that loads into PHP itself, so it protects even end-of-life PHP (5.4 to 8.1) that will not get the official fix, on the versions tested in the table below.</p>
         <p class="fine">Built for sysadmins who run PHP on their own servers, including servers stuck on old PHP versions. Howdah is defensive only: it recognizes and refuses abusive requests, nothing else.</p>
         <div class="cta">
           <a class="btn primary" href="#coverage">See exactly what has been tested</a>
@@ -95,7 +95,7 @@ const ranDate = (coverage.generated || '').slice(0, 10);
         <div class="cols two">
           <div>
             <p>On 21 October 2026 the PHP project patched two linked flaws, CVE-2026-109618 and CVE-2026-109619, which security researchers named PHP2Shell. As publicly reported, a crafted <code>multipart/form-data</code> request makes PHP use a lot of memory while it reads the headers of upload parts. A body well under the default 8&nbsp;MB limit can hold hundreds of tiny, empty file parts. Corrupted state from that can, according to the reports, lead to remote code execution without logging in.</p>
-            <p>The official fix ships only for PHP 8.2 and newer. PHP 8.1 and older, which still run a very large share of the web, get no official patch.</p>
+            <p>According to public reports, the official fix ships for PHP 8.2 and newer; older branches get no official patch. PHP 8.1 and older still run a very large share of the web.</p>
             <div class="note">
               <h3>What we did and did not verify</h3>
               <p>Our tests reproduce only the harmless <em>structure</em> of such a flood: how many parts and fields, and how large. We did <strong>not</strong> reproduce the CVE's <code>session.upload_progress</code> header-parsing path, so we do <strong>not</strong> claim Howdah blocks CVE-2026-109618 on a stock configuration.</p>
@@ -240,7 +240,7 @@ sudo systemctl restart php7.3-fpm</code></pre>
 <pre tabindex="0"><code>sudo phpdismod -v 7.3 -s fpm howdah &amp;&amp; sudo systemctl restart php7.3-fpm</code></pre>
           </li>
         </ol>
-        <p class="legend">CentOS 7 with stock PHP 5.4 uses Apache <code>mod_php</code> and a different config directory (<code>/etc/php.d/</code>); the same steps apply. Full per-platform guides are planned for 1.0.</p>
+        <p class="legend">CentOS 7 with stock PHP 5.4 uses Apache <code>mod_php</code> and a different config directory (<code>/etc/php.d/</code>); the same steps apply, but PHP 5.4 was tested on PHP's built-in server only (see coverage). Full per-platform guides are planned for 1.0.</p>
       </div>
     </section>
   </main>

@@ -9,9 +9,10 @@
 ## What is claimed
 
 Howdah blocks abusive multipart part/file floods (the PHP2Shell attack
-*shape*) before PHP allocates the memory, and the matrix below shows it on every
-PHP version and SAPI that was actually run. That includes EOL PHP (5.x, 7.x,
-8.0, 8.1) that will never get the official fix.
+*shape*) before they exhaust memory, and the matrix below shows it on every
+PHP version and SAPI that was actually run. That includes end-of-life PHP (the 5.x,
+7.x and 8.1 versions in the table) that, according to public reports, will not get
+the official fix. 8.2 to 8.5 are not described as end-of-life here.
 
 ## What is NOT claimed
 
@@ -25,7 +26,7 @@ PHP version and SAPI that was actually run. That includes EOL PHP (5.x, 7.x,
   33 MB or less). Howdah's value on that shape is strongest where an admin has
   **raised those caps** (undefended peak 127-173 MB for a file flood against a
   128 MB limit; Howdah's defaults fire about 45 times earlier than memory would
-  run out), and on **EOL PHP** with no official fix.
+  run out), and on **end-of-life PHP** with no official fix.
 - Re-verify the exact CVE mechanism against the official advisories
   (GHSA-w8hw-w9fx-j79w, GHSA-6wmf-4rv5-p3rp, php.net).
 
@@ -42,19 +43,19 @@ configuration) so PHP's multipart callback fires on every version.
 | PHP | File flood (`max_files`) | Field/part flood (`max_parts`) | Status |
 |---|---|---|---|
 | 5.4.16 | Blocked, 403 (cli-server) | Blocked, 403 (cli-server) | Run on cli-server; not validated on php-fpm, Apache mod_php |
-| 5.5 | Not run | Not run | Not run: upstream php:5.5-fpm image pull broken (milestone-0 finding); no lab base image |
+| 5.5 | Not run | Not run | Not tested yet: no test image could be built for 5.5. |
 | 5.6.40 | Blocked, 403 (cli-server, php-fpm) | Blocked, 403 (cli-server, php-fpm) | Run on cli-server, php-fpm; not validated on Apache mod_php |
-| 7.0 | Not run | Not run | Not run: no lab base image yet |
-| 7.1 | Not run | Not run | Not run: no lab base image yet |
-| 7.2 | Not run | Not run | Not run: no lab base image yet |
+| 7.0 | Not run | Not run | Not tested yet: no test environment built. |
+| 7.1 | Not run | Not run | Not tested yet: no test environment built. |
+| 7.2 | Not run | Not run | Not tested yet: no test environment built. |
 | 7.3.33 | Blocked, 403 (cli-server, php-fpm) | Blocked, 403 (cli-server, php-fpm) | Run on cli-server, php-fpm; not validated on Apache mod_php |
 | 7.4.33 | Blocked, 403 (cli-server, php-fpm, Apache mod_php) | Blocked, 403 (cli-server, php-fpm, Apache mod_php) | Run on cli-server, php-fpm, Apache mod_php |
-| 8.0 | Not run | Not run | Not run: no lab base image yet |
+| 8.0 | Not run | Not run | Not tested yet: no test environment built. |
 | 8.1.34 | Blocked, 403 (cli-server, php-fpm, Apache mod_php) | Blocked, 403 (cli-server, php-fpm, Apache mod_php) | Run on cli-server, php-fpm, Apache mod_php |
-| 8.2 | Not run | Not run | Not run: no lab base image yet |
-| 8.3 | Not run | Not run | Not run: no lab base image yet |
+| 8.2 | Not run | Not run | Not tested yet: no test environment built. |
+| 8.3 | Not run | Not run | Not tested yet: no test environment built. |
 | 8.4.27 | Blocked, 403 (cli-server, php-fpm) | Blocked, 403 (cli-server, php-fpm) | Run on cli-server, php-fpm; not validated on Apache mod_php |
-| 8.5 | Not run | Not run | Not run: no lab base image yet |
+| 8.5 | Not run | Not run | Not tested yet: no test environment built. |
 
 ## Table 2: test results by SAPI
 

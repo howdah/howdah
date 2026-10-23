@@ -36,8 +36,8 @@ use crate::module;
 // type matches `sys::sapi_module_struct.input_filter` exactly:
 //   * `val_len` / `new_val_len`: `unsigned int` before PHP 7.0, `size_t` from
 //     7.0 — this tracks the `phpN` feature cleanly (php5 vs php7/php8).
-//   * `var`: `char *` before PHP 8.1, `const char *` from 8.1 — this boundary
-//     falls inside the `php8` feature, so it is gated on the build-script cfg
+//   * `var`: `char *` before PHP 8.0, `const char *` from 8.0 — this boundary
+//     splits 7.x from 8.x, so it is gated on the build-script cfg
 //     `howdah_input_filter_const` (set from `php-config --vernum`), not a feature.
 
 #[cfg(feature = "php5")]
@@ -46,9 +46,9 @@ type ValLen = c_uint;
 type ValLen = usize; // size_t on 7.0+
 
 #[cfg(howdah_input_filter_const)]
-type VarPtr = *const c_char; // PHP 8.1+
+type VarPtr = *const c_char; // PHP 8.0+
 #[cfg(not(howdah_input_filter_const))]
-type VarPtr = *mut c_char; // < 8.1
+type VarPtr = *mut c_char; // < 8.0
 
 /// The exact type of `sapi_module.input_filter` for this generation; the glue
 /// stores the prior filter as this so the save/install/restore all type-check.

@@ -114,6 +114,10 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::SqlInjection => "possible SQL injection in request input",
         RuleId::PathTraversal => "possible path traversal in request input",
         RuleId::CommandInjection => "possible command injection in request input",
+        RuleId::CommandExec => "command execution sink called with a disallowed command",
+        RuleId::Include => "file include sink called with a disallowed path",
+        RuleId::Eval => "eval sink invoked",
+        RuleId::Unserialize => "unserialize sink invoked on untrusted data",
     }
 }
 

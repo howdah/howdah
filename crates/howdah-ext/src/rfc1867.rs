@@ -51,10 +51,7 @@ pub(crate) unsafe extern "C" fn callback(
     if event == sys::MULTIPART_EVENT_END {
         let decision = catch_unwind(AssertUnwindSafe(|| end_request())).unwrap_or(None);
         if let Some((status, request_id)) = decision {
-            // Emit then terminate. All Rust-owned values are dropped before the
-            // longjmp (bail), so it skips no live destructors.
-            let _ = catch_unwind(AssertUnwindSafe(|| response::emit_block(status, &request_id)));
-            bail();
+            emit_and_bail(status, request_id);
         }
     }
 
@@ -227,6 +224,18 @@ unsafe fn remote_addr() -> Vec<u8> {
 
 /// Terminate the current request (PHP `zend_bailout`, a longjmp). Never returns.
 /// Must be called with no live Rust-owned values in scope.
+/// Emit the block response, then terminate the request. Takes `request_id` by
+/// value and drops it (and every other heap-owned Rust value) BEFORE the
+/// `bail()` longjmp, which skips destructors — otherwise each blocked (i.e.
+/// attacker-triggerable) request would leak the id string.
+unsafe fn emit_and_bail(status: c_int, request_id: String) -> ! {
+    // emit_block only borrows request_id; it copies the bytes into the client
+    // response and the log sink, leaving nothing of ours alive past its return.
+    let _ = catch_unwind(AssertUnwindSafe(|| response::emit_block(status, &request_id)));
+    drop(request_id); // explicit: no heap-owned Rust value may be live at bail()
+    bail();
+}
+
 // `_zend_bailout` is annotated noreturn in some generations' headers (bindgen
 // then types it `-> !`) and not in others; the trailing `unreachable_unchecked`
 // is needed in the latter case and merely unreachable in the former.

@@ -11,6 +11,17 @@
 //! This module is pure Rust (no PHP, no `unsafe`) so it can be unit-tested on
 //! the host against the real core via its C ABI. The PHP glue in `rfc1867.rs`
 //! calls these builders and feeds the results to `howdah_feed`.
+//!
+//! BEST-EFFORT vs EXACT (important): PHP's rfc1867 callback only hands us the
+//! `Content-Disposition` name/filename — not a part's other headers (e.g.
+//! `Content-Type`) nor their raw bytes. So we reconstruct a single
+//! `Content-Disposition` header per part, which means the glue-level
+//! `max_part_headers` / `max_part_header_bytes` checks see FEWER header bytes
+//! than PHP actually parsed: they are a best-effort lower bound here. The
+//! COUNT-based critical rules — `max_parts` and `max_files` — ARE exact (one
+//! reconstructed part per `*_START`/`FORMDATA` event), and together with
+//! `max_filename_bytes` / `max_field_name_bytes` (whose lengths we preserve)
+//! are the primary, precise PHP2Shell defense.
 
 /// A fixed, long, unlikely-in-user-data internal boundary. The core builds its
 /// delimiter from exactly this; a collision would merely split one part in two

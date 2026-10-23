@@ -70,6 +70,12 @@ jobs:
     needs: check
     runs-on: ubuntu-24.04-arm
     continue-on-error: true
+    # Bound a started-but-stuck arm64 cell so it cannot hold `release` for the
+    # 360-min default. (A cell that never gets a runner is a separate case: it
+    # delays `release` until GitHub's unassigned-job timeout, then fails and the
+    # release publishes x86_64-only. arm64 runner availability is surfaced by
+    # the ci.yml aarch64 smoke on every PR.)
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:

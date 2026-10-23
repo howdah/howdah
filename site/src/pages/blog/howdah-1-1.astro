@@ -1,0 +1,53 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { REPO } from '../../lib/site';
+---
+<Layout
+  title="Howdah 1.1: watching what comes in"
+  description="Howdah 1.1 opens Layer 2 — input inspection. It detects and logs SQL injection, path traversal and command-injection patterns in request values; it does not block by default, on PHP 5.4 through 8.5."
+  path="/blog/howdah-1-1/"
+>
+  <article class="post">
+    <div class="pagehead">
+      <div class="wrap">
+        <p class="crumbs"><a href="/">Home</a> / <a href="/blog/">Blog</a> / <span aria-current="page">Howdah 1.1</span></p>
+        <h1>Howdah 1.1: watching what comes in</h1>
+        <p class="lede"><time datetime="2026-10-23">23 October 2026</time></p>
+      </div>
+    </div>
+
+    <div class="wrap prose">
+      <p>Howdah 1.1 is released. Where 1.0 finished the first layer — refusing abusive request <em>shapes</em> before they exhaust memory — 1.1 opens the second: Howdah now looks at the <em>content</em> of what comes in. And it does so the way we think a defensive tool should: it watches first, and tells you what it sees, before it ever gets in the way.</p>
+
+      <h2>What's in 1.1: Layer 2, input inspection</h2>
+      <p>As PHP decodes each request value, Howdah scans its content for three families of attack pattern, in GET query parameters, POST fields, cookies and the URL path — the same request hook Layer 1 already uses:</p>
+      <ul class="facts">
+        <li><strong>SQL injection</strong> — shapes like <code>' OR 1=1 --</code> in a value that otherwise passes every size and count check.</li>
+        <li><strong>Path traversal</strong> — <code>../../etc/passwd</code> and the usual targets, including percent-encoded forms on the URL path.</li>
+        <li><strong>Command / code injection</strong> — shapes like <code>; cat /etc/passwd</code> and the common shell and PHP sink patterns.</li>
+      </ul>
+      <p>Those are illustrative, not an exhaustive list, and they are the <em>shapes</em> we match — not a catalogue of exploits. Cross-site scripting is <strong>not</strong> covered in 1.1.</p>
+
+      <h2>It logs. It does not block by default.</h2>
+      <p>This is the important part, and we mean it literally. Layer 2 <strong>detects and logs; it does not block any request by default.</strong> It has its own mode, <code>inspect.mode</code>, which starts at <code>detect</code> (log only) and is <em>independent</em> of the global <code>howdah.mode</code> — so flipping <code>howdah.mode = block</code>, the normal Layer-1 rollout step, does <strong>not</strong> quietly turn Layer 2 into a blocker. You opt a class into blocking explicitly, once you have read your own logs and decided it is safe. Nobody installs 1.1 and finds their site started returning 403s.</p>
+      <p>A detection is one JSON log line: the rule class, the source (<code>get</code>, <code>post</code>, <code>cookie</code> or <code>path</code>) and the variable name. The matched value itself is <strong>never written to the log</strong> — so a flagged password field or token never ends up in your logs.</p>
+
+      <h2>Why log-first, and not block-first</h2>
+      <p>Because signature inspection of request content is best-effort, and it can be bypassed. That is true of every tool that does it, and pretending otherwise would be dishonest. A log is useful even when a signature is evadable: it shows you what is reaching your application so you can fix the application — parameterized queries, path normalization, no shell calls on user input. Blocking on a best-effort signature, by default, is how a WAF takes a site down on a false positive. So Howdah starts by telling you, and leaves the decision to block with you. The scanning itself is bounded and linear-time, with per-value and per-request budgets, so it can never be turned into a denial-of-service vector.</p>
+
+      <h2>Repositories that keep every version</h2>
+      <p>1.1 is our first second release, so it is also the first test of the apt and yum repositories as upgrade paths. Each publish now seeds its index from the existing published pool, so installing Howdah gives you 1.1 while <strong>1.0 stays in the index too</strong> — you can pin or roll back to a prior version through the repo, not just the latest. Nothing is deleted, and the signatures verify against the same key.</p>
+
+      <h2>Honest about scope</h2>
+      <p>Layer 2 is best-effort signature inspection that runs log-first; it is not a guarantee, and it is not a replacement for fixing the underlying code or for patching PHP. Every claim on this site still links to the test behind it, and our tests reproduce only the harmless <em>shape</em> of an attack, never a working exploit. Layers 3 and 4 — runtime sink checks and post-breach containment — remain the roadmap, not part of 1.1.</p>
+
+      <h2>Get it</h2>
+      <p>If you are already on Howdah, <code>apt-get update &amp;&amp; apt-get upgrade</code> (or the yum equivalent) brings in 1.1; Layer 2 arrives in <code>detect</code> mode, logging only. New here? Start at the <a href="/install/">install picker</a>, read the <a href="/docs/configuration/#layer-2-inspection">configuration reference</a> for the <code>[inspect]</code> settings, and check the <a href="/coverage/">coverage table</a> for your PHP version. The source and this site are on <a href={REPO}>GitHub</a> — if Layer 2 flags something interesting on your traffic, we would like to hear about it.</p>
+    </div>
+  </article>
+</Layout>
+
+<style>
+  .prose { max-width: 46rem; padding-bottom: 1rem; }
+  .prose h2 { margin-top: 2rem; }
+</style>

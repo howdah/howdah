@@ -229,7 +229,7 @@ mod tests {
         assert!(unserialize_classes(b"O:").classes.is_empty());
         assert!(unserialize_classes(b"O:99999999999999999999:\"A\"").classes.is_empty());
         let mut long = b"O:400:\"".to_vec();
-        long.extend(std::iter::repeat(b'a').take(400));
+        long.resize(long.len() + 400, b'a'); // 400 'a' bytes (clippy: not repeat().take())
         long.extend_from_slice(b"\":0:{}");
         let r = unserialize_classes(&long);
         assert_eq!(r.classes.len(), 1);

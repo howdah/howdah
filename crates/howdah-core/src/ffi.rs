@@ -357,7 +357,9 @@ impl howdah_ctx {
         }
         let literal = decode_literal_ip(host);
         let mut resolved: Vec<IpRepr> = Vec::new();
-        for r in recs.as_chunks::<17>().0 {
+        #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)] // as_chunks needs Rust 1.88+
+        for r in recs.chunks_exact(17) {
+            let Ok(r): Result<&[u8; 17], _> = r.try_into() else { continue };
             match r[0] {
                 4 => resolved.push(IpRepr::V4([r[1], r[2], r[3], r[4]])),
                 6 => {
@@ -388,11 +390,18 @@ impl howdah_ctx {
                 .filter(|c| !c.is_control())
                 .collect()
         };
+        // Defense in depth: log only the bare authority. Drop userinfo (up to
+        // and including the first '@'), then cut at the first '/', '?' or '#'.
+        let bare_host = {
+            let h = clip(host);
+            let h = h.split_once('@').map_or(h.as_str(), |(_, rest)| rest);
+            let end = h.find(['/', '?', '#']).unwrap_or(h.len());
+            h[..end].to_string()
+        };
         let reason = format!(
-            "ssrf via {}/{}: host={} port={} ip={} class={}",
+            "ssrf via {}: host={} port={} ip={} class={}",
             clip(scheme),
-            clip(host),
-            clip(host),
+            bare_host,
             port,
             ip_s,
             class.as_str()
@@ -1524,12 +1533,13 @@ mod tests {
     fn ssrf_reason_has_class_not_url() {
         let c = init("[sinks.ssrf]\nmode=\"detect\"");
         begin(c);
-        assert_eq!(ssrf(c, "localtest.example", &[rec4([127, 0, 0, 1])]), HOWDAH_LOG);
+        assert_eq!(ssrf(c, "user:pw@127.0.0.1/admin?token=secret", &[rec4([127, 0, 0, 1])]), HOWDAH_LOG);
         let line = take_sink(c).unwrap();
         assert!(line.contains("\"rule\":\"ssrf\""), "{line}");
-        assert!(line.contains("class=loopback") && line.contains("localtest.example"), "{line}");
-        assert!(line.contains("port=80") && line.contains("ip=127.0.0.1"), "{line}");
-        assert!(!line.contains('@') && !line.contains('?') && !line.contains("/secret"), "{line}");
+        assert!(line.contains("class=loopback") && line.contains("host=127.0.0.1 port=80 ip=127.0.0.1"), "{line}");
+        for bad in ["@", "user", "pw", "/admin", "?", "secret"] {
+            assert!(!line.contains(bad), "leaked {bad:?}: {line}");
+        }
         unsafe { howdah_free(c) };
     }
 

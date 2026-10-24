@@ -15,18 +15,17 @@
  *  - a function-table handler swap over the command/code-exec functions and
  *    `unserialize` (all PHP versions), and
  *  - a ZEND_INCLUDE_OR_EVAL user opcode handler for include/require/eval
- *    (PHP 7.0+ ONLY — the PHP 5.x VM stores opcode operands off `execute_data`
- *    behind a static-inline accessor not callable from an extension, so
- *    include/eval stay dormant on 5.x; command_exec + unserialize still work
- *    there). On include/eval BLOCK the opcode is skipped (result set NULL,
- *    opline advanced) so the include/eval never runs and the script continues.
+ *    (PHP 7.0+). On BLOCK the opcode is skipped (result set NULL, opline
+ *    advanced) so the include/eval never runs and the script continues.
+ *  - PHP 5.x: the VM keeps opcode operands behind a static-inline accessor not
+ *    callable from an extension, so instead the global zend_compile_file /
+ *    zend_compile_string pointers are swapped (scoped to real runtime
+ *    include/eval; see the 5.x block below).
  */
 #include "main/php.h"
 #include "Zend/zend_API.h"
-#if PHP_VERSION_ID >= 70000
 #include "Zend/zend_compile.h"
 #include "Zend/zend_execute.h"
-#endif
 
 #include <string.h>
 #include <stddef.h>
@@ -191,6 +190,63 @@ static int howdah_include_or_eval(zend_execute_data *execute_data) {
 }
 #endif
 
+#if PHP_VERSION_ID < 70000
+/* ---- include/require/eval on PHP 5.x: compile-pointer swap ----
+ * Spike-proven on 5.6. We swap the global zend_compile_file/zend_compile_string
+ * pointers. BLOCK = return NULL (no compile): include -> false, require does NOT
+ * fatal (the require fatal lives in the opcode's open step, not the compile
+ * step), eval -> false.
+ *
+ * SCOPING (critical): these pointers are ALSO used for the main script,
+ * auto_prepend/append_file, create_function, assert("..."), preg /e and CLI -r.
+ * Verified on 5.6.40:
+ *  - the main script is compiled via zend_compile_file(h, ZEND_INCLUDE) too, so
+ *    `type` alone cannot tell it apart; but at that point nothing is executing:
+ *    EG(current_execute_data) == NULL. A runtime include/require(_once) is always
+ *    called from inside the VM, so current_execute_data != NULL.
+ *  - eval passes the description "<file>(<line>) : eval()'d code" (built by
+ *    zend_make_compiled_string_description), NOT the bare literal; so we match
+ *    the " : eval()'d code" SUFFIX. create_function, assert, preg /e and -r use
+ *    different descriptions.
+ *
+ * OPCACHE CAVEAT: with opcache, an already-cached file is served without calling
+ * zend_compile_file, so include guarding only sees the FIRST compile of a file
+ * (cache misses). eval is never cached and is always seen. */
+static zend_op_array *(*howdah_orig_compile_file)(zend_file_handle *fh, int type TSRMLS_DC) = NULL;
+static zend_op_array *(*howdah_orig_compile_string)(zval *src, char *filename TSRMLS_DC) = NULL;
+
+#define HOWDAH_EVAL_DESC_SUFFIX " : eval()'d code"
+
+static zend_op_array *howdah_compile_file(zend_file_handle *fh, int type TSRMLS_DC) {
+    if (howdah_g_decide && EG(current_execute_data) != NULL
+        && (type == ZEND_INCLUDE || type == ZEND_REQUIRE
+            || type == ZEND_INCLUDE_ONCE || type == ZEND_REQUIRE_ONCE)
+        && fh && fh->filename) {
+        int d = howdah_g_decide(HOWDAH_SINK_INCLUDE, "include", 7,
+                                fh->filename, strlen(fh->filename));
+        if (d == HOWDAH_ACTION_BLOCK) {
+            return NULL;
+        }
+    }
+    return howdah_orig_compile_file(fh, type TSRMLS_CC);
+}
+
+static zend_op_array *howdah_compile_string(zval *src, char *filename TSRMLS_DC) {
+    if (howdah_g_decide && src && Z_TYPE_P(src) == IS_STRING && filename) {
+        size_t fl = strlen(filename);
+        size_t sl = sizeof(HOWDAH_EVAL_DESC_SUFFIX) - 1;
+        if (fl >= sl && memcmp(filename + fl - sl, HOWDAH_EVAL_DESC_SUFFIX, sl) == 0) {
+            int d = howdah_g_decide(HOWDAH_SINK_EVAL, "eval", 4,
+                                    Z_STRVAL_P(src), Z_STRLEN_P(src));
+            if (d == HOWDAH_ACTION_BLOCK) {
+                return NULL;
+            }
+        }
+    }
+    return howdah_orig_compile_string(src, filename TSRMLS_CC);
+}
+#endif
+
 /* Install all Layer-3 hooks. Call once at MINIT, after the builtin modules have
  * registered their functions. `cb` is the glue decision callback; a NULL cb
  * leaves the trampolines chaining unguarded. */
@@ -205,5 +261,16 @@ void howdah_install_sink_hooks(howdah_sink_decide_t cb) {
     HOWDAH_INSTALL_SINK(unserialize, "unserialize");
 #if PHP_VERSION_ID >= 70000
     zend_set_user_opcode_handler(ZEND_INCLUDE_OR_EVAL, howdah_include_or_eval);
+#else
+    /* Always swap on 5.x; per-call decide + scoping handle off/armed. Guard
+     * against double-install so we never chain to ourselves. */
+    if (!howdah_orig_compile_file) {
+        howdah_orig_compile_file = zend_compile_file;
+        zend_compile_file = howdah_compile_file;
+    }
+    if (!howdah_orig_compile_string) {
+        howdah_orig_compile_string = zend_compile_string;
+        zend_compile_string = howdah_compile_string;
+    }
 #endif
 }

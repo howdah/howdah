@@ -95,11 +95,13 @@ echo "WRITE_RET[" . ($r ? 'ok' : 'false') . "]\n";
 echo "WRITE_DONE\n";
 PHPEOF
 
-# Read probe: opening an app PHP file for reading must never be a php-write.
+# Read probe: opening a .php file INSIDE the denied uploads dir for reading must
+# never be a php-write (fails if the write-mode gate regresses).
 printf '<?php return 1;' > "$APP/config.php"
+printf '<?php /* howdah-l4-test */' > "$UP/sub/ro.php"
 cat > "$APP/read.php" <<'PHPEOF'
 <?php
-$h = @fopen(getenv('APP') . '/config.php', 'r');
+$h = @fopen(getenv('UP') . '/sub/ro.php', 'r');
 echo "READ[" . ($h ? 'res' : 'no') . "]\n";
 echo "READ_DONE\n";
 PHPEOF
@@ -254,22 +256,22 @@ unset PROG
 # ========================================================= 3. UnexpectedEgress
 # L3 ssrf is deliberately left OFF (default): egress must work on its own.
 TARGET="http://blocked.test/"; export TARGET
-run_file 'mode="detect"\n[behavior]\nmode="detect"\nallow_egress_hosts=["allowed.test"]\n' "$APP/egress.php"
+run_file 'mode="detect"\n[sinks.ssrf]\nmode="off"\n[behavior]\nmode="detect"\nallow_egress_hosts=["allowed.test"]\n' "$APP/egress.php"
 out_has EGRESS_DONE || fail "3a: script did not continue"
 has_rule unexpected_egress || fail "3a: egress to a non-allowlisted host not flagged (ssrf off)"
 no_rule ssrf || fail "3a: L3 ssrf fired though it is off"
 ok "UnexpectedEgress (L3 ssrf OFF): outbound to a host not in allow_egress_hosts -> logged"
 TARGET="http://allowed.test/"
-run_file 'mode="detect"\n[behavior]\nmode="detect"\nallow_egress_hosts=["allowed.test"]\n' "$APP/egress.php"
+run_file 'mode="detect"\n[sinks.ssrf]\nmode="off"\n[behavior]\nmode="detect"\nallow_egress_hosts=["allowed.test"]\n' "$APP/egress.php"
 out_has EGRESS_DONE || fail "3b: script did not continue"
 no_events || fail "3b: allow-listed host produced a finding"
 ok "UnexpectedEgress: allow-listed host -> no finding"
-TARGET="http://169.254.169.254/"
-run_file 'mode="detect"\n[behavior]\nmode="detect"\nallow_egress_hosts=["allowed.test"]\n' "$APP/egress.php"
+TARGET="http://192.0.2.1/"
+run_file 'mode="detect"\n[sinks.ssrf]\nmode="off"\n[behavior]\nmode="detect"\nallow_egress_hosts=["allowed.test"]\n' "$APP/egress.php"
 has_rule unexpected_egress || fail "3c: link-local literal IP not flagged"
-ok "UnexpectedEgress: link-local literal IP target (not allow-listed) -> logged"
+ok "UnexpectedEgress: TEST-NET-1 (192.0.2.1) literal IP target (not allow-listed) -> logged"
 TARGET="http://blocked.test/"
-run_file 'mode="detect"\n[behavior]\nmode="block"\nallow_egress_hosts=["allowed.test"]\n' "$APP/egress.php"
+run_file 'mode="detect"\n[sinks.ssrf]\nmode="off"\n[behavior]\nmode="block"\nallow_egress_hosts=["allowed.test"]\n' "$APP/egress.php"
 out_has EGRESS_DONE || fail "3d: script did not continue after blocked egress"
 grep -q '"action":"block"' "$LOG" || fail "3d: no block under mode=block"
 ok "UnexpectedEgress (block): connection refused by the guard, script continued, action=block"
@@ -307,9 +309,10 @@ for HOW in fpc fopen; do
 done
 ok "PhpWrite Blade guard: .php write to <app>/storage/framework/views with uploads-only deny_exec_dirs -> NO finding, file written (fpc + fopen, even under block)"
 run_file 'mode="detect"\n[behavior]\nmode="block"\n'"$PWDENY" "$APP/read.php"
-out_has 'READ\[res\]' || fail "4d: read of app config.php failed"
-no_events || fail "4d: read-mode open of a .php file produced a finding"
-ok "PhpWrite: fopen(app/config.php,'r') (read) -> NO finding"
+out_has 'READ\[res\]' || fail "4d: read of uploads/sub/ro.php failed"
+no_rule php_write || fail "4d: read-mode open of a .php file inside the denied dir produced php_write"
+no_events || fail "4d: read-mode open produced a finding"
+ok "PhpWrite: fopen(uploads/sub/ro.php,'r') INSIDE the denied dir (read mode) -> NO finding"
 unset HOW WTARGET
 
 # ====================================================== 5. default / empty
@@ -359,13 +362,18 @@ no_blocks || fail "6a: observe produced a block"
 stop_server
 ok "observe=true (mode=block): direct shell request -> HTTP 200 + proposed upload_exec line, zero blocks"
 export PROG=true TARGET="http://blocked.test/" HOW=fpc WTARGET="$UP/x.php"
-for S in entry binary egress write; do
+proposed_rule() { grep "\"rule\":\"$1\"" "$LOG" | grep -q proposed; }
+# script : rule that must be PROPOSED : marker proving the action proceeded
+for CASE in entry:upload_exec:SHELL_RAN binary:unexpected_binary:BIN_DONE egress:unexpected_egress:EGRESS_DONE write:php_write:'WRITE_RET\[ok\]'; do
+  S=${CASE%%:*}; REST=${CASE#*:}; RULE=${REST%%:*}; MARK=${REST#*:}
   rm -f "$UP/x.php"
   run_file "$OBS" "$APP/$S.php"
-  grep -q proposed "$LOG" || fail "6b: no proposed line for $S.php"
+  proposed_rule "$RULE" || fail "6b: $S.php: no 'proposed' $RULE line"
   no_blocks || fail "6b: observe produced a block for $S.php"
+  out_has "$MARK" || fail "6b: $S.php: action did not proceed under observe (marker $MARK missing)"
+  [ "$S" != write ] || [ -f "$UP/x.php" ] || fail "6b: observe prevented the .php write"
 done
-ok "observe=true (mode=block): require / exec / egress / .php write each produce 'proposed' lines, zero blocks"
+ok "observe=true (mode=block): require->upload_exec, exec->unexpected_binary, egress->unexpected_egress, .php write->php_write each PROPOSED; every action proceeded; zero blocks"
 unset PROG TARGET HOW WTARGET
 
 # ---- leak guard: no written payload marker in the log -----------------------

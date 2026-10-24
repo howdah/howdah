@@ -89,15 +89,30 @@ impl Glob {
     /// True iff `path` matches the whole pattern. Paths over [`MAX_PATH`]
     /// bytes never match.
     pub fn matches(&self, path: &str) -> bool {
+        self.matches_work(path).0
+    }
+
+    /// Number of pattern tokens (for the work bound below).
+    pub fn tokens(&self) -> usize {
+        self.toks.len()
+    }
+
+    /// `matches` plus the work it did, counted as DP cell visits: one per
+    /// `(token, position)` cell filled, plus one per position of the
+    /// suffix-OR pass a wildcard row needs. The bound is therefore
+    /// `2 * tokens * (path_len + 1)`, which the tests assert instead of
+    /// wall-clock time (not reliable on shared CI runners).
+    pub fn matches_work(&self, path: &str) -> (bool, usize) {
         if path.len() > MAX_PATH {
-            return false;
+            return (false, 0);
         }
         if self.literal {
-            return path == self.source;
+            return (path == self.source, 0);
         }
         let s = path.as_bytes();
         let n = self.toks.len();
         let m = s.len();
+        let mut work = 0usize;
         // next[j]: can toks[t+1..] match s[j..]; cur[j]: toks[t..] vs s[j..].
         let mut next = vec![false; m + 1];
         next[m] = true;
@@ -113,12 +128,14 @@ impl Glob {
             let tok = &self.toks[t];
             if matches!(tok, Tok::Star | Tok::DoubleStar | Tok::DirStar) {
                 for j in (0..=m).rev() {
+                    work += 1;
                     any[j] = next[j] || any[j + 1];
                     seg[j] = next[j] || (j < m && s[j] != b'/' && seg[j + 1]);
                     slash[j] = (j >= 1 && s[j - 1] == b'/' && next[j]) || slash[j + 1];
                 }
             }
             for j in 0..=m {
+                work += 1;
                 cur[j] = match tok {
                     Tok::Lit(c) => j < m && s[j] == *c && next[j + 1],
                     Tok::One => j < m && s[j] != b'/' && next[j + 1],
@@ -131,7 +148,7 @@ impl Glob {
             }
             std::mem::swap(&mut cur, &mut next);
         }
-        next[0]
+        (next[0], work)
     }
 }
 
@@ -197,17 +214,28 @@ mod tests {
     }
 
     #[test]
-    fn linear_time_on_long_paths_and_capped() {
-        // 100 wildcard tokens against a 4 KiB path: a linear DP finishes well
-        // inside the budget (the earlier O(tokens x path^2) walk took ~200 ms).
+    fn linear_work_on_long_paths_and_capped() {
+        // 100 wildcard tokens against a 4 KiB path: the DP visits at most
+        // 2 * tokens * (path_len + 1) cells (one fill pass plus one suffix-OR
+        // pass per wildcard row). Deterministic, unlike wall-clock time: the
+        // earlier O(tokens x path^2) walk did ~tokens * path^2 / 2 visits.
         let pat = format!("/{}b", "*a".repeat(50));
         let g = Glob::parse(&pat).unwrap();
+        assert_eq!(g.tokens(), 102);
         let path = format!("/{}", "a".repeat(MAX_PATH - 1));
         let t = std::time::Instant::now();
-        for _ in 0..20 {
-            assert!(!g.matches(&path));
-        }
-        assert!(t.elapsed().as_millis() < 400, "{:?}", t.elapsed());
+        let (hit, work) = g.matches_work(&path);
+        eprintln!("glob: {} tokens x {} bytes: {work} cell visits in {:?} (advisory)", g.tokens(), path.len(), t.elapsed());
+        assert!(!hit);
+        assert!(work <= 2 * g.tokens() * (path.len() + 1), "work {work}");
+        assert!(work >= g.tokens() * (path.len() + 1), "every cell is filled once: {work}");
+        // A pattern that does match does the same bounded work (path kept
+        // under the cap: `{path}b` would be 4097 bytes and never match).
+        let hit_path = format!("/{}b", "a".repeat(4000));
+        let hg = Glob::parse("/**/a*b").unwrap();
+        let (hit, work) = hg.matches_work(&hit_path);
+        assert!(hit);
+        assert!(work <= 2 * hg.tokens() * (hit_path.len() + 1), "work {work}");
         // Over the cap: never matches, even a catch-all pattern.
         let long = format!("/var/{}", "x".repeat(MAX_PATH));
         assert!(!Glob::parse("/var/**").unwrap().matches(&long));
@@ -217,14 +245,17 @@ mod tests {
     }
 
     #[test]
-    fn pathological_pattern_terminates() {
+    fn pathological_pattern_is_bounded_work() {
         let p = Glob::parse("/**/**/**/**/**/*a*a*a*a*a*b").unwrap();
         let s = format!("/{}", "a/".repeat(200));
-        let t = std::time::Instant::now();
-        assert!(!p.matches(&s));
+        let (hit, work) = p.matches_work(&s);
+        assert!(!hit);
+        assert!(work <= 2 * p.tokens() * (s.len() + 1), "work {work}");
         let long = format!("/{}b", "a".repeat(4000));
-        assert!(!Glob::parse("/*a*a*a*a*a*a*a*a*c").unwrap().matches(&long));
+        let miss = Glob::parse("/*a*a*a*a*a*a*a*a*c").unwrap();
+        let (hit, work) = miss.matches_work(&long);
+        assert!(!hit);
+        assert!(work <= 2 * miss.tokens() * (long.len() + 1), "work {work}");
         assert!(Glob::parse("/*a*a*a*a*a*a*a*a*b").unwrap().matches(&long));
-        assert!(t.elapsed().as_secs() < 5);
     }
 }

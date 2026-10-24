@@ -55,6 +55,19 @@ The workflow also stamps matching `Cache-Control` headers on each object. Rules
 | path starts with `/apt/dists/` or `/yum/repodata/` | Bypass cache (or Edge TTL 5 minutes max, Browser TTL 5 minutes). These change on every publish. |
 | everything else | defaults |
 
+The layout repositories (cPanel, Plesk, CloudLinux, distribution EL PHP;
+`packaging/layouts.tsv`) live under their own prefixes: `cpanel/`, `plesk/`,
+`cloudlinux/` and `el/php<minor>/`, each holding `apt/` and/or `yum/` in the
+same shape as the main repo. Widen the two rules so they match there too:
+
+| Match | Setting |
+|---|---|
+| path contains `/apt/pool/` or ends with `.rpm` | as the first row above |
+| path contains `/apt/dists/` or `/yum/repodata/` | as the second row above |
+
+Until the rules are widened, the layout indexes still carry the short
+`Cache-Control` the workflow stamps, and their packages are served uncached.
+
 Also: the `pkg` host must be public and unchallenged. Do not put a WAF
 challenge, Bot Fight Mode, or "Under Attack" on `pkg.howdah.org`; apt and yum
 cannot solve it. Keep the custom domain connected to the bucket with public
@@ -102,6 +115,18 @@ deliberate same-version re-publish (architecture backfill) still uses
 The arm64/aarch64 jobs are best-effort: a failed cell only drops that
 architecture for that minor.
 
+**Layout repositories.** The same run also builds the cPanel, Plesk,
+CloudLinux and distribution-EL packages (`packaging/build-layouts.sh`, one
+`layouts-*` artifact per cell, best-effort like arm64) and, only after the
+main upload above has finished, seeds, assembles, signs, verifies and uploads
+one repository per prefix (`packaging/repo/seed-layouts-r2.sh`,
+`build-layout-repos.sh`, `publish-layouts-r2.sh`). They use the same signing
+subkey, the same `publish`/`overwrite` inputs (a dry run is a dry run for them
+too) and the same `publish-r2.sh` upload order, and they never write under
+`apt/` or `yum/`. The main repo's inputs exclude them: its download step takes
+only the `pkgs-*` artifacts. A failure in a layout step leaves the main
+publish as it was.
+
 ## 5. Verify against the live URL
 
 Fresh containers, following `docs/install-repos.md` exactly:
@@ -125,7 +150,17 @@ Quick sanity without installing:
 ```sh
 curl -fsSI https://pkg.howdah.org/apt/dists/stable/InRelease
 curl -fsSI https://pkg.howdah.org/yum/repodata/repomd.xml.asc
+# layout repositories
+for p in cpanel/yum cpanel/apt/dists/stable plesk/yum plesk/apt/dists/stable cloudlinux/yum el/php7.4/yum; do
+  case "$p" in */yum) f=repodata/repomd.xml.asc ;; *) f=InRelease ;; esac
+  curl -fsSI "https://pkg.howdah.org/$p/$f" | head -1
+done
 ```
+
+For the layout packages against the vendors' own PHP, run
+`packaging/validate-layout.sh` (it installs cPanel's EA4 and Plesk's PHP from
+their public repositories in containers), or follow
+`docs/install-repos.md#panel-and-distribution-php` in a fresh container.
 
 ## Rollback of a bad publish
 

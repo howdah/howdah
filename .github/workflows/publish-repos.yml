@@ -62,6 +62,25 @@ jobs:
             packaging/out/*.rpm
           if-no-files-found: error
 
+      # Panel / stock-EL layout packages (packaging/layouts.tsv) from the SAME
+      # tarball. Best-effort: they go to their own repositories and must never
+      # block the main apt/yum publish, so a failure here only drops them.
+      - name: Build layout packages (cPanel, Plesk, CloudLinux, stock EL) for PHP ${{ matrix.minor }}
+        continue-on-error: true
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then export HOWDAH_VERSION="$INPUT_VERSION"; fi
+          HOWDAH_NO_BUILD=1 packaging/build-layouts.sh "${{ matrix.minor }}" x86_64
+
+      - name: Upload layout packages
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: layouts-php${{ matrix.minor }}-x86_64
+          path: packaging/out/layouts/
+          if-no-files-found: warn
+
   # ---- arm64/aarch64 packages: BEST-EFFORT, never blocks the publish -------
   # Same policy as release.yml: native arm64 runner; a failed cell just means
   # no arm64/aarch64 package for that minor.
@@ -94,6 +113,22 @@ jobs:
             packaging/out/*.rpm
           if-no-files-found: error
 
+      - name: Build layout packages (rows that list aarch64) for PHP ${{ matrix.minor }}
+        continue-on-error: true
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then export HOWDAH_VERSION="$INPUT_VERSION"; fi
+          HOWDAH_NO_BUILD=1 packaging/build-layouts.sh "${{ matrix.minor }}" aarch64
+
+      - name: Upload layout packages
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: layouts-php${{ matrix.minor }}-aarch64
+          path: packaging/out/layouts/
+          if-no-files-found: warn
+
   # ---- sign + assemble both repos, then (optionally) upload to R2 ----------
   publish:
     needs: [build, build-aarch64]
@@ -103,10 +138,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Only the main-repo artifacts (pkgs-*). The layout packages (layouts-*)
+      # must never reach packaging/out/*.deb|*.rpm, the main repo's inputs.
       - name: Collect all packages
         uses: actions/download-artifact@v4
         with:
           path: dl
+          pattern: pkgs-*
           merge-multiple: true
 
       - name: Gather packages into packaging/out
@@ -256,11 +294,80 @@ jobs:
           fi
           packaging/repo/publish-r2.sh "$HOWDAH_R2_BUCKET"
 
+      # ---- layout repositories (cPanel, Plesk, CloudLinux, stock EL) --------
+      # Everything below runs AFTER the main repo upload above and writes only
+      # under its own prefixes (cpanel/, plesk/, cloudlinux/, el/php<minor>/),
+      # each a separate signed apt and/or yum repo; nothing under apt/ or yum/.
+      # A failure here cannot change what the main repo published.
+      - name: Collect layout packages
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          path: packaging/out/layouts
+          pattern: layouts-*
+          merge-multiple: true
+
+      - name: Any layout packages?
+        id: layouts
+        run: |
+          list="$(sh packaging/repo/layout-prefixes.sh packaging/out/layouts)"
+          printf '%s\n' "$list"
+          if [ -n "$list" ]; then echo "has=true" >> "$GITHUB_OUTPUT"
+          else echo "::warning::no layout packages were built; skipping the layout repos"; echo "has=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Seed the layout repos from R2 (keep prior versions in each index)
+        if: steps.layouts.outputs.has == 'true'
+        env:
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.HOWDAH_R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.HOWDAH_R2_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_ENDPOINT: ${{ secrets.HOWDAH_R2_ENDPOINT }}
+          RCLONE_CONFIG_R2_NO_CHECK_BUCKET: "true"
+          HOWDAH_R2_BUCKET: ${{ secrets.HOWDAH_R2_BUCKET }}
+        run: packaging/repo/seed-layouts-r2.sh "$HOWDAH_R2_BUCKET"
+
+      - name: Assemble + sign the layout repos (same apt/yum builders, seeded)
+        if: steps.layouts.outputs.has == 'true'
+        env:
+          HOWDAH_GPG_KEYID: "9A104FB0A073065B2C2631FC1E8D725D31BD5DC9!"
+          HOWDAH_GNUPGHOME: ${{ github.workspace }}/.gnupg-home
+          HOWDAH_LAYOUT_SEED: ${{ github.workspace }}/packaging/out/layout-seed
+        run: packaging/repo/build-layout-repos.sh
+
+      - name: Verify the layout repo signatures against the COMMITTED public key
+        if: steps.layouts.outputs.has == 'true'
+        run: |
+          tmp="$(mktemp -d)"
+          export GNUPGHOME="$tmp"
+          gpg --batch --import packaging/howdah-release-signing.asc
+          r=packaging/out/layout-repo
+          for f in $(find "$r" -path '*/apt/dists/stable/InRelease' | sort); do gpg --batch --verify "$f"; done
+          for f in $(find "$r" -path '*/apt/dists/stable/Release' | sort); do gpg --batch --verify "$f.gpg" "$f"; done
+          for f in $(find "$r" -path '*/yum/repodata/repomd.xml' | sort); do gpg --batch --verify "$f.asc" "$f"; done
+          find "$r" -type f \( -name '*.rpm' -o -name '*.deb' \) | sort
+          rm -rf "$tmp"
+
+      - name: Upload the layout repos to R2 (dependency order, own prefixes only)
+        if: steps.layouts.outputs.has == 'true'
+        env:
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.HOWDAH_R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.HOWDAH_R2_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_ENDPOINT: ${{ secrets.HOWDAH_R2_ENDPOINT }}
+          RCLONE_CONFIG_R2_NO_CHECK_BUCKET: "true"
+          HOWDAH_R2_BUCKET: ${{ secrets.HOWDAH_R2_BUCKET }}
+          HOWDAH_R2_DRY_RUN: ${{ inputs.publish && '0' || '1' }}
+          HOWDAH_R2_OVERWRITE: ${{ inputs.overwrite && '1' || '0' }}
+        run: packaging/repo/publish-layouts-r2.sh "$HOWDAH_R2_BUCKET"
+
       - name: Summary
         run: |
           {
             echo "### publish-repos"
             echo "- published to R2: \`${{ inputs.publish }}\` (false = dry run)"
+            echo "- layout repos (cpanel/, plesk/, cloudlinux/, el/php<minor>/): \`${{ steps.layouts.outputs.has }}\`"
             echo "- next: verify against https://pkg.howdah.org (GO-LIVE.md step 4)"
             echo "- Cloudflare: long cache for \`pool/\`+\`*.rpm\`, short/bypass for \`dists/\`+\`repodata/\`"
           } >> "$GITHUB_STEP_SUMMARY"

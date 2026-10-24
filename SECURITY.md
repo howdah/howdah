@@ -24,8 +24,8 @@ enough for us to reproduce and fix it.
 
 | Version | Supported |
 | ------- | --------- |
-| 1.3.x | Yes. Current release; fixes ship here first. |
-| 1.2.x and earlier | No. Upgrade to the latest 1.3.x release. |
+| 1.4.x | Yes. Current release; fixes ship here first. |
+| 1.3.x and earlier | No. Upgrade to the latest 1.4.x release. |
 
 Fixes land on `main` and ship in the next patch release of the current minor
 line. Releases and packages are available from the GitHub releases page and
@@ -59,12 +59,15 @@ curl -fsSL https://howdah.org/key.asc | gpg --show-keys --with-fingerprint
 
 ## Scope
 
-Howdah is a PHP extension with three layers. **Layer 1** enforces request
+Howdah is a PHP extension with four layers. **Layer 1** enforces request
 limits (multipart floods, input-variable floods, nesting depth, header
 sizes); its critical limits block in the default `detect` mode. **Layer 2**
 inspects decoded input values and only logs. **Layer 3** hardens dangerous
 sinks (command execution, `unserialize`, `include`/`eval`, `phar://`, SSRF)
-and only logs unless a sink is explicitly armed. The exact, lab-verified
+and only logs unless a sink is explicitly armed. **Layer 4** (after-breach
+behaviour: PHP run from upload directories, unexpected binaries, unexpected
+outbound hosts, `.php` writes) is log-first and inert until an operator sets its
+lists; it only sees what PHP itself does. The exact, lab-verified
 coverage per PHP version is in [docs/coverage.md](docs/coverage.md), including
 what is not covered.
 

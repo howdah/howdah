@@ -68,6 +68,43 @@ All notable changes to Howdah are documented here. The format follows
   writes (`id`, `ip`, an ISO timestamp) and said events could go to syslog.
   It now shows a real line and says the log is a file only.
 
+## [1.4.0] - 2026-10-24
+
+### Added
+- Layer 4, "after a breach": a new `[behavior]` config section (no new php.ini
+  directives). **Log-first and off-safe by default:** `behavior.mode` defaults
+  to `detect`, is independent of `howdah.mode`, and every list is empty, so a
+  fresh install blocks nothing. Four facets: `deny_exec_dirs` (PHP run from a
+  denied directory, as the requested script or `require`d by another script),
+  `allow_exec_binaries` (exec-family call to a program not on the list),
+  `allow_egress_hosts` (outbound connection to a host not on the list) and
+  `deny_php_writes` (a PHP file written into a denied directory or from a script
+  under one; origin-scoped, so ordinary template compilation elsewhere is not
+  flagged). New rule ids `upload_exec`, `unexpected_binary`,
+  `unexpected_egress` and `php_write`, all Standard severity. Events name the
+  script that made the call.
+- `behavior.observe = true` logs would-be findings as `proposed` lines to help
+  build the allowlists. It never blocks and never writes config.
+- Verified by a lab script (27 checks) on PHP 5.4, 5.6, 7.4, 8.3, 8.4 and 8.5.
+- The config editor labels the four new rule ids as having no effect under
+  `[rules]` (use `[behavior] mode`).
+
+### Known limits
+- Howdah only sees what PHP itself does; a detached or forked process, or a
+  dropper that never ran through PHP, is invisible.
+- The main-script check does not depend on opcache; the `require`d-file check
+  is first-compile, best-effort. A `require` with a relative path is not
+  checked at include time on any version.
+- Allowlists are best-effort and bypassable. `.php`-write detection is by
+  target extension and can still flag frameworks that write compiled templates
+  into a denied directory. Observe only proposes.
+- On PHP 7.0+ Howdah installs a user opcode handler (for include/eval) at
+  MINIT, which turns OPcache JIT off; this is unchanged since 1.3 and
+  independent of Layer 4.
+
+### Changed
+- Version bumped to 1.4.0.
+
 ## [1.3.0] - 2026-10-24
 
 ### Added

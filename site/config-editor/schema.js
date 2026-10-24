@@ -64,7 +64,8 @@
     max_request_headers: 'headers', max_request_header_bytes: 'headers',
     sql_injection: 'inspect', path_traversal: 'inspect', command_injection: 'inspect',
     command_exec: 'sinks', include: 'sinks', eval: 'sinks', unserialize: 'sinks',
-    phar: 'sinks', ssrf: 'sinks'
+    phar: 'sinks', ssrf: 'sinks',
+    upload_exec: 'behavior', unexpected_binary: 'behavior', unexpected_egress: 'behavior', php_write: 'behavior'
   };
 
   var RULE_NOTES = {
@@ -74,14 +75,14 @@
   // The core accepts every rule name under [rules], but the extension reads
   // Layer 2 overrides only from [inspect.rule_modes] and sink modes only from
   // [sinks.<sink>] mode; a [rules] entry for those names has no effect.
-  var NOOP_NOTE = 'Accepted by the core but has no effect: the extension does not read [rules] for this name. Use the Layer 2 per-class override ([inspect.rule_modes]) or the sink’s own mode ([sinks.<sink>] mode) instead.';
+  var NOOP_NOTE = 'Accepted by the core but has no effect: the extension does not read [rules] for this name. Use the Layer 2 per-class override ([inspect.rule_modes]), the sink’s own mode ([sinks.<sink>] mode), or the Layer 4 [behavior] mode instead.';
 
   // The [rules] keys are built from the core's catalog at runtime so the form
   // can never offer a rule the core rejects, or miss one it accepts.
   function rulesKeys(catalog) {
     return (catalog || []).map(function (r) {
       var layer = RULE_LAYER[r.name] || 'other';
-      var noop = layer === 'inspect' || layer === 'sinks';
+      var noop = layer === 'inspect' || layer === 'sinks' || layer === 'behavior';
       return {
         key: r.name, type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
         severity: r.severity, layer: layer, noop: noop,

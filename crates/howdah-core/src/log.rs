@@ -48,6 +48,10 @@ fn rule_name(r: RuleId) -> &'static str {
         RuleId::Phar => "phar",
         RuleId::Ssrf => "ssrf",
         RuleId::Unserialize => "unserialize",
+        RuleId::UploadExec => "upload_exec",
+        RuleId::UnexpectedBinary => "unexpected_binary",
+        RuleId::UnexpectedEgress => "unexpected_egress",
+        RuleId::PhpWrite => "php_write",
     }
 }
 

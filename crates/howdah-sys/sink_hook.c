@@ -30,19 +30,38 @@
 #include <string.h>
 #include <stddef.h>
 
-/* Sink ids: must match HOWDAH_SINK_* in howdah-core's ffi.rs. */
-#define HOWDAH_SINK_COMMAND_EXEC 0
-#define HOWDAH_SINK_INCLUDE      1
-#define HOWDAH_SINK_EVAL         2
-#define HOWDAH_SINK_UNSERIALIZE  3
-/* Action code returned by the decide callback (0 ALLOW, 1 LOG, 2 BLOCK) — this
- * is an ACTION, not a sink id (hence not in the HOWDAH_SINK_* family). */
-#define HOWDAH_ACTION_BLOCK      2
+#include "howdah_sink.h"
+/* Sink ids (HOWDAH_SINK_*) and the decide ACTION code (HOWDAH_ACTION_BLOCK, an
+ * action, not a sink id) come from howdah_sink.h — the single source of truth
+ * mirroring howdah-core's ffi.rs. */
 
 /* The glue callback: decides for one intercepted call. Returns 0/1/2. */
 typedef int (*howdah_sink_decide_t)(int sink, const char *name, size_t name_len,
                                     const char *arg, size_t arg_len);
 static howdah_sink_decide_t howdah_g_decide = NULL;
+
+/* Layer-4 behavior callbacks (declared extern in howdah_sink.h). Defined here,
+ * once, so both sink_hook.c and ssrf_hook.c share one set of pointers. NULL ⇒
+ * that facet is unguarded (fail-open). Set by howdah_install_behavior_hooks. */
+howdah_behavior_armed_t     howdah_g_behavior_armed     = NULL;
+howdah_behavior_exec_dir_t  howdah_g_behavior_exec_dir  = NULL;
+howdah_behavior_binary_t    howdah_g_behavior_binary    = NULL;
+howdah_behavior_egress_t    howdah_g_behavior_egress    = NULL;
+howdah_behavior_php_write_t howdah_g_behavior_php_write = NULL;
+
+/* The currently-executing PHP script path, for the Layer-4 origin (the "caller"
+ * of a binary/egress/php-write). PHP 5.x threads TSRMLS and returns `char *`;
+ * PHP 7/8 take no args and return `const char *`. Spike-proven on 5.4/5.6/7.4/
+ * 8.1/8.4. Never returns NULL in practice (PHP yields "[no active file]" when
+ * nothing is executing); callers still guard before strlen. */
+static const char *howdah_current_script(void) {
+#if PHP_VERSION_ID >= 70000
+    return zend_get_executed_filename();
+#else
+    TSRMLS_FETCH();
+    return zend_get_executed_filename(TSRMLS_C);
+#endif
+}
 
 typedef void (*howdah_zif)(INTERNAL_FUNCTION_PARAMETERS);
 
@@ -91,6 +110,23 @@ typedef void (*howdah_zif)(INTERNAL_FUNCTION_PARAMETERS);
             if (d == HOWDAH_ACTION_BLOCK) {                                    \
                 RETVAL_FALSE;                                                \
                 return; /* neutralize: do not call the original */          \
+            }                                                               \
+        }                                                                   \
+        /* Layer-4 (additive): on command-exec sinks only, after the Layer-3  \
+         * decide, ask the behavior glue whether this caller spawning this     \
+         * program is a post-breach binary. arg1 is the program/command — the  \
+         * same string the sink decide inspected. Final action is max(sink,    \
+         * behavior); a sink BLOCK already returned above, so here only a       \
+         * behavior BLOCK can still neutralize. Not for unserialize. */         \
+        if ((sinkid) == HOWDAH_SINK_COMMAND_EXEC && ok                       \
+            && howdah_g_behavior_armed && howdah_g_behavior_binary           \
+            && howdah_g_behavior_armed(NULL, HOWDAH_BEHAVIOR_BINARY)) {      \
+            const char *_org = howdah_current_script();                      \
+            int _bd = howdah_g_behavior_binary(NULL, _org,                   \
+                          _org ? strlen(_org) : 0, arg, arglen);            \
+            if (_bd == HOWDAH_ACTION_BLOCK) {                                 \
+                RETVAL_FALSE;                                                \
+                return;                                                     \
             }                                                               \
         }                                                                   \
         howdah_orig_##cname(INTERNAL_FUNCTION_PARAM_PASSTHRU);              \
@@ -161,30 +197,47 @@ static int howdah_include_or_eval(zend_execute_data *execute_data) {
     const zend_op *opline = EX(opline);
     int is_eval = (opline->extended_value == ZEND_EVAL);
     zval *v;
-    if (!howdah_g_decide) {
+    int block = 0;
+    /* Fully disarmed (no Layer-3 decide and no Layer-4 behavior): fast-path out
+     * before touching the operand. */
+    if (!howdah_g_decide && !howdah_g_behavior_armed) {
         return ZEND_USER_OPCODE_DISPATCH;
     }
     v = howdah_op1_zval(execute_data);
     if (!v || Z_TYPE_P(v) != IS_STRING) {
         return ZEND_USER_OPCODE_DISPATCH; /* non-string operand: fail open */
     }
-    {
+    if (howdah_g_decide) {
         int sink = is_eval ? HOWDAH_SINK_EVAL : HOWDAH_SINK_INCLUDE;
         const char *name = is_eval ? "eval" : "include";
-        int d = howdah_g_decide(sink, name, strlen(name), Z_STRVAL_P(v), Z_STRLEN_P(v));
-        if (d == HOWDAH_ACTION_BLOCK) {
-            /* Free a computed op1 (IS_TMP_VAR/IS_VAR, e.g. `include $a.$b`) that
-             * the skipped opcode would otherwise have freed — avoids a bounded
-             * per-blocked-call leak. CV/CONST operands own nothing to free. */
-            if (opline->op1_type & (IS_TMP_VAR | IS_VAR)) {
-                zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
-            }
-            if (opline->result_type != IS_UNUSED) {
-                ZVAL_NULL(EX_VAR(opline->result.var));
-            }
-            EX(opline) = opline + 1; /* skip the include/eval */
-            return ZEND_USER_OPCODE_CONTINUE;
+        if (howdah_g_decide(sink, name, strlen(name), Z_STRVAL_P(v), Z_STRLEN_P(v))
+            == HOWDAH_ACTION_BLOCK) {
+            block = 1;
         }
+    }
+    /* Layer-4 exec-dir (Ruling 3, 7.0+ included-file case): best-effort check of
+     * the include operand path against the deny_exec_dirs policy, alongside the
+     * Layer-3 include decide. String operand only — a variable/computed path is
+     * not resolved here (documented limitation); the RINIT main-script check is
+     * the primary control. Not applicable to eval (no file path). */
+    if (!block && !is_eval && howdah_g_behavior_exec_dir && howdah_g_behavior_armed
+        && howdah_g_behavior_armed(NULL, HOWDAH_BEHAVIOR_EXEC_DIR)
+        && howdah_g_behavior_exec_dir(NULL, Z_STRVAL_P(v), Z_STRLEN_P(v))
+           == HOWDAH_ACTION_BLOCK) {
+        block = 1;
+    }
+    if (block) {
+        /* Free a computed op1 (IS_TMP_VAR/IS_VAR, e.g. `include $a.$b`) that
+         * the skipped opcode would otherwise have freed — avoids a bounded
+         * per-blocked-call leak. CV/CONST operands own nothing to free. */
+        if (opline->op1_type & (IS_TMP_VAR | IS_VAR)) {
+            zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+        }
+        if (opline->result_type != IS_UNUSED) {
+            ZVAL_NULL(EX_VAR(opline->result.var));
+        }
+        EX(opline) = opline + 1; /* skip the include/eval */
+        return ZEND_USER_OPCODE_CONTINUE;
     }
     return ZEND_USER_OPCODE_DISPATCH;
 }
@@ -218,13 +271,25 @@ static zend_op_array *(*howdah_orig_compile_string)(zval *src, char *filename TS
 #define HOWDAH_EVAL_DESC_SUFFIX " : eval()'d code"
 
 static zend_op_array *howdah_compile_file(zend_file_handle *fh, int type TSRMLS_DC) {
-    if (howdah_g_decide && EG(current_execute_data) != NULL
+    if (EG(current_execute_data) != NULL
         && (type == ZEND_INCLUDE || type == ZEND_REQUIRE
             || type == ZEND_INCLUDE_ONCE || type == ZEND_REQUIRE_ONCE)
         && fh && fh->filename) {
-        int d = howdah_g_decide(HOWDAH_SINK_INCLUDE, "include", 7,
-                                fh->filename, strlen(fh->filename));
-        if (d == HOWDAH_ACTION_BLOCK) {
+        if (howdah_g_decide) {
+            int d = howdah_g_decide(HOWDAH_SINK_INCLUDE, "include", 7,
+                                    fh->filename, strlen(fh->filename));
+            if (d == HOWDAH_ACTION_BLOCK) {
+                return NULL;
+            }
+        }
+        /* Layer-4 exec-dir (Ruling 3, 5.x included-file case): the file being
+         * compiled for a runtime include/require is checked against the
+         * deny_exec_dirs policy. BLOCK reuses the include-neutralize path
+         * (return NULL = no op_array), the same bail include guarding uses. */
+        if (howdah_g_behavior_exec_dir && howdah_g_behavior_armed
+            && howdah_g_behavior_armed(NULL, HOWDAH_BEHAVIOR_EXEC_DIR)
+            && howdah_g_behavior_exec_dir(NULL, fh->filename, strlen(fh->filename))
+               == HOWDAH_ACTION_BLOCK) {
             return NULL;
         }
     }

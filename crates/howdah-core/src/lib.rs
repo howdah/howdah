@@ -1,4 +1,5 @@
 //! Howdah core: pure Rust, no PHP types.
+pub mod behavior;
 pub mod config;
 pub mod ffi;
 pub mod input;

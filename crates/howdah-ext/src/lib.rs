@@ -21,6 +21,8 @@ pub mod ini_config;
 pub mod ini_risk;
 
 #[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]
+mod behavior_filter;
+#[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]
 mod input_filter;
 #[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]
 mod module;

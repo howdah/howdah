@@ -6,7 +6,7 @@ export const RELEASES = `${REPO}/releases`;
 export const PKG = 'https://pkg.howdah.org';
 // Stateless config fetch service behind the config editor's curl command.
 export const CFG = 'https://cfg.howdah.org';
-export const VERSION = '1.3.0';
+export const VERSION = '1.4.0';
 
 // Signing key primary fingerprint, grouped for readability (compare against gpg).
 export const KEY_FPR = '1152 1035 C600 F638 31F8 2551 2087 B872 0997 807B';

@@ -43,6 +43,22 @@ extern "C" {
     /// Clear the C-owned per-request curl handle->URL map and resolution cache.
     /// Called from the ext's `clear_request_state` (RSHUTDOWN and bailout paths).
     pub fn howdah_ssrf_request_reset();
+
+    /// Install the Layer-4 behavior glue: set the five behavior callbacks AND
+    /// swap `file_put_contents`/`move_uploaded_file`/`rename` onto their
+    /// php-write trampolines (fopen is already swapped by the SSRF install, so
+    /// its php-write branch goes live once these callbacks are set). Call once at
+    /// first RINIT, AFTER `howdah_install_ssrf_hooks` (same first-RINIT install
+    /// as the phar/ssrf hooks, for shared-extension load order). Parameter order mirrors
+    /// `howdah_install_behavior_hooks` in `howdah_sink.h` exactly. A NULL
+    /// callback leaves that facet unguarded (fail-open).
+    pub fn howdah_install_behavior_hooks(
+        armed: HowdahBehaviorArmed,
+        exec_dir: HowdahBehaviorExecDir,
+        binary: HowdahBehaviorBinary,
+        egress: HowdahBehaviorEgress,
+        php_write: HowdahBehaviorPhpWrite,
+    );
 }
 
 extern "C" {
@@ -76,4 +92,52 @@ pub type HowdahSinkDecide = unsafe extern "C" fn(
     name_len: usize,
     arg: *const ::std::ffi::c_char,
     arg_len: usize,
+) -> ::std::ffi::c_int;
+
+// ---- Layer-4 behavior glue callbacks ---------------------------------------
+// Mirror the `howdah_behavior_*_t` typedefs in `howdah_sink.h` (and the matching
+// `howdah_behavior_check_*` / `howdah_behavior_armed` FFI in howdah-core). `ctx`
+// is always NULL (the ext glue uses its own CTX and writes the log line). Return
+// code is 0 ALLOW / 1 LOG / 2 BLOCK (armed: 1 iff the facet is armed).
+
+/// `howdah_behavior_armed_t`: 1 iff the given `HOWDAH_BEHAVIOR_*` facet is armed.
+pub type HowdahBehaviorArmed = unsafe extern "C" fn(
+    ctx: *mut ::std::ffi::c_void,
+    facet: ::std::ffi::c_int,
+) -> ::std::ffi::c_int;
+
+/// `howdah_behavior_exec_dir_t`: script about to execute at `path`.
+pub type HowdahBehaviorExecDir = unsafe extern "C" fn(
+    ctx: *mut ::std::ffi::c_void,
+    path: *const ::std::ffi::c_char,
+    path_len: usize,
+) -> ::std::ffi::c_int;
+
+/// `howdah_behavior_binary_t`: `caller` spawning program `prog`.
+pub type HowdahBehaviorBinary = unsafe extern "C" fn(
+    ctx: *mut ::std::ffi::c_void,
+    caller: *const ::std::ffi::c_char,
+    caller_len: usize,
+    prog: *const ::std::ffi::c_char,
+    prog_len: usize,
+) -> ::std::ffi::c_int;
+
+/// `howdah_behavior_egress_t`: `caller` connecting out to `host`.
+pub type HowdahBehaviorEgress = unsafe extern "C" fn(
+    ctx: *mut ::std::ffi::c_void,
+    caller: *const ::std::ffi::c_char,
+    caller_len: usize,
+    host: *const ::std::ffi::c_char,
+    host_len: usize,
+) -> ::std::ffi::c_int;
+
+/// `howdah_behavior_php_write_t`: `caller` opening `target`; `is_write_mode`
+/// non-zero for write modes.
+pub type HowdahBehaviorPhpWrite = unsafe extern "C" fn(
+    ctx: *mut ::std::ffi::c_void,
+    caller: *const ::std::ffi::c_char,
+    caller_len: usize,
+    target: *const ::std::ffi::c_char,
+    target_len: usize,
+    is_write_mode: ::std::ffi::c_int,
 ) -> ::std::ffi::c_int;

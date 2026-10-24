@@ -56,6 +56,12 @@ pub const HOWDAH_SINK_UNSERIALIZE: i32 = 3;
 pub const HOWDAH_SINK_PHAR: i32 = 4;
 pub const HOWDAH_SINK_SSRF: i32 = 5;
 
+// Layer-4 behavior facets (howdah_behavior_armed).
+pub const HOWDAH_BEHAVIOR_EXEC_DIR: i32 = 0;
+pub const HOWDAH_BEHAVIOR_BINARY: i32 = 1;
+pub const HOWDAH_BEHAVIOR_EGRESS: i32 = 2;
+pub const HOWDAH_BEHAVIOR_PHP_WRITE: i32 = 3;
+
 fn code(a: Action) -> i32 {
     match a {
         Action::Allow => HOWDAH_ALLOW,
@@ -136,6 +142,10 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::Unserialize => "unserialize sink invoked on untrusted data",
         RuleId::Phar => "phar:// stream wrapper access outside the allowlist",
         RuleId::Ssrf => "outbound request to a disallowed destination",
+        RuleId::UploadExec => "possible executable or server-side code in an uploaded file",
+        RuleId::UnexpectedBinary => "unexpected binary executed following an upload",
+        RuleId::UnexpectedEgress => "possible unexpected outbound connection",
+        RuleId::PhpWrite => "PHP file written to disk",
     }
 }
 
@@ -344,6 +354,44 @@ impl howdah_ctx {
             method: self.meta.method.clone(),
             uri: self.meta.uri.clone(),
             reason,
+        };
+        self.sink_log = Some(log_line(&rec));
+        action
+    }
+
+    /// Layer-4 behavior check. Reuses `sink_log`. `hit` runs the classifier
+    /// against the config; the target is never logged (the classifier's
+    /// detail is a dir/host/basename only).
+    fn behavior_check(
+        &mut self,
+        hit: impl FnOnce(&crate::config::BehaviorConfig) -> Option<crate::behavior::BehaviorHit>,
+    ) -> Action {
+        #[cfg(test)]
+        if tests::FORCE_PANIC.with(|f| f.get()) {
+            panic!("injected test panic");
+        }
+        let mode = self.config.behavior.effective_mode(self.config.mode);
+        if mode == Mode::Off {
+            return Action::Allow;
+        }
+        let Some(crate::behavior::BehaviorHit { rule, detail }) = hit(&self.config.behavior) else {
+            return Action::Allow;
+        };
+        // Observe is propose-only: never block, and mark the line as a proposal.
+        let observe = self.config.behavior.observe;
+        let action = match mode {
+            Mode::Block if !observe => Action::Block,
+            _ => Action::Log,
+        };
+        let rec = EventRecord {
+            ts: now(),
+            request_id: self.request_id.clone(),
+            rule,
+            action,
+            client_ip: self.meta.client_ip.clone(),
+            method: self.meta.method.clone(),
+            uri: self.meta.uri.clone(),
+            reason: if observe { format!("proposed: {detail}") } else { detail },
         };
         self.sink_log = Some(log_line(&rec));
         action
@@ -923,6 +971,146 @@ pub unsafe extern "C" fn howdah_sink_check(
         code((*ctx).sink_check(id, n, a))
     }));
     r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// 1 iff the given Layer-4 facet (`HOWDAH_BEHAVIOR_*`) is armed; NULL ctx,
+/// unknown facet or panic is 0.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_behavior_armed(ctx: *mut howdah_ctx, facet: i32) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = &*ctx;
+        let b = &c.config.behavior;
+        if b.effective_mode(c.config.mode) == Mode::Off {
+            return 0;
+        }
+        let scoped = b.observe || !b.deny_exec_dirs.is_empty();
+        i32::from(match facet {
+            HOWDAH_BEHAVIOR_EXEC_DIR => !b.deny_exec_dirs.is_empty(),
+            HOWDAH_BEHAVIOR_BINARY => scoped || !b.allow_exec_binaries.is_empty(),
+            HOWDAH_BEHAVIOR_EGRESS => scoped || !b.allow_egress_hosts.is_empty(),
+            HOWDAH_BEHAVIOR_PHP_WRITE => b.deny_php_writes,
+            _ => false,
+        })
+    }))
+    .unwrap_or(0)
+}
+
+/// 1 iff the behavior egress facet is armed (for the widened SSRF hook).
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_behavior_egress_active(ctx: *mut howdah_ctx) -> i32 {
+    howdah_behavior_armed(ctx, HOWDAH_BEHAVIOR_EGRESS)
+}
+
+/// Layer-4: script about to execute at realpath `path`. 0/1/2; fail-open.
+///
+/// # Safety
+/// `ctx` NULL or live; `path` NULL or valid for `path_len`.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_behavior_check_exec_dir(
+    ctx: *mut howdah_ctx,
+    path: *const c_char,
+    path_len: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let p = copy_str(path, path_len);
+        code((*ctx).behavior_check(|cfg| crate::behavior::exec_dir_hit(&p, cfg)))
+    }))
+    .unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// Layer-4: caller spawning program `prog`. 0/1/2; fail-open.
+///
+/// # Safety
+/// `ctx` NULL or live; pointers NULL or valid for their lengths.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_behavior_check_binary(
+    ctx: *mut howdah_ctx,
+    caller: *const c_char,
+    caller_len: usize,
+    prog: *const c_char,
+    prog_len: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = copy_str(caller, caller_len);
+        let p = copy_str(prog, prog_len);
+        code((*ctx).behavior_check(|cfg| crate::behavior::binary_hit(&c, &p, cfg)))
+    }))
+    .unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// Layer-4: caller connecting out to `host`. 0/1/2; fail-open.
+///
+/// # Safety
+/// `ctx` NULL or live; pointers NULL or valid for their lengths.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_behavior_check_egress(
+    ctx: *mut howdah_ctx,
+    caller: *const c_char,
+    caller_len: usize,
+    host: *const c_char,
+    host_len: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = copy_str(caller, caller_len);
+        let h = copy_str(host, host_len);
+        code((*ctx).behavior_check(|cfg| crate::behavior::egress_hit(&c, &h, cfg)))
+    }))
+    .unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// Layer-4: caller opening `target`; `is_write_mode` non-zero for write modes.
+/// 0/1/2; fail-open.
+///
+/// # Safety
+/// `ctx` NULL or live; pointers NULL or valid for their lengths.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_behavior_check_php_write(
+    ctx: *mut howdah_ctx,
+    caller: *const c_char,
+    caller_len: usize,
+    target: *const c_char,
+    target_len: usize,
+    is_write_mode: i32,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = copy_str(caller, caller_len);
+        let t = copy_str(target, target_len);
+        code((*ctx).behavior_check(|cfg| crate::behavior::php_write_hit(&c, &t, is_write_mode != 0, cfg)))
+    }))
+    .unwrap_or_else(|_| {
         report_panic(ctx);
         HOWDAH_ALLOW
     })
@@ -1760,6 +1948,94 @@ mod tests {
         unsafe { howdah_free(c) };
         let c = init("mode=\"off\"\n[sinks.ssrf]\nmode=\"block\"");
         assert_eq!(ssrf_armed(c), 0);
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn behavior_ffi_smoke() {
+        let p = "/u/x.php";
+        let exec = |c: *mut howdah_ctx| unsafe { howdah_behavior_check_exec_dir(c, p.as_ptr() as _, p.len()) };
+        let c = init("[behavior]\ndeny_exec_dirs=[\"/u\"]");
+        assert_eq!(exec(c), HOWDAH_LOG);
+        let line = take_sink(c).unwrap();
+        assert!(line.contains("upload_exec") || line.contains("UploadExec"), "{line}");
+        assert!(!line.contains("x.php"));
+        unsafe { howdah_free(c) };
+        let c = init("[behavior]\nmode=\"block\"\ndeny_exec_dirs=[\"/u\"]");
+        assert_eq!(exec(c), HOWDAH_BLOCK);
+        assert!(take_sink(c).is_some());
+        unsafe { howdah_free(c) };
+        let c = init("[behavior]\nmode=\"block\"\ndeny_exec_dirs=[\"/u\"]");
+        let o = "/safe/x.php";
+        assert_eq!(unsafe { howdah_behavior_check_exec_dir(c, o.as_ptr() as _, o.len()) }, HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        unsafe { howdah_free(c) };
+        assert_eq!(unsafe { howdah_behavior_check_exec_dir(std::ptr::null_mut(), p.as_ptr() as _, p.len()) }, 0);
+    }
+
+    #[test]
+    fn behavior_observe_never_blocks_and_proposes() {
+        let p = "/u/x.php";
+        let c = init("[behavior]\nobserve=true\nmode=\"block\"\ndeny_exec_dirs=[\"/u\"]");
+        assert_eq!(unsafe { howdah_behavior_check_exec_dir(c, p.as_ptr() as _, p.len()) }, HOWDAH_LOG);
+        let line = take_sink(c).unwrap();
+        assert!(line.contains("proposed"), "{line}");
+        assert!(!line.contains("x.php"));
+        unsafe { howdah_free(c) };
+        let c = init("[behavior]\nobserve=true\nallow_exec_binaries=[]");
+        let (caller, prog) = ("/var/www/a.php", "/usr/bin/gs");
+        let r = unsafe { howdah_behavior_check_binary(c, caller.as_ptr() as _, caller.len(), prog.as_ptr() as _, prog.len()) };
+        assert_eq!(r, HOWDAH_LOG);
+        assert!(take_sink(c).unwrap().contains("proposed"));
+        unsafe { howdah_free(c) };
+        let c = init("[behavior]\nmode=\"block\"\ndeny_exec_dirs=[\"/u\"]");
+        assert_eq!(unsafe { howdah_behavior_check_exec_dir(c, p.as_ptr() as _, p.len()) }, HOWDAH_BLOCK);
+        assert!(!take_sink(c).unwrap().contains("proposed"));
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn behavior_ffi_other_checks_and_armed() {
+        let c = init(
+            "[behavior]\nmode=\"block\"\ndeny_exec_dirs=[\"/u\"]\nallow_exec_binaries=[\"git\"]\nallow_egress_hosts=[\"ok.example\"]\ndeny_php_writes=true",
+        );
+        let (caller, prog, host, tgt) = ("/u/a.php", "/bin/nc", "evil.example", "/u/w.php");
+        unsafe {
+            assert_eq!(howdah_behavior_check_binary(c, caller.as_ptr() as _, caller.len(), prog.as_ptr() as _, prog.len()), HOWDAH_BLOCK);
+            assert_eq!(howdah_behavior_check_egress(c, caller.as_ptr() as _, caller.len(), host.as_ptr() as _, host.len()), HOWDAH_BLOCK);
+            assert_eq!(howdah_behavior_check_php_write(c, caller.as_ptr() as _, caller.len(), tgt.as_ptr() as _, tgt.len(), 1), HOWDAH_BLOCK);
+            assert_eq!(howdah_behavior_check_php_write(c, caller.as_ptr() as _, caller.len(), tgt.as_ptr() as _, tgt.len(), 0), HOWDAH_ALLOW);
+            for f in 0..4 {
+                assert_eq!(howdah_behavior_armed(c, f), 1);
+            }
+            assert_eq!(howdah_behavior_egress_active(c), 1);
+            assert_eq!(howdah_behavior_armed(c, 99), 0);
+            assert_eq!(howdah_behavior_armed(std::ptr::null_mut(), 0), 0);
+            howdah_free(c);
+        }
+        let c = init("");
+        unsafe {
+            for f in 0..4 {
+                assert_eq!(howdah_behavior_armed(c, f), 0);
+            }
+            assert_eq!(howdah_behavior_egress_active(c), 0);
+            howdah_free(c);
+        }
+        let c = init("mode=\"off\"\n[behavior]\ndeny_exec_dirs=[\"/u\"]");
+        unsafe {
+            assert_eq!(howdah_behavior_armed(c, HOWDAH_BEHAVIOR_EXEC_DIR), 0);
+            howdah_free(c);
+        }
+    }
+
+    #[test]
+    fn behavior_ffi_panic_fails_open() {
+        let c = init("[behavior]\nmode=\"block\"\ndeny_exec_dirs=[\"/u\"]");
+        FORCE_PANIC.with(|f| f.set(true));
+        let p = "/u/x.php";
+        let r = unsafe { howdah_behavior_check_exec_dir(c, p.as_ptr() as _, p.len()) };
+        FORCE_PANIC.with(|f| f.set(false));
+        assert_eq!(r, HOWDAH_ALLOW);
         unsafe { howdah_free(c) };
     }
 

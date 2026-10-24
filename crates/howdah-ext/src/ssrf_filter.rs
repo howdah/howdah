@@ -49,7 +49,13 @@ pub(crate) unsafe extern "C" fn decide(
     .unwrap_or(core::HOWDAH_ALLOW)
 }
 
-/// `howdah_ssrf_armed_t`: 1 iff SSRF guarding is armed; fail-open 0.
+/// `howdah_ssrf_armed_t`: 1 iff the C SSRF path should run DNS/reserved-range
+/// work. This is the L3-reserved signal ONLY (`howdah_sink_ssrf_armed`): it is
+/// NOT widened for the L4 behavior egress facet. `ssrf_should_block` gates the
+/// (no-timeout) `resolve_host` on this signal, so deny_exec_dirs-only mode (SSRF
+/// off) never resolves; the C code runs the behavior-egress check under its own
+/// separate `howdah_g_behavior_armed(EGRESS)` gate, which needs no resolution
+/// (it matches the host string). Fail-open 0.
 ///
 /// # Safety
 /// Invoked by the C trampolines.
@@ -58,7 +64,7 @@ pub(crate) unsafe extern "C" fn armed(_ctx: *mut c_void) -> c_int {
         if module::CTX.is_null() {
             return 0;
         }
-        core::howdah_sink_ssrf_armed(module::CTX)
+        c_int::from(core::howdah_sink_ssrf_armed(module::CTX) != 0)
     }))
     .unwrap_or(0)
 }

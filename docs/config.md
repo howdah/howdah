@@ -338,6 +338,82 @@ is checked, and a hit on a reserved or internal range is a match.
 - As with `[inspect]`, this is best-effort hardening, not a substitute for
   fixing the application. The `phar` and `ssrf` limits are listed in their sections above.
 
+## `[behavior]` — Layer 4 after-breach behaviour (log-only by default)
+
+**Layer 4 logs by default; it does not block, and it does nothing until you set
+its lists.** It watches what PHP does once something has gone wrong, such as a
+webshell dropped in an upload directory. It has four facets, each switched on by
+its own setting:
+
+| Facet | Setting | Flags |
+|---|---|---|
+| Execution origin | `deny_exec_dirs` | a PHP file under a listed directory that runs as the requested script, or is `require`d/`include`d (rule `upload_exec`) |
+| Expected binaries | `allow_exec_binaries` | `exec`/`system`/`popen`/`proc_open`/`shell_exec`/`passthru` to a program not on the list (rule `unexpected_binary`) |
+| Expected egress | `allow_egress_hosts` | an outbound connection to a host not on the list (rule `unexpected_egress`) |
+| `.php` writes | `deny_php_writes` | writing a PHP file into a denied directory, or from a script that lives in one (rule `php_write`) |
+
+`behavior.mode` defaults to `detect` (log only) and is **independent of the
+global `howdah.mode`**: `howdah.mode = block` does **not** arm Layer 4. As with
+Layer 3, set the allowlists before you switch to `block`: with an empty list,
+nothing is expected, so under `detect` every matching call is logged and under
+`block` it is refused. Layer 4 adds **no new php.ini directives**. Events name
+the script that made the call, so a finding points at the webshell even when a
+legitimate script `require`d it.
+
+```toml
+[behavior]
+enabled = true              # master on/off for Layer 4; false -> off regardless of mode
+mode = "detect"             # "off" | "detect" | "block". INDEPENDENT of the global howdah.mode.
+observe = false             # true -> log would-be findings as `proposed`; never blocks
+
+deny_exec_dirs = []         # e.g. ["/var/www/uploads", "/var/www/storage", "/tmp"]
+allow_exec_binaries = []    # e.g. ["/usr/bin/gs", "convert"]  (empty = none expected)
+allow_egress_hosts = []     # e.g. ["api.stripe.com"]          (empty under detect = log all egress)
+deny_php_writes = false     # true -> flag writing a *.php/.phar/.phtml file into a denied
+                            # directory or from a script under one (origin-scoped; NOT any .php write)
+```
+
+**Observe mode.** `observe = true` logs the binary that was run, the host
+contacted, or the directory PHP ran from, as a `proposed` line. Use it to
+build `allow_exec_binaries` and `allow_egress_hosts` from real traffic. It
+never blocks and never edits your config; review every proposal yourself.
+
+### Verification
+
+The Layer 4 lab script (27 checks) passed on PHP 5.4, 5.6, 7.4, 8.3, 8.4 and
+8.5. Other minors are not independently verified. The checks cover each facet in
+`detect` and `block`, that a framework-style view write and a plain read of a
+`.php` file are not flagged, that the default and empty configs are inert, and
+that observe proposes without blocking.
+
+### Known limitations
+
+- **Howdah only sees what PHP itself does.** A process PHP launches and then
+  detaches, a reverse shell that forks away, or anything dropped by a non-PHP
+  route is invisible to Layer 4. It covers the webshell/dropper phase while PHP
+  is the actor.
+- **`deny_exec_dirs`: the requested-script case does not depend on opcache; the
+  included-file case is first-compile and best-effort.** A direct request to a
+  script under a denied directory is checked on every request. A `require` of
+  such a file rides the compile hook (PHP 7.0+: operand string only), so a file
+  served from a warm opcache may not be re-checked. A `require` with a relative
+  path is not checked at include time on any version. The binary, egress and
+  write facets fire on every call.
+- **Allowlists are best-effort and can be bypassed.** Binary matching is by
+  program path or basename; a shell builtin, a path variant or an interpreter
+  can evade it. Egress matching shares the Layer 3 `ssrf` limits (DNS rebinding,
+  redirects, `curl_multi_*`, a non-string URL).
+- **`deny_php_writes` is origin-scoped and can still flag legitimate writes.**
+  An application that compiles templates or caches PHP into a denied directory
+  will be flagged. Scope `deny_exec_dirs` before you ever use `block`. Detection
+  is by file extension, so a write to a non-`.php` name that is renamed later is
+  not caught.
+- **Observe only proposes.** On a box that is already breached, the observed
+  set may include attacker behaviour; do not accept it unreviewed.
+- On PHP 7.0+ Howdah installs a user opcode handler (for include/eval) at MINIT,
+  which turns OPcache JIT off; this is unchanged since 1.3 and independent of
+  Layer 4.
+
 ## Enforcement timing (honest caveat)
 
 The multipart limits refuse the request *while the body is parsed*, before PHP

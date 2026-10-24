@@ -1,16 +1,18 @@
 #!/bin/sh
 # howdah-check - read-only helper for installing/verifying Howdah.
 #
-#   howdah-check detect     list every PHP install on this box, the host arch,
-#                           and the release tarball that matches each install
+#   howdah-check detect     list every PHP install on this box, the host arch
+#                           and libc, and the release tarball that matches each install
 #   howdah-check web <url>  EICAR-style self-test over HTTP (see cmd_web)
 #   howdah-check ini [php]  read-only report of risky php.ini settings (see cmd_ini)
 #
 # For each install, detect prints: version, PHP API number, NTS/ZTS,
 # extension_dir, ini scan dir, the exact release asset to download for it (host
-# CPU arch + api + PHP MAJ.MIN: howdah-<VERSION>-php<minor>-<api>-linux-<arch>.tar.gz),
+# CPU arch + libc + api + PHP MAJ.MIN: howdah-<VERSION>-php<minor>-<api>-linux-<arch>.tar.gz,
+# or ...-linux-x86_64-musl.tar.gz on musl/Alpine),
 # the packaging layout (sury, remi, cpanel, plesk, cloudlinux, directadmin,
-# stock-rhel, stock-debian, unknown) and the package + repo Howdah ships for
+# stock-rhel, stock-debian, docker, alpine, litespeed, unknown) and the package + repo
+# (or Docker image) Howdah ships for
 # it (or the tarball), the SAPIs present (cli/fpm/apache) and whether the `howdah`
 # extension is loaded in each. It NEVER modifies anything: it only runs
 # `php -v/-i/-m`, `php-fpm -m`, `php-config`, and reads config files.
@@ -49,6 +51,14 @@ norm_arch() {
 }
 # a PHP .so must match the host CPU, so arch is host-wide: computed once
 ARCH=$(norm_arch "${HOWDAH_CHECK_UNAME_M:-$(uname -m 2>/dev/null)}")
+# ... and the host C library: a glibc .so does not load on musl (Alpine), which
+# has its own -musl tarball (x86_64 only). musl is recognised by its loader.
+LIBC=glibc
+for _l in "$ROOT"/lib/ld-musl-*.so.1; do [ -e "$_l" ] && LIBC=musl; done
+SUFFIX="linux-$ARCH"
+[ "$LIBC" = musl ] && SUFFIX="linux-$ARCH-musl"
+# official runtime images (docker/Dockerfile, docs/install-docker.md)
+IMAGE_REPO=ghcr.io/howdah/howdah
 
 # run a command with a timeout when one is available (never hang the run)
 HAVE_TMO=0
@@ -260,8 +270,10 @@ report_install() {
   say "  version: ${_ver:-unknown}"
   say "  api: ${_api:-unknown}"
   say "  thread_safety: $_tsl"
-  if [ -n "$_api" ] && [ -n "$_mm" ] && [ "$ARCH" != unknown ]; then
-    say "  matching release asset: howdah-<VERSION>-php$_mm-$_api-linux-$ARCH.tar.gz"
+  if [ "$LIBC" = musl ] && [ "$ARCH" != x86_64 ]; then
+    say "  matching release asset: none: musl builds are x86_64 only"
+  elif [ -n "$_api" ] && [ -n "$_mm" ] && [ "$ARCH" != unknown ]; then
+    say "  matching release asset: howdah-<VERSION>-php$_mm-$_api-$SUFFIX.tar.gz"
   else
     say "  matching release asset: cannot determine (api/version/arch unknown)"
   fi
@@ -375,12 +387,22 @@ php_layout() {
     */usr/local/php[0-9]*/lib/php/extensions/*)
       # DirectAdmin CustomBuild: /usr/local/phpXY with lib/php.conf.d drop-ins
       case "$3" in */usr/local/php[0-9]*/lib/php.conf.d) echo directadmin; return 0 ;; esac ;;
+    */usr/local/lsws/lsphp[0-9]*/lib/php/[0-9]*|*/usr/local/lsws/lsphp[0-9]*/lib64/php/modules)
+      # LiteSpeed's own lsphp packages (deb: lib/php/API, rpm: lib64/php/modules)
+      echo litespeed; return 0 ;;
+    */usr/lib/php[0-9]*/modules)
+      # Alpine's own PHP packages (apk add php83): /etc/php83/conf.d drop-ins
+      case "$3" in */etc/php[0-9]*/conf.d) echo alpine; return 0 ;; esac ;;
+    */usr/local/lib/php/extensions/no-debug-*)
+      # the official Docker php images (Debian and Alpine): PHP_INI_DIR=/usr/local/etc/php
+      case "$3" in */usr/local/etc/php/conf.d) echo docker; return 0 ;; esac ;;
     '')
       case "$1" in
         */opt/cpanel/ea-php[0-9]*/root/usr/bin/*) echo cpanel; return 0 ;;
         */opt/plesk/php/[0-9]*/bin/*) echo plesk; return 0 ;;
         */opt/alt/php[0-9]*/usr/bin/*) echo cloudlinux; return 0 ;;
         */opt/remi/php[0-9]*/root/usr/bin/*) echo remi; return 0 ;;
+        */usr/local/lsws/lsphp[0-9]*/bin/*) echo litespeed; return 0 ;;
       esac ;;
   esac
   echo unknown
@@ -390,7 +412,7 @@ php_layout() {
 howdah_package() {
   _pm=$2; _pa=$3
   _px=$(printf '%s' "$_pm" | tr -d .)
-  _tar="howdah-<VERSION>-php$_pm-$_pa-linux-$ARCH.tar.gz"
+  _tar="howdah-<VERSION>-php$_pm-$_pa-$SUFFIX.tar.gz"
   if [ "$4" = ZTS ]; then echo "none: Howdah is built for NTS PHP only and this PHP is ZTS"; return 0; fi
   if [ -z "$_pa" ] || [ -z "$_pm" ] || [ "$ARCH" = unknown ]; then
     echo "cannot determine (api/version/arch unknown)"; return 0
@@ -399,6 +421,18 @@ howdah_package() {
     5.[456]|7.[0-4]|8.[0-5]) ;;
     *) echo "none: Howdah is built for PHP 5.4 to 8.5; this is PHP $_pm"; return 0 ;;
   esac
+  if [ "$LIBC" = musl ] && [ "$ARCH" != x86_64 ]; then echo "none: musl builds are x86_64 only"; return 0; fi
+  if [ "$1" = docker ]; then
+    # images exist where an official php:<minor>-fpm[-alpine] base can be pulled
+    case "$_pm" in
+      5.[45]) echo "no image for PHP $_pm: use the tarball for API $_pa ($_tar)"; return 0 ;;
+    esac
+    _img="$IMAGE_REPO:<VERSION>-php$_pm"; [ "$LIBC" = musl ] && _img="$_img-alpine"
+    echo "image $_img, or in your Dockerfile: COPY --from=$_img /howdah/ /"
+    return 0
+  fi
+  # apt/yum packages are glibc builds
+  if [ "$LIBC" = musl ]; then echo "not yet packaged for musl: use the tarball for API $_pa ($_tar)"; return 0; fi
   _deb=0; [ -f "$ROOT/etc/debian_version" ] && _deb=1
   _fmt=rpm; _repo=""; _arches="x86_64 aarch64"
   case "$1" in
@@ -432,6 +466,7 @@ report_layout() {
 
 cmd_detect() {
   say "host arch: $ARCH"
+  say "host libc: $LIBC"
   say "release assets and howdah-check: https://github.com/howdah/howdah/releases (replace <VERSION> with the latest release)"
   discover
   _oifs=$IFS; IFS=$NL

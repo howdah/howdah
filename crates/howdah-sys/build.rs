@@ -72,6 +72,8 @@ fn main() {
         .allowlist_var("PARSE_.*")
         // Module-entry constants the glue must fill in (macros; absent ones are ignored).
         .allowlist_var("ZEND_MODULE_API_NO|ZEND_MODULE_BUILD_ID|PHP_VERSION_ID|ZEND_DEBUG|USING_ZTS|PHP_API_VERSION")
+        // MINIT's `type` argument: MODULE_PERSISTENT (php.ini) vs MODULE_TEMPORARY (dl()).
+        .allowlist_var("MODULE_PERSISTENT|MODULE_TEMPORARY")
         .generate()
         .expect("bindgen failed on PHP headers");
 

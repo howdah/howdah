@@ -110,6 +110,8 @@
     { key: 'enabled', type: 'bool', default: true, note: 'Master on/off for Layer 3 (sink hardening).' },
     { key: 'mode', type: 'enum', values: MODES, default: 'detect',
       note: 'Independent of the global mode: a global block does not arm any sink. detect logs only (the default). Set a sink’s allowlist before arming block.' },
+    { key: 'hook', type: 'enum', values: ['auto', 'opcode', 'compile'], default: 'auto',
+      note: 'How include/require/eval are guarded on PHP 7.0+. auto (default): compile when only eval needs the hook, so a default install keeps OPcache JIT on; opcode when include has allow_paths or [behavior] deny_exec_dirs is set. opcode: a user opcode handler, full coverage (warm-opcache includes too) but PHP turns the JIT off while it is installed. compile: the compile-pointer swap PHP 5.x uses; JIT stays on, eval is fully covered, an include served from a warm opcache is not re-inspected. Nothing is installed when eval and include are off and deny_exec_dirs is unset.' },
     { key: 'command_exec.mode', type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
       note: 'system, exec, shell_exec, passthru, popen, proc_open. Unset inherits sinks.mode. Only a string first argument is inspected (proc_open with an array command is not).' },
     { key: 'command_exec.allow', type: 'list', default: [],

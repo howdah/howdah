@@ -65,8 +65,12 @@ static mut DISP_CONFIG_STATUS: Option<CString> = None;
 /// For the info table: `N configured, M rejected` ([[exceptions]]).
 static mut DISP_EXCEPTIONS: Option<CString> = None;
 static mut DISP_HOOK: Option<CString> = None;
+/// The include/eval hook actually installed at MINIT (phpinfo row).
+static mut DISP_INCLUDE_HOOK: Option<CString> = None;
 
 const SUCCESS: c_int = 0;
+/// Zend's `FAILURE` (-1): what MINIT returns to refuse the load.
+const FAILURE: c_int = -1;
 
 // ---- the zend_module_entry --------------------------------------------------
 
@@ -635,7 +639,21 @@ unsafe fn ini_string(name: &[u8]) -> Option<String> {
 ///
 /// # Safety
 /// Called by PHP once at module startup.
-unsafe extern "C" fn minit(_type: c_int, module_number: c_int) -> c_int {
+unsafe extern "C" fn minit(type_: c_int, module_number: c_int) -> c_int {
+    // Refuse a dl()'d load (MODULE_TEMPORARY). Howdah swaps function-table
+    // handlers, compile pointers and (on 7.0+) an opcode handler for the life
+    // of the process; a module unloaded at request end would leave every one
+    // of them dangling. php.ini `extension=howdah.so` is the only supported
+    // way in. One clear line in the SAPI error log, then FAILURE (PHP reports
+    // the dl() as failed and continues).
+    if type_ == sys::MODULE_TEMPORARY as c_int {
+        let c = cstring(
+            "howdah: refusing to load via dl(): Howdah installs process-wide hooks and must be \
+             loaded from php.ini (extension=howdah.so), then php-fpm/Apache restarted",
+        );
+        sys::howdah_sys_log_err(c.as_ptr());
+        return FAILURE;
+    }
     MODULE_NUMBER = module_number;
     register_ini(module_number);
 
@@ -757,8 +775,68 @@ unsafe extern "C" fn minit(_type: c_int, module_number: c_int) -> c_int {
     // MSHUTDOWN restore, like the other installs).
     sys::howdah_install_sink_hooks(crate::sink_filter::decide);
 
+    // The include/eval hook is a STARTUP decision (config is read once, here):
+    // the core's plan says whether anything armed needs it (eval on, include
+    // on with an allowlist, or Layer-4 deny_exec_dirs) and which mechanism
+    // `[sinks] hook` resolves to (`auto`: compile when only eval needs it,
+    // opcode when include has allow_paths or deny_exec_dirs is set). With
+    // nothing armed no handler is installed and OPcache JIT stays on; changing
+    // these keys needs an FPM/Apache restart, as for every other key.
+    let plan = catch_unwind(AssertUnwindSafe(|| core::howdah_sink_hook_plan(CTX)))
+        .unwrap_or(core::HOWDAH_HOOK_PLAN_NONE);
+    let mechanism = match plan & 0xF {
+        core::HOWDAH_HOOK_PLAN_OPCODE => 1,
+        core::HOWDAH_HOOK_PLAN_COMPILE => 2,
+        _ => 0,
+    };
+    let installed = catch_unwind(AssertUnwindSafe(|| sys::howdah_install_include_eval_hook(mechanism)))
+        .unwrap_or(0);
+    // Read once: the row wording and the startup line both depend on whether
+    // php.ini actually has the JIT on (OPcache absent or jit off -> no claim
+    // that PHP "disabled" anything).
+    let jit_on = sys::howdah_jit_enabled_in_ini() != 0;
+    DISP_INCLUDE_HOOK = Some(cstring(&include_hook_label(installed, plan >> 4, jit_on)));
+    if installed == 1 && jit_on {
+        let c = cstring(JIT_STARTUP_LINE);
+        sys::howdah_sys_log_err(c.as_ptr());
+    }
+
     SUCCESS
 }
+
+/// The `Include/eval hook` phpinfo row: what the shim reported installed, and
+/// why the plan chose it (`HOWDAH_HOOK_WHY_*`). The JIT parentheticals apply
+/// to PHP 8.0+ only (there is no JIT before); "JIT disabled by PHP" is said
+/// only when php.ini has the JIT on (`jit_on`), otherwise the opcode handler
+/// is described as incompatible with it.
+fn include_hook_label(installed: c_int, why: i32, jit_on: bool) -> String {
+    let php8 = sys::PHP_VERSION_ID >= 80000;
+    let mech = match (installed, php8) {
+        (1, true) if jit_on => "opcode handler (JIT disabled by PHP",
+        (1, true) => "opcode handler (incompatible with OPcache JIT",
+        (1, false) => "opcode handler (",
+        (2, true) => "compile pointer (JIT compatible",
+        (2, false) => "compile pointer (",
+        _ => return "none".to_string(),
+    };
+    let why = match why {
+        core::HOWDAH_HOOK_WHY_EVAL_ONLY => "auto: eval only",
+        core::HOWDAH_HOOK_WHY_INCLUDE_ALLOW_PATHS => "auto: include allow_paths set",
+        core::HOWDAH_HOOK_WHY_DENY_EXEC_DIRS => "auto: deny_exec_dirs set",
+        _ => "configured",
+    };
+    let sep = if mech.ends_with('(') { "" } else { "; " };
+    format!("{mech}{sep}{why})")
+}
+
+/// One startup line, written when the operator has OPcache JIT on in php.ini
+/// and the opcode handler is what got installed: PHP is about to turn JIT off
+/// and this names the key that keeps it on.
+const JIT_STARTUP_LINE: &str = "howdah: OPcache JIT is enabled in php.ini and the include/eval guard \
+    uses the opcode handler (chosen because [sinks.include] allow_paths or [behavior] deny_exec_dirs \
+    is set, or [sinks] hook = \"opcode\"), so PHP will turn JIT off for this process. To keep JIT on, \
+    set [sinks] hook = \"compile\" in howdah.config (an include served from a warm opcache is then \
+    not re-inspected; eval is still fully covered), then restart php-fpm/Apache.";
 
 #[cfg(not(feature = "php5"))]
 unsafe fn register_ini(module_number: c_int) {
@@ -810,6 +888,9 @@ unsafe extern "C" fn minfo(_module: *mut sys::zend_module_entry) {
         row(b"Log hook ([log] exec)\0", h.as_bytes_with_nul());
     }
     row(b"Log schema\0", cstring(&howdah_core::log::SCHEMA_VERSION.to_string()).as_bytes_with_nul());
+    if let Some(h) = (*ptr::addr_of!(DISP_INCLUDE_HOOK)).as_ref() {
+        row(b"Include/eval hook\0", h.as_bytes_with_nul());
+    }
     row(
         b"Panic guard (catch_unwind active)\0",
         if crate::panic_unwinds() { b"yes\0" } else { b"NO - UNSAFE BUILD\0" },

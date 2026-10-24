@@ -224,6 +224,34 @@ All notable changes to Howdah are documented here. The format follows
   script and what stays post-hoc, per SAPI.
 
 ### Fixed
+- Loading Howdah turned OPcache JIT off on PHP 8 whatever the configuration,
+  even with `[sinks] enabled = false`: the `include`/`eval` guard on PHP 7.0+
+  is a user opcode handler, installed unconditionally at startup, and PHP
+  refuses to run the JIT alongside one ("JIT is incompatible with third party
+  extensions that setup user opcode handlers"). A hook is now installed only
+  when something needs it, decided once at startup: the `eval` sink is on
+  (the shipped default), the `include` sink is on with `allow_paths`, or
+  `[behavior] deny_exec_dirs` is set; with those off nothing is installed.
+  New key `[sinks] hook = "auto" | "opcode" | "compile"`. `auto` (the
+  default) uses the `zend_compile_file`/`zend_compile_string` swap PHP 5.x
+  already uses when only `eval` needs the hook (it covers every `eval` and
+  the JIT check does not see it), **so a default install now keeps the JIT
+  on**, and the opcode handler when `include` has `allow_paths` or
+  `deny_exec_dirs` is set, where an `include` served from a warm opcache
+  matters (the compile swap does not re-inspect those). `opcode` and
+  `compile` force one or the other. Whenever the opcode handler is what gets
+  installed and php.ini has the JIT on, one startup line in the SAPI error log
+  says PHP will turn it off and names `hook = "compile"`. `php --ri howdah`
+  gains `Include/eval hook => none | opcode handler (JIT disabled by PHP; <why>) | compile pointer (JIT compatible; <why>)`
+  with the reason (`auto: eval only`, `auto: include allow_paths set`,
+  `auto: deny_exec_dirs set`, `configured`; "JIT disabled by PHP" is said
+  only when php.ini has the JIT on). Files `require`d by an `opcache.preload`
+  script chain through the compile hook unguarded. MINIT now refuses a
+  `dl()` load (`MODULE_TEMPORARY`) with a clear error-log line, since the
+  process-wide hooks cannot be unloaded at request end. `lab/integration/jit.sh` checks
+  `opcache_get_status()['jit']['on']` in each state on PHP 8.1 and 8.3
+  (default config on, `eval` detect still logging; include `allow_paths` off;
+  `hook = "compile"` on) and the compile-mode behaviour on 7.4 and 5.6.
 - `[log] path` in the TOML file was parsed but ignored. It is now used when
   `howdah.log` is empty; `howdah.log` still wins when both are set.
 - Request ids repeated across php-fpm workers and Apache prefork children:

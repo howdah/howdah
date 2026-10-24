@@ -241,6 +241,11 @@ php.ini setting. It adds **no new php.ini directives**.
 [sinks]
 enabled = true            # master on/off for Layer 3
 mode = "detect"           # detect = log only (default); block; off. INDEPENDENT of the global howdah.mode.
+# hook = "auto"           # include/eval mechanism on PHP 7.0+: "auto" (default: "compile" when
+                          # only eval needs it, "opcode" when include has allow_paths or
+                          # [behavior] deny_exec_dirs is set), "opcode" (full coverage, OPcache JIT
+                          # off) or "compile" (JIT stays on; a warm-opcache include is not
+                          # re-inspected). See below.
 
 [sinks.command_exec]      # system/exec/shell_exec/passthru/popen/proc_open
 # mode = "block"          # optional per-sink override; unset inherits sinks.mode. Set allow FIRST.
@@ -287,11 +292,74 @@ Active in detect and block modes. `include`/`require` is **inert until
 `allow_paths` is set**. Blocking stops the included file or evaluated code from
 running and the script continues. As always, the argument is never logged.
 
-- **PHP 7.0+:** a runtime opcode handler, which is not affected by opcache.
+- **PHP 7.0+:** a runtime opcode handler by default, which is not affected by
+  opcache; or, with `[sinks] hook = "compile"`, the compile-time check below.
 - **PHP 5.x (new in 1.3):** a compile-time check (`zend_compile_file` /
   `zend_compile_string`). `eval` is never cached, so it is fully covered. An
   `include` served from a **warm opcache** is not compiled again and is **not
   re-inspected**, so already-cached application files are not checked.
+
+#### `hook`: the include/eval mechanism and OPcache JIT
+
+PHP's OPcache JIT refuses to run alongside any extension that installs a user
+opcode handler (`zend_jit_check_support` logs "JIT is incompatible with third
+party extensions that setup user opcode handlers. JIT disabled."). The
+`include`/`eval` guard on PHP 7.0+ is such a handler. Up to 1.4.0 Howdah
+installed it unconditionally at startup, so loading Howdah turned the JIT off
+on PHP 8 even with `[sinks] enabled = false`. Now:
+
+- **A hook is installed only when something needs it**, decided once at
+  startup from the config: the `eval` sink is on (it is, in the shipped
+  defaults: `detect`), or the `include` sink is on **and** has `allow_paths`
+  (with no `allow_paths` it never produces an event, so it needs no hook), or
+  Layer 4 `[behavior] deny_exec_dirs` is set (its `require`d-file check runs in
+  the same hook). With all three off nothing is installed and the JIT stays on.
+  Like every other key, changing these needs a php-fpm/Apache restart.
+- **`hook = "auto"` (the default)** picks the mechanism from what needs it:
+  `compile` when only `eval` does (the compile pointers cover every `eval`, so
+  the opcode handler would buy nothing and only cost the JIT), `opcode` when
+  `include` has `allow_paths` or `deny_exec_dirs` is set (the cases where an
+  include served from a warm opcache matters). So **a default install keeps
+  the JIT on** with `eval` still fully guarded.
+- **`hook = "opcode"`:** the opcode handler. Full coverage: every
+  `include`/`require` and `eval`, including files served from a warm opcache.
+  The JIT is off. Whenever the opcode handler is what gets installed
+  (explicitly, or `auto` choosing it) and `opcache.jit` /
+  `opcache.jit_buffer_size` in php.ini say the JIT is on, Howdah writes one
+  line to the SAPI error log at startup saying PHP will turn it off and naming
+  `hook = "compile"` as the way to keep it on.
+- **`hook = "compile"`:** the `zend_compile_file` / `zend_compile_string`
+  pointer swap, the mechanism PHP 5.x always uses. The JIT check does not look
+  at it, so the JIT stays on. `eval` is still fully covered (it is never
+  cached). The trade-off is the 5.x one: **an `include` served from a warm
+  opcache is not compiled again and is not re-inspected**; only the first
+  compile of a file after a worker starts or the cache is invalidated is
+  checked (`lab/integration/jit.sh` shows two includes of the same file
+  logging two events in `opcode` mode and one in `compile` mode).
+  `opcache_compile_file()` also goes through this hook and is treated as an
+  include. Files `require`d by an `opcache.preload` script (PHP 7.4+) are
+  compiled at server startup, outside any request, and are chained through
+  unguarded: no event, nothing refused. A blocked `require_once` /
+  `include_once` still marks the file as included (PHP records it before
+  compiling), so a later `include_once` of the same path in that request
+  returns `true` without running it, as on 5.x. The Layer 4 `deny_exec_dirs`
+  `require`d-file check runs in whichever mechanism is installed and shares
+  its caveat.
+- **Load Howdah from php.ini, never with `dl()`.** The hooks are installed
+  for the life of the process; a `dl()`'d module is unloaded at request end
+  and would leave them dangling, so MINIT refuses a `dl()` load with one line
+  in the SAPI error log and PHP reports the `dl()` as failed.
+- `php --ri howdah` / `phpinfo()` show the result and why:
+  `Include/eval hook => none | opcode handler (JIT disabled by PHP; <why>) | compile pointer (JIT compatible; <why>)`
+  where `<why>` is `auto: eval only`, `auto: include allow_paths set`,
+  `auto: deny_exec_dirs set` or `configured` (the JIT parentheticals appear on
+  PHP 8.0+, where the JIT exists).
+
+The rest of Layer 3 (`command_exec`, `unserialize`, `phar`, `ssrf`) and
+Layers 1, 2 and 4 are function-table swaps, stream-wrapper proxies and
+request hooks; none of them affects the JIT. Verified on PHP 8.1 and 8.3
+(`opcache_get_status()['jit']['on']`), with the compile-mode behaviour also
+checked on 7.4 and 5.6.
 
 ### `phar`
 
@@ -425,9 +493,11 @@ that observe proposes without blocking.
   not caught.
 - **Observe only proposes.** On a box that is already breached, the observed
   set may include attacker behaviour; do not accept it unreviewed.
-- On PHP 7.0+ Howdah installs a user opcode handler (for include/eval) at MINIT,
-  which turns OPcache JIT off; this is unchanged since 1.3 and independent of
-  Layer 4.
+- Setting `deny_exec_dirs` arms the include/eval hook (its `require`d-file
+  check runs there) and makes the default `[sinks] hook = "auto"` choose the
+  opcode handler, which turns OPcache JIT off on PHP 8; `hook = "compile"`
+  keeps it on at the cost of the warm-opcache caveat. See `hook` under
+  `[sinks]`.
 
 ## `[log]` — event log destination and hook
 

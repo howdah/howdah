@@ -316,6 +316,53 @@ impl Default for SsrfConfig {
     }
 }
 
+/// `[sinks] hook`: which mechanism guards `include`/`require`/`eval` on
+/// PHP 7.0+. (PHP 5.x always uses the compile pointers; it has no usable
+/// opcode-operand access and no JIT.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SinkHook {
+    /// The default: `compile` when only `eval` needs the hook (the compile
+    /// pointers cover every eval, so the opcode handler would buy nothing and
+    /// only cost the JIT), `opcode` when `include` has `allow_paths` or Layer
+    /// 4 `deny_exec_dirs` is set (the cases where an include served from a
+    /// warm opcache matters).
+    Auto,
+    /// A `ZEND_INCLUDE_OR_EVAL` user opcode handler: sees every include and
+    /// eval, including files served from a warm opcache. PHP's OPcache JIT
+    /// refuses to run alongside any user opcode handler, so JIT is off.
+    Opcode,
+    /// The `zend_compile_file` / `zend_compile_string` pointer swap: invisible
+    /// to the JIT check, sees every eval, but an include served from a warm
+    /// opcache is not compiled again and so is not re-inspected.
+    Compile,
+}
+
+/// Why the include/eval hook plan chose its mechanism (phpinfo row).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookReason {
+    /// `[sinks] hook` named the mechanism explicitly.
+    Configured,
+    /// `auto`: only the `eval` sink needs the hook.
+    EvalOnly,
+    /// `auto`: the `include` sink is on with `allow_paths`.
+    IncludeAllowPaths,
+    /// `auto`: Layer 4 `deny_exec_dirs` is set.
+    DenyExecDirs,
+}
+
+impl HookReason {
+    /// The phpinfo wording.
+    pub fn label(self) -> &'static str {
+        match self {
+            HookReason::Configured => "configured",
+            HookReason::EvalOnly => "auto: eval only",
+            HookReason::IncludeAllowPaths => "auto: include allow_paths set",
+            HookReason::DenyExecDirs => "auto: deny_exec_dirs set",
+        }
+    }
+}
+
 /// Layer-3 sink hardening settings. Its `mode` is independent of the global
 /// mode: a global `block` never arms a sink.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -329,6 +376,9 @@ pub struct SinkConfig {
     pub unserialize: UnserializeConfig,
     pub phar: PharConfig,
     pub ssrf: SsrfConfig,
+    /// Include/eval hook mechanism on PHP 7.0+; `None` = `auto`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hook: Option<SinkHook>,
 }
 
 impl Default for SinkConfig {
@@ -342,11 +392,55 @@ impl Default for SinkConfig {
             unserialize: UnserializeConfig::default(),
             phar: PharConfig::default(),
             ssrf: SsrfConfig::default(),
+            hook: None,
         }
     }
 }
 
 impl SinkConfig {
+    /// Configured include/eval hook setting (`auto` when unset).
+    pub fn hook(&self) -> SinkHook {
+        self.hook.unwrap_or(SinkHook::Auto)
+    }
+
+    /// True iff the `include` sink needs the hook: on AND with an allowlist
+    /// (with an empty `allow_paths` it never produces an event).
+    fn include_needs_hook(&self, global: Mode) -> bool {
+        self.effective_mode(SinkId::Include, global) != Mode::Off && !self.include.allow_paths.is_empty()
+    }
+
+    /// True iff the include/eval hook has to be installed at all for the
+    /// Layer-3 sinks: `eval` is on, or `include` needs it. Layer 4's
+    /// `deny_exec_dirs` is the other consumer; the FFI combines both.
+    pub fn include_eval_hook_needed(&self, global: Mode) -> bool {
+        self.effective_mode(SinkId::Eval, global) != Mode::Off || self.include_needs_hook(global)
+    }
+
+    /// The startup plan for the include/eval hook: `None` when nothing needs
+    /// it (install nothing; JIT stays on), else the mechanism to install
+    /// (`Opcode` or `Compile`, never `Auto`) and why. `deny_exec_dirs_armed`
+    /// is Layer 4's verdict (its `require`d-file check runs in this hook).
+    /// `auto` resolves to `compile` when only `eval` needs the hook and to
+    /// `opcode` when `include` has `allow_paths` or `deny_exec_dirs` is set.
+    pub fn include_eval_hook_plan(
+        &self,
+        global: Mode,
+        deny_exec_dirs_armed: bool,
+    ) -> Option<(SinkHook, HookReason)> {
+        let include = self.include_needs_hook(global);
+        let eval = self.effective_mode(SinkId::Eval, global) != Mode::Off;
+        if !include && !eval && !deny_exec_dirs_armed {
+            return None;
+        }
+        Some(match self.hook() {
+            SinkHook::Opcode => (SinkHook::Opcode, HookReason::Configured),
+            SinkHook::Compile => (SinkHook::Compile, HookReason::Configured),
+            SinkHook::Auto if deny_exec_dirs_armed => (SinkHook::Opcode, HookReason::DenyExecDirs),
+            SinkHook::Auto if include => (SinkHook::Opcode, HookReason::IncludeAllowPaths),
+            SinkHook::Auto => (SinkHook::Compile, HookReason::EvalOnly),
+        })
+    }
+
     /// Off if the global mode is off or sinks are disabled; otherwise the
     /// per-sink mode if set, else the section mode (global `block` is ignored).
     pub fn effective_mode(&self, sink: SinkId, global: Mode) -> Mode {
@@ -999,6 +1093,79 @@ self_test = "off"
     fn sinks_phar_ssrf_unknown_key_rejected() {
         assert!(Config::from_toml("[sinks.phar]\nnope = 1").is_err());
         assert!(Config::from_toml("[sinks.ssrf]\nnope = 1").is_err());
+    }
+
+    // ---- [sinks] hook (include/eval mechanism, JIT compatibility) --------
+
+    #[test]
+    fn sink_hook_defaults_to_auto_and_parses() {
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.sinks.hook, None);
+        assert_eq!(c.sinks.hook(), SinkHook::Auto);
+        // Unset keys do not appear when serialized (config editor view).
+        let j = serde_json::to_value(&c).unwrap();
+        assert!(j["sinks"].get("hook").is_none());
+        let c = Config::from_toml("[sinks]\nhook = \"compile\"").unwrap();
+        assert_eq!(c.sinks.hook(), SinkHook::Compile);
+        assert_eq!(serde_json::to_value(&c).unwrap()["sinks"]["hook"], "compile");
+        let c = Config::from_toml("[sinks]\nhook = \"opcode\"").unwrap();
+        assert_eq!(c.sinks.hook(), SinkHook::Opcode);
+        let c = Config::from_toml("[sinks]\nhook = \"auto\"").unwrap();
+        assert_eq!(c.sinks.hook(), SinkHook::Auto);
+        assert_eq!(serde_json::to_value(&c).unwrap()["sinks"]["hook"], "auto");
+        let e = Config::from_toml("[sinks]\nhook = \"execute\"").unwrap_err();
+        assert!(e.to_string().contains("hook"), "{e}");
+    }
+
+    #[test]
+    fn include_eval_hook_plan_auto_picks_compile_for_eval_only() {
+        use HookReason::*;
+        use SinkHook::*;
+        let plan = |toml: &str, l4: bool| Config::from_toml(toml).unwrap().sinks.include_eval_hook_plan(Mode::Detect, l4);
+        // Shipped defaults: eval detect, include inert, no deny_exec_dirs ->
+        // compile, so a default install keeps the JIT on.
+        assert_eq!(plan("", false), Some((Compile, EvalOnly)));
+        // include with allow_paths -> opcode (warm-opcache includes matter).
+        assert_eq!(plan("[sinks.include]\nallow_paths=[\"/srv/app\"]", false), Some((Opcode, IncludeAllowPaths)));
+        // Layer 4 deny_exec_dirs -> opcode, even with eval off.
+        assert_eq!(plan("[sinks.eval]\nmode=\"off\"", true), Some((Opcode, DenyExecDirs)));
+        // Nothing needs it -> None.
+        assert_eq!(plan("[sinks.eval]\nmode=\"off\"", false), None);
+        assert_eq!(plan("[sinks]\nenabled=false", false), None);
+        // Explicit settings win over auto, in both directions.
+        assert_eq!(plan("[sinks]\nhook=\"opcode\"", false), Some((Opcode, Configured)));
+        assert_eq!(plan("[sinks]\nhook=\"compile\"\n[sinks.include]\nallow_paths=[\"/srv\"]", true), Some((Compile, Configured)));
+        // Explicit still installs nothing when nothing needs it.
+        assert_eq!(plan("[sinks]\nhook=\"opcode\"\n[sinks.eval]\nmode=\"off\"", false), None);
+        // Global off beats everything (Layer 4 is off too then; the FFI passes false).
+        assert_eq!(Config::from_toml("").unwrap().sinks.include_eval_hook_plan(Mode::Off, false), None);
+        assert_eq!(IncludeAllowPaths.label(), "auto: include allow_paths set");
+    }
+
+    #[test]
+    fn include_eval_hook_needed_follows_eval_and_include_allowlist() {
+        // Shipped defaults: eval inherits detect, so the hook is needed.
+        let c = Config::from_toml("").unwrap();
+        assert!(c.sinks.include_eval_hook_needed(Mode::Detect));
+        // Global off / sinks disabled: nothing needs it.
+        assert!(!c.sinks.include_eval_hook_needed(Mode::Off));
+        let c = Config::from_toml("[sinks]\nenabled = false").unwrap();
+        assert!(!c.sinks.include_eval_hook_needed(Mode::Block));
+        // eval off, include detect but inert (no allow_paths): not needed.
+        let c = Config::from_toml("[sinks.eval]\nmode = \"off\"").unwrap();
+        assert!(!c.sinks.include_eval_hook_needed(Mode::Detect));
+        // include armed with an allowlist: needed even with eval off.
+        let c = Config::from_toml(
+            "[sinks.eval]\nmode = \"off\"\n[sinks.include]\nmode = \"detect\"\nallow_paths = [\"/srv/app\"]",
+        )
+        .unwrap();
+        assert!(c.sinks.include_eval_hook_needed(Mode::Detect));
+        // Section mode off, eval explicitly block: needed.
+        let c = Config::from_toml("[sinks]\nmode = \"off\"\n[sinks.eval]\nmode = \"block\"").unwrap();
+        assert!(c.sinks.include_eval_hook_needed(Mode::Detect));
+        // Everything off: not needed.
+        let c = Config::from_toml("[sinks]\nmode = \"off\"").unwrap();
+        assert!(!c.sinks.include_eval_hook_needed(Mode::Block));
     }
 
     // ---- [log] (schema 2 log contract) ------------------------------------

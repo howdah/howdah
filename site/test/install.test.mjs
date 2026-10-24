@@ -5,20 +5,13 @@
 // dist/install/index.html is older than the page.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, statSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import vm from 'node:vm';
+import { ensureBuilt, site } from './build-site.mjs';
 
-const site = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const out = resolve(site, 'dist/install/index.html');
-const srcs = ['src/pages/install.astro', 'src/lib/site.ts'].map((p) => resolve(site, p));
-const fresh = () => existsSync(out) && srcs.every((s) => statSync(out).mtimeMs >= statSync(s).mtimeMs);
-if (!fresh()) {
-  const r = spawnSync('npm', ['run', 'build'], { cwd: site, encoding: 'utf8' });
-  if (r.status !== 0) console.error(r.stdout, r.stderr);
-}
+ensureBuilt(out, ['src/pages/install.astro', 'src/lib/site.ts'].map((p) => resolve(site, p)));
 const html = existsSync(out) ? readFileSync(out, 'utf8') : '';
 const script = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)]
   .map((m) => m[1]).find((s) => s.includes('result-steps')) ?? '';

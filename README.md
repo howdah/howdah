@@ -155,7 +155,7 @@ Howdah on a server. End users can download it on its own from the
 (it is also bundled in each tarball):
 
 ```sh
-tools/howdah-check detect              # list PHP installs and whether Howdah is loaded
+tools/howdah-check detect              # list PHP installs, the Howdah package for each, and whether it is loaded
 tools/howdah-check web https://host/   # self-test over HTTP
 tools/howdah-check ini                 # read-only report of risky php.ini settings
 ```
@@ -163,6 +163,7 @@ tools/howdah-check ini                 # read-only report of risky php.ini setti
 ## Documentation
 
 - [Coverage](docs/coverage.md): what has been tested, and where
+- [Package repositories](docs/install-repos.md) and [package layouts](docs/packaging-layouts.md): which package fits Surý, Remi, cPanel, Plesk, CloudLinux, distribution and DirectAdmin PHP
 - [Config editor](https://howdah.org/config/): build and validate `howdah.toml` in the browser with the extension's own parser
 - [Design document](docs/superpowers/specs/2026-10-22-howdah-design.md)
 - [0.1 implementation plan](docs/superpowers/plans/2026-10-22-howdah-0.1-php2shell-shield.md)

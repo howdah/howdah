@@ -1,0 +1,30 @@
+# Howdah package layouts beyond the original two (Surý/Debian apt and Remi SCL
+# yum, which packaging/deb/build-deb.sh and packaging/rpm/build-rpm.sh still
+# build unchanged). packaging/build-layouts.sh renders one package per row from
+# the SAME per-minor release tarball (same howdah.so, same howdah.ini); only the
+# install paths, ini drop-in, package name and dependencies differ. A new layout
+# is a new row. Vendor sources for every path: docs/packaging-layouts.md.
+#
+# Tab-separated, one row per (layout, package format). Tokens:
+#   @MINOR@ 7.4   @XY@ 74   @API@ Zend module API (20190902)   @REL@ package revision
+#   @MODDIR@ (ext column only) the row's moddir
+# Columns:
+#   layout    name howdah-check detect prints for this kind of PHP
+#   fmt       rpm | deb
+#   arches    release arches built for this row (x86_64, aarch64; deb maps to amd64/arm64)
+#   package   package name
+#   release   rpm Release / deb revision suffix (@REL@ alone, or with a tag to keep NEVRAs unique)
+#   moddir    where howdah.so is installed (the vendor PHP's extension_dir)
+#   ext       value written into `extension=` in the ini (relative unless extension_dir varies)
+#   inis      comma-separated ini drop-ins (each gets the same howdah.ini, config(noreplace)/conffile)
+#   requires  comma-separated rpm Requires / deb Depends; pins the PHP minor (and so its ABI)
+#   repo      repository path under https://pkg.howdah.org/ (the format's apt/ or yum/ goes below it)
+#   label     human name used in the package summary
+#
+# layout	fmt	arches	package	release	moddir	ext	inis	requires	repo	label
+cpanel	rpm	x86_64	ea-php@XY@-php-howdah	@REL@	/opt/cpanel/ea-php@XY@/root/usr/lib64/php/modules	howdah.so	/opt/cpanel/ea-php@XY@/root/etc/php.d/20-howdah.ini	ea-php@XY@-php-common	cpanel	cPanel EasyApache 4 ea-php@XY@
+cpanel	deb	x86_64	ea-php@XY@-php-howdah	@REL@	/opt/cpanel/ea-php@XY@/root/usr/lib64/php/modules	howdah.so	/opt/cpanel/ea-php@XY@/root/etc/php.d/20-howdah.ini	ea-php@XY@-php-common	cpanel	cPanel EasyApache 4 ea-php@XY@ (Ubuntu)
+plesk	rpm	x86_64	plesk-php@XY@-howdah	@REL@	/opt/plesk/php/@MINOR@/lib64/php/modules	howdah.so	/opt/plesk/php/@MINOR@/etc/php.d/howdah.ini	plesk-php@XY@	plesk	Plesk PHP @MINOR@
+plesk	deb	x86_64,aarch64	plesk-php@XY@-howdah	@REL@	/opt/plesk/php/@MINOR@/lib/php/modules	howdah.so	/opt/plesk/php/@MINOR@/etc/php.d/howdah.ini	plesk-php@XY@	plesk	Plesk PHP @MINOR@ (Debian/Ubuntu)
+cloudlinux	rpm	x86_64	alt-php@XY@-howdah	@REL@	/opt/alt/php@XY@/usr/lib64/php/modules	howdah.so	/opt/alt/php@XY@/etc/php.d.all/howdah.ini,/opt/alt/php@XY@/etc/php.d.std/howdah.ini	alt-php@XY@	cloudlinux	CloudLinux alt-php@XY@
+stock-rhel	rpm	x86_64,aarch64	php-howdah	@REL@.php@XY@	/usr/lib64/php/modules	@MODDIR@/howdah.so	/etc/php.d/40-howdah.ini	php(zend-abi) = @API@-64	el/php@MINOR@	distribution PHP @MINOR@ (RHEL, Alma, Rocky, Amazon Linux)

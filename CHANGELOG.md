@@ -36,6 +36,34 @@ All notable changes to Howdah are documented here. The format follows
   that touches it and on every release tag (`.github/workflows/worker.yml`).
 - `howdah-wasm` exports `howdah_wasm_validate_config` (the parsed config as
   JSON, or the error), `howdah_wasm_rule_catalog` and `howdah_wasm_version`.
+- Packages for panel and distribution PHP, built from the same per-minor
+  `howdah.so` and `howdah.ini` as the tarball: `ea-php<XY>-php-howdah` for
+  cPanel EasyApache 4 (rpm, and deb for cPanel on Ubuntu),
+  `plesk-php<XY>-howdah` for Plesk (rpm and deb), `alt-php<XY>-howdah` for
+  CloudLinux alt-php, and `php-howdah` for the distribution PHP on RHEL,
+  AlmaLinux, Rocky and Amazon Linux (one repository per PHP minor). Each goes
+  into the vendor's own module and ini directories, depends on the vendor's
+  PHP package for that minor, and has no install scripts. They are published
+  as separate signed repositories under `https://pkg.howdah.org/cpanel/`,
+  `plesk/`, `cloudlinux/` and `el/php<minor>/` by the next run of the publish
+  workflow; the existing `apt/` and `yum/` repositories and the Surý and Remi
+  packages are unchanged. Layouts are rows of `packaging/layouts.tsv`; paths,
+  vendor sources and what was tested are in `docs/packaging-layouts.md`.
+  CloudLinux packages were built but not install-tested (alt-php needs a
+  CloudLinux licence); DirectAdmin stays on the tarball.
+- `howdah-check detect` prints each PHP install's packaging layout (`sury`,
+  `remi`, `cpanel`, `plesk`, `cloudlinux`, `directadmin`, `stock-rhel`,
+  `stock-debian` or `unknown`) and the package and repository Howdah ships
+  for it, or the tarball for its Zend API when there is none. It also always
+  prints the ini scan directory.
+- The install picker offers cPanel, Plesk, CloudLinux and distribution EL PHP,
+  with the repository and package commands for each.
+
+### Changed
+- `docs/install-repos.md` no longer says the apt index lists only the latest
+  publish (it keeps every version), and says the Debian/Ubuntu package also
+  fits the distribution's own PHP, which provides the same `phpapi-<N>`
+  (checked with Ubuntu 20.04's PHP 7.4).
 
 ### Fixed
 - Stale trust surfaces: `SECURITY.md` (supported versions, scope, response

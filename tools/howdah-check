@@ -7,9 +7,11 @@
 #   howdah-check ini [php]  read-only report of risky php.ini settings (see cmd_ini)
 #
 # For each install, detect prints: version, PHP API number, NTS/ZTS,
-# extension_dir, the exact release asset to download for it (host CPU arch +
-# api + PHP MAJ.MIN: howdah-<VERSION>-php<minor>-<api>-linux-<arch>.tar.gz),
-# the SAPIs present (cli/fpm/apache) and whether the `howdah`
+# extension_dir, ini scan dir, the exact release asset to download for it (host
+# CPU arch + api + PHP MAJ.MIN: howdah-<VERSION>-php<minor>-<api>-linux-<arch>.tar.gz),
+# the packaging layout (sury, remi, cpanel, plesk, cloudlinux, directadmin,
+# stock-rhel, stock-debian, unknown) and the package + repo Howdah ships for
+# it (or the tarball), the SAPIs present (cli/fpm/apache) and whether the `howdah`
 # extension is loaded in each. It NEVER modifies anything: it only runs
 # `php -v/-i/-m`, `php-fpm -m`, `php-config`, and reads config files.
 #
@@ -265,7 +267,8 @@ report_install() {
   fi
   say "  extension_dir: ${_ext:-unknown}"
   say "  php_ini: ${_ini:-(none)}"
-  if [ -n "$_scan" ] && [ "$_scan" != "(none)" ]; then say "  ini_scan_dir: $_scan"; fi
+  say "  ini_scan_dir: ${_scan:-(none)}"
+  report_layout "$_real" "$_ext" "$_scan" "$_ver" "$_mm" "$_api" "$_tsl"
 
   # --- cli: ask PHP itself
   if tmo "$_bin" -m 2>/dev/null | grep -qix howdah; then _cs=loaded
@@ -333,6 +336,8 @@ report_config_only() {
     say "  thread_safety: unknown"
     say "  matching release asset: cannot determine (api/version unknown)"
     say "  extension_dir: unknown"
+    say "  layout: unknown (config only)"
+    say "  howdah package: cannot determine (no runnable PHP binary)"
     for _s in cli fpm apache2; do
       _n=$_s; [ "$_s" = apache2 ] && _n=apache
       if [ -d "$_d/$_s" ]; then
@@ -342,6 +347,87 @@ report_config_only() {
       fi
     done
   done
+}
+
+# --- layout: which packaging layout an install follows, and what Howdah ships --
+# The layout is read from extension_dir first (cPanel's /usr/local/bin/php
+# wrapper reports the ea-php paths), then from the binary path. The names and
+# package patterns mirror packaging/layouts.tsv (tools/howdah-check.test.sh
+# fails if they drift) plus the original two repos: Surý/Debian apt and Remi
+# SCL yum. Vendor sources for every path: docs/packaging-layouts.md.
+PKG_URL=https://pkg.howdah.org
+
+# $1=binary realpath $2=extension_dir $3=ini scan dir $4=version -> layout name
+php_layout() {
+  _lv=$4
+  case "$2" in
+    */opt/cpanel/ea-php[0-9]*/root/usr/lib64/php/modules) echo cpanel; return 0 ;;
+    */opt/plesk/php/[0-9]*/lib64/php/modules|*/opt/plesk/php/[0-9]*/lib/php/modules) echo plesk; return 0 ;;
+    */opt/alt/php[0-9]*/usr/lib64/php/modules) echo cloudlinux; return 0 ;;
+    */opt/remi/php[0-9]*/root/usr/lib64/php/modules) echo remi; return 0 ;;
+    */usr/lib/php/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])
+      # Debian layout; Surý builds say so in their version string
+      case "$_lv" in *sury*) echo sury ;; *) echo stock-debian ;; esac
+      return 0 ;;
+    */usr/lib64/php/modules|*/usr/lib64/php[0-9]*/modules)
+      # RHEL/Alma/Rocky/Amazon Linux distribution PHP reads /etc/php.d
+      case "$3" in */etc/php.d) echo stock-rhel; return 0 ;; esac ;;
+    */usr/local/php[0-9]*/lib/php/extensions/*)
+      # DirectAdmin CustomBuild: /usr/local/phpXY with lib/php.conf.d drop-ins
+      case "$3" in */usr/local/php[0-9]*/lib/php.conf.d) echo directadmin; return 0 ;; esac ;;
+    '')
+      case "$1" in
+        */opt/cpanel/ea-php[0-9]*/root/usr/bin/*) echo cpanel; return 0 ;;
+        */opt/plesk/php/[0-9]*/bin/*) echo plesk; return 0 ;;
+        */opt/alt/php[0-9]*/usr/bin/*) echo cloudlinux; return 0 ;;
+        */opt/remi/php[0-9]*/root/usr/bin/*) echo remi; return 0 ;;
+      esac ;;
+  esac
+  echo unknown
+}
+
+# $1=layout $2=MAJ.MIN $3=api $4=NTS|ZTS|unknown -> what Howdah ships for it
+howdah_package() {
+  _pm=$2; _pa=$3
+  _px=$(printf '%s' "$_pm" | tr -d .)
+  _tar="howdah-<VERSION>-php$_pm-$_pa-linux-$ARCH.tar.gz"
+  if [ "$4" = ZTS ]; then echo "none: Howdah is built for NTS PHP only and this PHP is ZTS"; return 0; fi
+  if [ -z "$_pa" ] || [ -z "$_pm" ] || [ "$ARCH" = unknown ]; then
+    echo "cannot determine (api/version/arch unknown)"; return 0
+  fi
+  case "$_pm" in
+    5.[456]|7.[0-4]|8.[0-5]) ;;
+    *) echo "none: Howdah is built for PHP 5.4 to 8.5; this is PHP $_pm"; return 0 ;;
+  esac
+  _deb=0; [ -f "$ROOT/etc/debian_version" ] && _deb=1
+  _fmt=rpm; _repo=""; _arches="x86_64 aarch64"
+  case "$1" in
+    sury|stock-debian) _name="php$_pm-howdah"; _fmt=deb ;;
+    remi) _name="php$_px-howdah" ;;
+    cpanel) _name="ea-php$_px-php-howdah"; _repo=cpanel/; _arches=x86_64
+            [ "$_deb" = 1 ] && _fmt=deb ;;
+    plesk) _name="plesk-php$_px-howdah"; _repo=plesk/
+           if [ "$_deb" = 1 ]; then _fmt=deb; else _arches=x86_64; fi ;;
+    cloudlinux) _name="alt-php$_px-howdah"; _repo=cloudlinux/; _arches=x86_64 ;;
+    stock-rhel) _name="php-howdah"; _repo="el/php$_pm/" ;;
+    *) echo "not yet packaged: use the tarball for API $_pa ($_tar)"; return 0 ;;
+  esac
+  case " $_arches " in
+    *" $ARCH "*) ;;
+    *) echo "not yet packaged for $ARCH: use the tarball for API $_pa ($_tar)"; return 0 ;;
+  esac
+  if [ "$_fmt" = deb ]; then
+    echo "$_name (apt repo $PKG_URL/${_repo}apt, suite stable, component main)"
+  else
+    echo "$_name (yum/dnf repo $PKG_URL/${_repo}yum)"
+  fi
+}
+
+# $1=realpath $2=extension_dir $3=scan dir $4=version $5=MAJ.MIN $6=api $7=NTS|ZTS|unknown
+report_layout() {
+  _lay=$(php_layout "$1" "$2" "$3" "$4")
+  say "  layout: $_lay"
+  say "  howdah package: $(howdah_package "$_lay" "$5" "$6" "$7")"
 }
 
 cmd_detect() {

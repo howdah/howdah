@@ -22,6 +22,10 @@
 #   packaging/repo/publish-r2.sh <bucket> [REPO_DIR]
 #   HOWDAH_R2_PREFIX   key prefix inside the bucket (default: none = bucket root)
 #   HOWDAH_R2_DRY_RUN=1  pass --dry-run to every rclone call (nothing written)
+#   HOWDAH_R2_KINDS    which of the two repos to upload: "apt yum" (default, the
+#                      main repo: both must be present), "apt" or "yum". The
+#                      per-layout repos (publish-layouts-r2.sh) pass only the
+#                      kind(s) they have, e.g. CloudLinux is yum only.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BUCKET="${1:?usage: publish-r2.sh <bucket> [REPO_DIR]}"
@@ -29,9 +33,24 @@ REPO="$(cd "${2:-$REPO_ROOT/packaging/out/repo}" && pwd)"
 PFX="${HOWDAH_R2_PREFIX:+${HOWDAH_R2_PREFIX%/}/}"
 DEST="R2:$BUCKET/$PFX"
 
-[ -d "$REPO/apt/dists" ] && [ -d "$REPO/apt/pool" ] || { echo "FATAL: $REPO/apt is not an assembled apt repo" >&2; exit 1; }
-[ -f "$REPO/apt/dists/stable/InRelease" ] || { echo "FATAL: apt InRelease missing (unsigned?)" >&2; exit 1; }
-[ -f "$REPO/yum/repodata/repomd.xml" ] && [ -f "$REPO/yum/repodata/repomd.xml.asc" ] || { echo "FATAL: $REPO/yum is not an assembled, signed yum repo" >&2; exit 1; }
+KINDS="${HOWDAH_R2_KINDS:-apt yum}"
+APT=0; YUM=0
+for k in $KINDS; do
+  case "$k" in
+    apt) APT=1 ;;
+    yum) YUM=1 ;;
+    *) echo "FATAL: HOWDAH_R2_KINDS must list apt and/or yum (got '$KINDS')" >&2; exit 2 ;;
+  esac
+done
+[ "$APT$YUM" != 00 ] || { echo "FATAL: HOWDAH_R2_KINDS is empty" >&2; exit 2; }
+
+if [ "$APT" = 1 ]; then
+  [ -d "$REPO/apt/dists" ] && [ -d "$REPO/apt/pool" ] || { echo "FATAL: $REPO/apt is not an assembled apt repo" >&2; exit 1; }
+  [ -f "$REPO/apt/dists/stable/InRelease" ] || { echo "FATAL: apt InRelease missing (unsigned?)" >&2; exit 1; }
+fi
+if [ "$YUM" = 1 ]; then
+  [ -f "$REPO/yum/repodata/repomd.xml" ] && [ -f "$REPO/yum/repodata/repomd.xml.asc" ] || { echo "FATAL: $REPO/yum is not an assembled, signed yum repo" >&2; exit 1; }
+fi
 
 DRY=""
 [ "${HOWDAH_R2_DRY_RUN:-0}" = 1 ] && DRY="--dry-run"
@@ -49,19 +68,29 @@ SHORT="Cache-Control: public, max-age=300, must-revalidate"  # mutable indexes /
 rc() { rclone "$@" $DRY --retries 5 --low-level-retries 10 -v; }
 
 echo "== 1/3 packages (long cache) -> $DEST"
-rc copy "$REPO/apt/pool" "${DEST}apt/pool" $IMMUT --header-upload "$LONG"
-rc copy "$REPO/yum" "${DEST}yum" --include '*.rpm' $IMMUT --header-upload "$LONG"
+if [ "$APT" = 1 ]; then
+  rc copy "$REPO/apt/pool" "${DEST}apt/pool" $IMMUT --header-upload "$LONG"
+fi
+if [ "$YUM" = 1 ]; then
+  rc copy "$REPO/yum" "${DEST}yum" --include '*.rpm' $IMMUT --header-upload "$LONG"
+fi
 
 echo "== 2/3 indexes (short cache)"
-rc copy "$REPO/apt/dists" "${DEST}apt/dists" \
-  --exclude '/stable/InRelease' --exclude '/stable/Release' --exclude '/stable/Release.gpg' \
-  --header-upload "$SHORT"
-rc copy "$REPO/yum/repodata" "${DEST}yum/repodata" \
-  --exclude '/repomd.xml' --exclude '/repomd.xml.asc' --header-upload "$SHORT"
+if [ "$APT" = 1 ]; then
+  rc copy "$REPO/apt/dists" "${DEST}apt/dists" \
+    --exclude '/stable/InRelease' --exclude '/stable/Release' --exclude '/stable/Release.gpg' \
+    --header-upload "$SHORT"
+fi
+if [ "$YUM" = 1 ]; then
+  rc copy "$REPO/yum/repodata" "${DEST}yum/repodata" \
+    --exclude '/repomd.xml' --exclude '/repomd.xml.asc' --header-upload "$SHORT"
+fi
 
 echo "== 3/3 signed roots, LAST, back-to-back"
-for f in apt/dists/stable/Release apt/dists/stable/Release.gpg apt/dists/stable/InRelease \
-         yum/repodata/repomd.xml yum/repodata/repomd.xml.asc; do
+ROOTS=""
+if [ "$APT" = 1 ]; then ROOTS="apt/dists/stable/Release apt/dists/stable/Release.gpg apt/dists/stable/InRelease"; fi
+if [ "$YUM" = 1 ]; then ROOTS="$ROOTS yum/repodata/repomd.xml yum/repodata/repomd.xml.asc"; fi
+for f in $ROOTS; do
   rc copyto "$REPO/$f" "${DEST}$f" --header-upload "$SHORT"
 done
 echo "== done ${DRY:+(DRY RUN: nothing was written)}"

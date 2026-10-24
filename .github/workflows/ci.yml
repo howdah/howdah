@@ -163,3 +163,14 @@ jobs:
             echo "$out"
             echo "$out" | grep -E "Panic guard.*=> yes" || { echo "panic guard NOT active (panic=abort regression?)"; exit 1; }
           '
+
+  shell:
+    name: howdah-check + package layout tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      # detect's layout/package lines must match packaging/layouts.tsv, and every
+      # row must render a valid spec/control (no docker needed)
+      - run: sh tools/howdah-check.test.sh
+      - run: sh packaging/layouts.test.sh

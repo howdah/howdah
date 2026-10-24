@@ -1,0 +1,8 @@
+# Build context for docker/Dockerfile (BuildKit reads this file instead of a
+# root .dockerignore): only the fetch script and the public key it verifies
+# against. packaging/out/*.asc is there for HOWDAH_KEY_FILE when testing a
+# locally signed release.
+*
+!docker/fetch.sh
+!packaging/howdah-release-signing.asc
+!packaging/out/*.asc

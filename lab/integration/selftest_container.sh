@@ -7,10 +7,14 @@
 #   - the over-limit multipart is BLOCKED (403/413), with its id in the log;
 #   - ordinary traffic (a normal form) writes NO self_test line.
 # LOAD_EXT=0 skips the extension (RED).
+# PREINSTALLED=1 builds nothing: the PHP in this container already loads
+# howdah from its own ini (a docker/Dockerfile image), so the server starts
+# without `-d extension=` and the installed, released howdah.so is what runs.
 set -eu
 
 FEATURE="${1:-php7}"
 LOAD_EXT="${LOAD_EXT:-1}"
+PREINSTALLED="${PREINSTALLED:-0}"
 HC="${HC:-/src/tools/howdah-check}"
 WORK=/tmp/howdah-st
 LOGDIR=/var/log/howdah
@@ -18,11 +22,16 @@ LOG="$LOGDIR/events.log"
 SRV=""
 rm -rf "$WORK"; mkdir -p "$WORK" "$LOGDIR"; : > "$LOG"
 
-echo "== building howdah-ext ($FEATURE) =="
-export CARGO_TARGET_DIR=/tmp/t
-cd /src
-cargo build -p howdah-ext --features "$FEATURE" --release 2>&1 | tail -3
-cp /tmp/t/release/libhowdah_ext.so "$WORK/howdah.so"
+if [ "$PREINSTALLED" = 1 ]; then
+  echo "== using the installed howdah (PHP $(php -r 'echo PHP_VERSION;'), howdah $(php -r 'echo phpversion("howdah");')) =="
+  php -m | grep -qx howdah || { echo "FAIL: PREINSTALLED=1 but php -m does not list howdah"; exit 1; }
+else
+  echo "== building howdah-ext ($FEATURE) =="
+  export CARGO_TARGET_DIR=/tmp/t
+  cd /src
+  cargo build -p howdah-ext --features "$FEATURE" --release 2>&1 | tail -3
+  cp /tmp/t/release/libhowdah_ext.so "$WORK/howdah.so"
+fi
 
 printf '<?php\n$n = count($_FILES) + count($_POST);\necho "OK n=$n\\n";\n' > "$WORK/index.php"
 
@@ -42,7 +51,8 @@ run_mode() {
   printf 'mode = "%s"\n' "$_mode" > "$WORK/$_mode.toml"
   set -- -d post_max_size=16M -d max_input_vars=100000 -d max_file_uploads=100000
   if [ "$LOAD_EXT" = "1" ]; then
-    set -- "$@" -d extension="$WORK/howdah.so" -d howdah.config="$WORK/$_mode.toml" -d howdah.log="$LOG"
+    [ "$PREINSTALLED" = 1 ] || set -- "$@" -d extension="$WORK/howdah.so"
+    set -- "$@" -d howdah.config="$WORK/$_mode.toml" -d howdah.log="$LOG"
   fi
   php "$@" -S "127.0.0.1:$_port" "$WORK/index.php" > "$WORK/server.$_port.log" 2>&1 &
   SRV=$!

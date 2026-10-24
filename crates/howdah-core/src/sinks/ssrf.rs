@@ -70,7 +70,11 @@ pub fn parse_host(input: &[u8], form: HostForm) -> Option<Host> {
     {
         return None;
     }
-    let (scheme, rest) = match find_sub(input, b"://") {
+    // `://` is a scheme delimiter only before any `/`, `?` or `#`; otherwise it
+    // is part of a path/query (e.g. `127.0.0.1/?u=http://x`) of a bare host.
+    let delim = find_sub(input, b"://")
+        .filter(|&i| !input[..i].iter().any(|b| matches!(b, b'/' | b'?' | b'#')));
+    let (scheme, rest) = match delim {
         Some(i) => {
             let sch = &input[..i];
             if sch.is_empty()
@@ -120,9 +124,11 @@ pub fn parse_host(input: &[u8], form: HostForm) -> Option<Host> {
         }
         Some(std::str::from_utf8(port_s).ok()?.parse::<u16>().ok()?)
     };
+    // Zone-id only exists on IPv6; elsewhere `%` is percent-encoding, so never
+    // truncate a non-IPv6 name at it.
     let name = match name.iter().position(|&b| b == b'%') {
-        Some(z) => &name[..z],
-        None => name,
+        Some(z) if name.contains(&b':') => &name[..z],
+        _ => name,
     };
     let mut name = name.to_ascii_lowercase();
     while name.last() == Some(&b'.') {
@@ -359,6 +365,26 @@ fn norm(ip: IpRepr) -> IpRepr {
     }
 }
 
+/// Exactly four decimal octets, no leading zeros (which inet_aton reads as octal).
+fn strict_dotted_quad(s: &[u8]) -> Option<[u8; 4]> {
+    let mut out = [0u8; 4];
+    let mut n = 0;
+    for part in s.split(|&b| b == b'.') {
+        if n == 4
+            || part.is_empty()
+            || part.len() > 3
+            || (part.len() > 1 && part[0] == b'0')
+            || !part.iter().all(u8::is_ascii_digit)
+        {
+            return None;
+        }
+        let v: u16 = std::str::from_utf8(part).ok()?.parse().ok()?;
+        out[n] = u8::try_from(v).ok()?;
+        n += 1;
+    }
+    (n == 4).then_some(out)
+}
+
 /// Parse `ip/prefix` with an in-range prefix length.
 fn parse_cidr(entry: &str) -> Option<(IpRepr, u8)> {
     let (ip, pfx) = entry.split_once('/')?;
@@ -366,7 +392,13 @@ fn parse_cidr(entry: &str) -> Option<(IpRepr, u8)> {
         return None;
     }
     let p: u8 = pfx.parse().ok()?;
-    let ip = decode_literal_ip(ip.as_bytes())?;
+    // Strict network address: the permissive inet_aton forms would make
+    // `10/8` silently mean 0.0.0.10/8, weakening the operator's intent.
+    let ip = if ip.contains(':') {
+        decode_literal_ip(ip.as_bytes())?
+    } else {
+        IpRepr::V4(strict_dotted_quad(ip.as_bytes())?)
+    };
     let max = if matches!(ip, IpRepr::V4(_)) { 32 } else { 128 };
     (p <= max).then_some((ip, p))
 }
@@ -384,8 +416,19 @@ fn bits_match(n: &[u8], i: &[u8], prefix: u8) -> bool {
 }
 
 fn cidr_contains(net: IpRepr, prefix: u8, ip: IpRepr) -> bool {
-    match (norm(net), norm(ip)) {
-        (IpRepr::V4(n), IpRepr::V4(i)) => bits_match(&n, &i, prefix),
+    // A v4-mapped v6 net with prefix >= 96 is really a v4 net (prefix - 96).
+    // Never normalize the net otherwise: the prefix must stay within its width.
+    let (net, prefix) = match net {
+        IpRepr::V6(a) if prefix >= 96 && is_v4_mapped(&a) => {
+            (IpRepr::V4([a[12], a[13], a[14], a[15]]), prefix - 96)
+        }
+        other => (other, prefix),
+    };
+    match (net, ip) {
+        (IpRepr::V4(n), ip) => match norm(ip) {
+            IpRepr::V4(i) => bits_match(&n, &i, prefix),
+            IpRepr::V6(_) => false,
+        },
         (IpRepr::V6(n), IpRepr::V6(i)) => bits_match(&n, &i, prefix),
         _ => false,
     }
@@ -421,7 +464,8 @@ pub fn host_allowed(
 /// True iff `entry` is a well-formed `allow_hosts` entry: a non-empty,
 /// whitespace-free hostname, a literal IP, or a CIDR with an in-range prefix.
 pub fn valid_allow_entry(entry: &str) -> bool {
-    if entry.is_empty() || entry.bytes().any(|b| b.is_ascii_whitespace()) {
+    // Wildcards are unsupported; reject rather than let them silently never match.
+    if entry.is_empty() || entry.bytes().any(|b| b.is_ascii_whitespace() || b == b'*') {
         return false;
     }
     if entry.contains('/') {
@@ -610,6 +654,63 @@ mod tests {
         assert!(host_allowed(b"api.example.com", &[], None, &a));
         assert!(!host_allowed(b"x.corp.com", &[], None, &a));
         assert!(!host_allowed(b"evil.api.example.com", &[], None, &a));
+    }
+    #[test]
+    fn cidr_mapped_v6_net_no_panic() {
+        let v4 = IpRepr::V4([10, 1, 2, 3]);
+        let a = al(&["::ffff:10.0.0.0/104"]);
+        assert!(valid_allow_entry("::ffff:10.0.0.0/104"));
+        assert!(host_allowed(b"x", &[v4], None, &a));
+        assert!(!host_allowed(b"x", &[IpRepr::V4([11, 0, 0, 1])], None, &a));
+        let a = al(&["::ffff:0:0/96"]);
+        assert!(host_allowed(b"x", &[v4], None, &a));
+        let a = al(&["::ffff:0:0/80"]);
+        assert!(host_allowed(
+            b"x",
+            &[decode_literal_ip(b"::1").unwrap()],
+            None,
+            &a
+        ));
+        let a = al(&["::ffff:0:0/128"]);
+        assert!(!host_allowed(b"x", &[IpRepr::V4([1, 1, 1, 1])], None, &a));
+    }
+    #[test]
+    fn parse_barehost_with_url_in_query() {
+        let h = ph("127.0.0.1/?u=http://x", HostForm::BareHostOk).unwrap();
+        assert_eq!(h.name, b"127.0.0.1");
+        assert_eq!(h.scheme, None);
+        assert!(ph("127.0.0.1/?u=http://x", HostForm::SchemeRequired).is_none());
+    }
+    #[test]
+    fn parse_percent_encoded_host_not_dropped() {
+        assert!(ph("http://%31%32%37.0.0.1/", HostForm::SchemeRequired).is_some());
+        let h = ph("http://[fe80::1%25eth0]/", HostForm::SchemeRequired).unwrap();
+        assert_eq!(h.name, b"fe80::1");
+    }
+    #[test]
+    fn reserved_extras() {
+        assert_eq!(cls("0.1.2.3"), Some(Unspecified));
+        assert_eq!(cls("2001:2::1"), Some(Benchmarking));
+    }
+    #[test]
+    fn valid_allow_entry_rejects_wildcard() {
+        assert!(!valid_allow_entry("*.corp.com"));
+        assert!(!valid_allow_entry("*"));
+    }
+    #[test]
+    fn cidr_requires_strict_address() {
+        assert!(!valid_allow_entry("10/8"));
+        assert!(!valid_allow_entry("0x0a.0.0.0/8"));
+        assert!(!valid_allow_entry("167772160/8"));
+        assert!(!valid_allow_entry("010.0.0.0/8"));
+        assert!(!valid_allow_entry("10.0.0/8"));
+        assert!(valid_allow_entry("10.0.0.0/8"));
+        assert!(!host_allowed(
+            b"x",
+            &[IpRepr::V4([10, 0, 0, 1])],
+            None,
+            &al(&["10/8"])
+        ));
     }
     #[test]
     fn reservedclass_as_str_pinned() {

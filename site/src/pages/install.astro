@@ -111,7 +111,7 @@ sudo systemctl reload php8.1-fpm</code></pre>
         <p>Howdah protects the request-parsing path the same way under CGI. It cannot cover <strong>CVE-2012-1823</strong> (php-cgi argument injection): that query string is consumed by php-cgi during its own startup, <em>before</em> any PHP extension loads, so no in-PHP firewall can act on it. Use a web-server or front-proxy rule, or a patched php-cgi, for that one. See the <a href="/coverage/">coverage page</a>.</p>
       </div>
 
-      <p class="legend">The signing key is at <code>https://howdah.org/key.asc</code> — the same key that signs the release <code>SHA256SUMS</code>. Check its primary fingerprint, <code>{KEY_FPR}</code>, before trusting it. Package and metadata signatures are both enforced.</p>
+      <p class="legend">The signing key is at <code>https://howdah.org/key.asc</code> — the same key that signs the release <code>SHA256SUMS</code>. Check its primary fingerprint, <code>{KEY_FPR}</code>, before trusting it. Package and metadata signatures are both enforced. Build provenance and rebuilding a release yourself: <a href="/docs/verify/">verify a release</a>.</p>
     </div>
   </section>
 </Layout>

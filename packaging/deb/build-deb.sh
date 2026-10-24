@@ -34,6 +34,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HERE="$REPO_ROOT/packaging/deb"
 OUT="$REPO_ROOT/packaging/out"
+# shellcheck source=packaging/reproducible.sh
+. "$REPO_ROOT/packaging/reproducible.sh"
 
 MINOR="${1:?usage: build-deb.sh <minor> <amd64|arm64> [tarball]}"
 DEBARCH="${2:?usage: build-deb.sh <minor> <amd64|arm64> [tarball]}"
@@ -110,7 +112,9 @@ EOF2
 chmod 0644 "$ROOT/usr/share/doc/$PKG"/*
 
 # ---- 3. control + maintainer scripts ----------------------------------------
-SIZE="$(du -sk --exclude=DEBIAN "$ROOT" | cut -f1)"
+# Counted from file sizes, not `du`, so the value does not depend on the
+# builder's filesystem (packaging/reproducible.sh).
+SIZE="$(howdah_installed_size_kib "$ROOT")"
 sed -e "s/@PKG@/$PKG/g" -e "s/@VERSION@/$VERSION-$REV/g" -e "s/@ARCH@/$DEBARCH/g" \
     -e "s/@MINOR@/$MINOR/g" -e "s/@API@/$API/g" -e "s/@SIZE@/$SIZE/g" \
     "$HERE/control.in" > "$ROOT/DEBIAN/control"
@@ -123,7 +127,13 @@ done
 mkdir -p "$OUT"
 DEB="$OUT/${PKG}_${VERSION}-${REV}_${DEBARCH}.deb"
 # --root-owner-group: root:root regardless of builder uid. gzip members work on
-# every dpkg back to xenial and older.
+# every dpkg back to xenial and older. Reproducible (docs/verify.md): modes and
+# mtimes normalised, and dpkg-deb stamps the ar members and clamps the tar
+# entries to SOURCE_DATE_EPOCH, so the same commit and dpkg version give the
+# same .deb.
+SOURCE_DATE_EPOCH="$(howdah_source_date_epoch "$REPO_ROOT")"
+export SOURCE_DATE_EPOCH
+howdah_normalize_tree "$ROOT" "$SOURCE_DATE_EPOCH"
 dpkg-deb --root-owner-group -Zgzip --build "$ROOT" "$DEB" >/dev/null
 echo "== built $DEB"
 dpkg-deb -I "$DEB" control

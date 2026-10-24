@@ -25,6 +25,7 @@ import { REPO } from '../../lib/site';
         <li><a class="card" href="/docs/troubleshooting/"><h3>Troubleshooting &amp; FAQ</h3><p>&ldquo;Loaded in CLI but not FPM&rdquo;, detect vs block, upgrading and uninstalling, and common questions.</p></a></li>
         <li><a class="card" href="/coverage/"><h3>Coverage</h3><p>Exactly which PHP versions and server types have been tested, generated from the lab matrix.</p></a></li>
         <li><a class="card" href="/docs/compliance/"><h3>Compliance evidence</h3><p>PCI DSS 6.4.2 bullet by bullet, the log fields and retention setup to hand an assessor, a decision-record template, and how to answer end-of-life questions.</p></a></li>
+        <li><a class="card" href="/docs/verify/"><h3>Verify a release</h3><p>The signed checksums, build provenance, the SBOM, and rebuilding a release yourself to check it matches byte for byte.</p></a></li>
       </ul>
 
       <h2 style="margin-top:2.5rem">Reference in the repository</h2>
@@ -40,6 +41,8 @@ import { REPO } from '../../lib/site';
         <li><a href={`${REPO}/blob/main/docs/packaging-layouts.md`}>docs/packaging-layouts.md</a> — which package fits cPanel, Plesk, CloudLinux, distribution and DirectAdmin PHP, with the vendor sources; LiteSpeed lsphp and Alpine (musl)</li>
         <li><a href={`${REPO}/blob/main/docs/install-docker.md`}>docs/install-docker.md</a> — Docker images, the one-line <code>COPY --from</code> install, and how to verify an image</li>
         <li><a href={`${REPO}/blob/main/docs/zts.md`}>docs/zts.md</a> — why there is no thread-safe (ZTS) build yet: FrankenPHP, threaded Apache</li>
+        <li><a href={`${REPO}/blob/main/docs/verify.md`}>docs/verify.md</a> — verifying a release: signatures, provenance, SBOM, reproducible rebuild</li>
+        <li><a href={`${REPO}/blob/main/docs/security-audit-brief.md`}>docs/security-audit-brief.md</a> — the scope and threat model for a third-party security audit</li>
         <li><a href={`${REPO}/security/policy`}>Security policy</a> — how to report a vulnerability</li>
       </ul>
     </div>

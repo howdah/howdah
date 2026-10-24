@@ -1,0 +1,109 @@
+name: attest-selftest
+
+# MANUAL self-test of the attestation steps that release.yml and
+# publish-repos.yml run, on throwaway files, so a change to those steps (or to
+# packaging/sbom.sh) can be checked without pushing a tag:
+#   Actions -> attest-selftest -> Run workflow.
+# It attests two small dummy files the way the real workflows do (provenance by
+# subject-path and by subject-checksums, plus the CycloneDX SBOM), then
+# verifies them with the same commands docs/verify.md gives users: online with
+# `gh attestation verify`, and offline from the Sigstore bundle.
+# The attestations it creates name only those dummy files (each run adds
+# entries for them to the public Sigstore transparency log).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate the SBOM (as release.yml does)
+        run: packaging/sbom.sh sbom/howdah-sbom-x86_64.cdx.json x86_64-unknown-linux-gnu
+      - uses: actions/upload-artifact@v4
+        with:
+          name: selftest-sbom
+          path: sbom/*.cdx.json
+          if-no-files-found: error
+
+  attest:
+    needs: sbom
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: selftest-sbom
+          path: sbom
+
+      - name: Make the dummy subjects
+        run: |
+          mkdir -p out
+          printf 'Howdah attestation self-test, run %s.%s, subject a\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > out/selftest-a.txt
+          printf 'Howdah attestation self-test, run %s.%s, subject b\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > out/selftest-b.txt
+          ( cd out && sha256sum selftest-b.txt ) > selftest-b.sha256
+          cat selftest-b.sha256
+
+      - name: Attest build provenance by subject-path (as release.yml)
+        id: prov
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: out/selftest-a.txt
+
+      - name: Attest build provenance by subject-checksums (as publish-repos.yml)
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: selftest-b.sha256
+
+      - name: Attest the SBOM (as release.yml)
+        id: sbom
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: out/selftest-a.txt
+          sbom-path: sbom/howdah-sbom-x86_64.cdx.json
+
+      - name: Verify online, as a user would (gh attestation verify)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WF: ${{ github.repository }}/.github/workflows/attest-selftest.yml
+        run: |
+          set -euo pipefail
+          gh attestation verify out/selftest-a.txt -R "$GITHUB_REPOSITORY" --signer-workflow "$WF"
+          gh attestation verify out/selftest-b.txt -R "$GITHUB_REPOSITORY" --signer-workflow "$WF"
+          gh attestation verify out/selftest-a.txt -R "$GITHUB_REPOSITORY" \
+            --predicate-type https://cyclonedx.org/bom --format json \
+            | jq -e '.[0].verificationResult.statement.predicate.metadata.component.name == "howdah-ext"'
+          # a file nobody attested must fail
+          echo tampered >> out/selftest-a.txt
+          if gh attestation verify out/selftest-a.txt -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::a modified file verified"; exit 1
+          fi
+          echo "tampered file rejected, as it should be"
+
+      - name: Verify offline from the Sigstore bundle (no API calls)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE: ${{ steps.prov.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          printf 'Howdah attestation self-test, run %s.%s, subject a\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > out/selftest-a.txt
+          gh attestation trusted-root > trusted_root.jsonl
+          gh attestation verify out/selftest-a.txt -R "$GITHUB_REPOSITORY" \
+            --bundle "$BUNDLE" --custom-trusted-root trusted_root.jsonl
+          mkdir -p bundles && cp "$BUNDLE" bundles/provenance.sigstore.json
+          cp "${{ steps.sbom.outputs.bundle-path }}" bundles/sbom.sigstore.json
+          cp out/selftest-a.txt bundles/
+
+      - name: Keep the bundles (for checking the cosign commands in docs/verify.md)
+        uses: actions/upload-artifact@v4
+        with:
+          name: selftest-bundles
+          path: bundles/

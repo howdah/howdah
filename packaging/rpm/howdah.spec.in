@@ -44,6 +44,9 @@ and set howdah.mode = block once you have reviewed the logs.
 %install
 install -D -m 0755 %{SOURCE0} %{buildroot}%{moddir}/howdah.so
 install -D -m 0644 %{SOURCE1} %{buildroot}%{inidir}/40-howdah.ini
+# Reproducible payload: every file carries SOURCE_DATE_EPOCH (EL7's rpm 4.11
+# has no %%clamp_mtime_to_source_date_epoch; build-rpm.sh passes it anyway).
+if [ -n "${SOURCE_DATE_EPOCH:-}" ]; then find %{buildroot} -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +; fi
 
 # Enabling == dropping the autoloaded 40-howdah.ini (PHP scans php.d), so there
 # is nothing to run in %post/%postun and nothing that can wedge PHP or the

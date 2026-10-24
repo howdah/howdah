@@ -23,6 +23,17 @@
 #                    in packaging/release.musl.Dockerfile, every minor from
 #                    source headers, and names the tarball ...-linux-x86_64-musl.tar.gz.
 #                    glibc is exactly the historical behavior.
+#   SOURCE_DATE_EPOCH  the time stamped on every file in the tarballs (default:
+#                    the committer date of the checked-out commit; see
+#                    packaging/reproducible.sh)
+#
+# Reproducible: the same commit gives byte-identical tarballs (docs/verify.md).
+# The compiler is pinned (packaging/rust-toolchain.toml), builder paths are
+# remapped (build-one.sh), and each tarball is written by
+# packaging/reproducible.sh's deterministic tar inside the release image:
+# sorted entries, fixed modes, owner 0/0, mtime SOURCE_DATE_EPOCH, gzip -n.
+# packaging/verify-reproducible.sh rebuilds a minor from a tag and compares it
+# with the published SHA256SUMS.
 #
 # Output: packaging/out/
 #   howdah-<version>-php<minor>-<api>-linux-<arch>.tar.gz   (per minor; arch = x86_64|aarch64)
@@ -34,6 +45,10 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="$REPO_ROOT/packaging/out"
+# shellcheck source=packaging/reproducible.sh
+. "$REPO_ROOT/packaging/reproducible.sh"
+SOURCE_DATE_EPOCH="$(howdah_source_date_epoch "$REPO_ROOT")"
+export SOURCE_DATE_EPOCH
 
 # Target arch. x86_64 (default) is exactly the historical behavior; aarch64
 # swaps the Dockerfile, image name, docker --platform and tarball suffix.
@@ -111,6 +126,7 @@ MINORS=("$@")
 
 HOWDAH_VERSION="${HOWDAH_VERSION:-$(grep -m1 '^version' "$REPO_ROOT/Cargo.toml" | sed -E 's/.*"([^"]+)".*/\1/')}"
 echo "== Howdah release build: version $HOWDAH_VERSION, minors: ${MINORS[*]}"
+echo "== SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH ($(date -u -d "@$SOURCE_DATE_EPOCH" '+%Y-%m-%d %H:%M:%S UTC'))"
 [ "$ARCH" = x86_64 ] || echo "== target arch: $ARCH"
 [ "$LIBC" = glibc ] || echo "== target libc: $LIBC"
 
@@ -146,6 +162,7 @@ for minor in "${MINORS[@]}"; do
   if docker run --rm \
         ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} \
         -e "HOWDAH_ARCH=$ARCH" -e "HOWDAH_LIBC=$LIBC" \
+        -e "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
         -v "$REPO_ROOT":/src:ro \
         -v "$stage":/out \
         -w /src \
@@ -198,7 +215,16 @@ Verify this download (see packaging/howdah-release-signing.asc in the repo):
   sha256sum -c SHA256SUMS
 EOF
     tarball="$OUT/howdah-$HOWDAH_VERSION-php$minor-$api-$SUFFIX.tar.gz"
-    tar -C "$pkgdir" -czf "$tarball" "$root"
+    # Deterministic tarball (packaging/reproducible.sh), written by the
+    # release image's own tar and gzip so a rebuild anywhere uses the same
+    # tools: fixed modes, sorted entries, owner 0/0, mtime SOURCE_DATE_EPOCH.
+    howdah_normalize_tree "$pkgdir/$root" "$SOURCE_DATE_EPOCH"
+    if ! docker run --rm ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} \
+          -v "$pkgdir":/pkg:ro -w /pkg "$IMAGE" \
+          sh -c "$HOWDAH_DET_TAR_GZ" sh "$root" "$SOURCE_DATE_EPOCH" > "$tarball"; then
+      rm -f "$tarball"; rm -rf "$pkgdir" "$stage"
+      echo "!! PHP $minor: writing the tarball failed"; failed="$failed $minor"; continue
+    fi
     rm -rf "$pkgdir"
 
     # record

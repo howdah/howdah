@@ -57,6 +57,36 @@ before trusting the key:
 curl -fsSL https://howdah.org/key.asc | gpg --show-keys --with-fingerprint
 ```
 
+Then, for a downloaded tarball `$T`:
+
+```sh
+gpg --import howdah-release-signing.asc
+gpg --verify SHA256SUMS.asc SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS
+gh attestation verify "$T" -R howdah/howdah     # build provenance (releases after 1.4.0)
+```
+
+Releases after 1.4.0 also carry SLSA build provenance and a CycloneDX SBOM,
+attested through Sigstore by the release workflow, with the bundles attached
+for offline checks with `cosign`. The packages on `pkg.howdah.org` carry build
+provenance too.
+
+**Independent verification.** The release tarballs are reproducible: the
+same tag gives byte-identical tarballs on any machine with Docker. To check a
+release without trusting GitHub, our CI or us, rebuild one PHP minor from the
+tag and compare it with the signed checksum:
+
+```sh
+packaging/verify-reproducible.sh v1.5.0 7.4
+```
+
+[docs/verify.md](docs/verify.md) has every step, what each check proves, what
+is pinned in the build, and the known residual causes of a mismatch.
+
+Howdah has had no third-party security audit yet.
+[docs/security-audit-brief.md](docs/security-audit-brief.md) is the scope and
+threat model we would hand an auditor.
+
 ## Scope
 
 Howdah is a PHP extension with four layers. **Layer 1** enforces request
@@ -74,7 +104,9 @@ what is not covered.
 In scope: a bypass of a documented protection, a crash or hang in the
 extension, excess memory use caused by Howdah itself, a way to make Howdah log
 request bodies, cookies, `Authorization` headers, matched values or sink
-arguments (it must not), and flaws in the package repositories or signing.
+arguments (it must not), and flaws in the package repositories, signing,
+build provenance or the reproducible build (a release that does not rebuild to
+its signed checksum is a bug).
 
 Out of scope: gaps already listed as limitations in docs/coverage.md, and
 Howdah is not a replacement for patching PHP or your application. A

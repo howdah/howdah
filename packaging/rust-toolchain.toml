@@ -1,0 +1,16 @@
+# The Rust toolchain that builds the release howdah.so. Pinned so that a
+# rebuild from a tag uses the same compiler as the published release, which
+# is what makes the release tarballs reproducible (docs/verify.md).
+#
+# Scope: the release build only. packaging/release.Dockerfile and
+# release.aarch64.Dockerfile install exactly this channel, and
+# packaging/build-one.sh exports it as RUSTUP_TOOLCHAIN. It sits here, not at
+# the repository root, so CI, the lab images and the site's wasm build keep
+# their own toolchains instead of each downloading this one per container.
+#
+# To bump: change `channel`, rebuild the release image, and note it in
+# CHANGELOG.md. A new compiler changes the bytes of howdah.so, so tarballs
+# from different pins are expected to differ.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"

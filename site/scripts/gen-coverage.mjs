@@ -327,6 +327,48 @@ is best-effort, so it can be bypassed. Lab-verified end to end (GET and POST onl
 7.4 (cli-server); the scanners are version-independent, so matching should be the
 same on 5.4-8.5. Details: [coverage-data.md](coverage-data.md#howdah-10-layer-2-input-inspection-coverage-data-task-8). It is not part of the
 tables above.
+
+## Layer 3 (sink hardening, 1.3 additions)
+
+Layer 3 guards dangerous PHP functions. It detects and logs by default and does
+not block unless a sink is explicitly armed. 1.3 adds the \`phar\` and \`ssrf\`
+sinks (both **off by default**, armed only by an explicit per-sink mode) and
+makes \`include\`/\`eval\` **active on PHP 5.x**. These results come from
+\`lab/integration/sinks_fastfollow.sh\`, not from the matrix tables above.
+
+| sink / mechanism | PHP 5.4-5.6 | PHP 7.0-7.4 | PHP 8.0-8.5 |
+|---|---|---|---|
+| \`phar://\` (wrapper proxy; off by default) | detect/deny + **deserialization** | detect/deny + **deserialization** | detect/deny **only**; no deserialization claim |
+| SSRF (function swap + curl handle map; off by default) | yes, opt-in | yes, opt-in | yes, opt-in |
+| \`include\` / \`eval\` | **now active** (include: opcache caveat; eval: full) | active | active |
+
+Verified on PHP 5.4, 5.6, 7.4, 8.3 and 8.5. Other minors build and are expected
+to work but are **not independently verified**. A debug-build leak review is
+still pending.
+
+Limitations, stated plainly:
+
+- **phar on 8.x is detection and denial, not deserialization coverage.** On
+  5.x/7.x the claim is phar metadata deserialization via the stream wrapper
+  (filesystem functions and \`include\`).
+- **The direct Phar API is a gap:** \`new Phar\`, \`PharData\`, \`Phar::loadPhar\`,
+  \`Phar::mapPhar\` and \`Phar::getMetadata\` unserialize before any wrapper
+  operation. \`stream_wrapper_unregister\` then \`stream_wrapper_restore\` of
+  \`phar\` is untested; another extension re-registering \`phar\`, or a static phar
+  build, fails open.
+- **SSRF is best-effort, resolve-at-check-time detection, not a connection-time
+  boundary.** Bypasses: DNS rebinding, redirects to a new host, \`curl_multi_*\`,
+  \`CURLOPT_RESOLVE\`/\`CONNECT_TO\`, and a non-string or absent \`CURLOPT_URL\`.
+- **Not hooked:** \`copy\`, \`file\`, \`readfile\`, \`SoapClient\`,
+  \`DOMDocument::load*\`, \`simplexml_load_file\`.
+- A blocked \`fsockopen\`/\`stream_socket_client\` leaves \`$errno\`/\`$errstr\` unset;
+  a blocked \`curl_exec\` returns false with \`curl_errno\` 0.
+- Enabling SSRF adds a \`getaddrinfo\` per distinct outbound host with **no
+  timeout**. More than 32 resolved addresses are capped; a host over 256 bytes
+  is treated as suspicious.
+- **PHP 5.x \`include\` is checked at compile time only:** a file served from a
+  **warm opcache** is not re-inspected. \`eval\` is never cached and is fully
+  covered. On 7.0+ the opcode handler is not affected by opcache.
 `;
 // The Layer 2 section above was first added to docs/coverage.md by hand (PR
 // #18) without this generator knowing about it; it lives here now so a

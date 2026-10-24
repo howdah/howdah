@@ -4,7 +4,7 @@
 export const REPO = 'https://github.com/howdah/howdah';
 export const RELEASES = `${REPO}/releases`;
 export const PKG = 'https://pkg.howdah.org';
-export const VERSION = '1.2.1';
+export const VERSION = '1.3.0';
 
 // Signing key primary fingerprint, grouped for readability (compare against gpg).
 export const KEY_FPR = '1152 1035 C600 F638 31F8 2551 2087 B872 0997 807B';

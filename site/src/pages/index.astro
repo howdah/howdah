@@ -9,12 +9,12 @@ const ranDate = (coverage.generated || '').slice(0, 10);
 const shortVersion = VERSION.split('.').slice(0, 2).join('.');
 
 // Four-layer model (design §3). Layer 1 shipped in 1.0, Layer 2 in 1.1,
-// Layer 3 in 1.2 (status 'released', log-only); 4 is the roadmap.
+// Layer 3 in 1.2, extended in 1.3 (status 'released', log-only); 4 is the roadmap.
 // Non-active layers are dimmed so the page never implies they are in 1.0.
 const layers = [
   { n: 1, name: 'Request parsing', covers: 'Upload/multipart floods (PHP2Shell), input-variable floods, deeply nested arrays, oversized headers — refused while PHP parses the request.', status: 'active' },
   { n: 2, name: 'Request inspection', covers: 'Content inspection of decoded GET/POST/cookie/path values for SQL injection, path traversal and command/code injection. It detects and logs; it does not block by default.', status: 'released' },
-  { n: 3, name: 'Runtime checks', covers: 'Sink hardening: guards command execution (system/exec/shell_exec/passthru/popen/proc_open) and unserialize with a flat allowlist policy. It detects and logs; it does not block by default. include/eval, phar:// and SSRF are roadmap, not in 1.2.', status: 'released' },
+  { n: 3, name: 'Runtime checks', covers: 'Sink hardening: guards command execution, unserialize, include and eval with a flat allowlist policy, plus phar:// and an SSRF egress guard (both off by default, new in 1.3). It detects and logs; it does not block by default.', status: 'released' },
   { n: 4, name: 'After a breach', covers: 'Blocking execution of PHP from upload dirs, webshell behaviour, unexpected outbound connections.', status: 'planned' },
 ];
 
@@ -54,7 +54,7 @@ const compare = [
       <div>
         <h2>What is Howdah, and why the name?</h2>
         <p>Howdah is a native extension for PHP. When a web request arrives, PHP starts parsing it before any of your code runs. Howdah watches that parsing step and refuses requests that are built to exhaust memory, while PHP is still working through them.</p>
-        <p>Version 1.0 completes Howdah's first layer: limits on <code>multipart/form-data</code> uploads, on the number and shape of input variables, and on request headers. The critical resource-exhaustion limits block by default, even in detect mode; everything else starts in log-only mode so you can watch it before you let it block. Version 1.1 adds Layer 2, which inspects request content for injection patterns and logs them; it does not block by default. Version 1.2 adds Layer 3, which guards four dangerous PHP sinks (command execution and <code>unserialize</code> on every supported PHP, <code>include</code> and <code>eval</code> on PHP 7.0+), and also logs first.</p>
+        <p>Version 1.0 completes Howdah's first layer: limits on <code>multipart/form-data</code> uploads, on the number and shape of input variables, and on request headers. The critical resource-exhaustion limits block by default, even in detect mode; everything else starts in log-only mode so you can watch it before you let it block. Version 1.1 adds Layer 2, which inspects request content for injection patterns and logs them; it does not block by default. Version 1.2 adds Layer 3, which guards four dangerous PHP sinks, and also logs first. Version 1.3 extends it with <code>phar://</code> and SSRF guards (off by default) and brings <code>include</code> and <code>eval</code> to PHP 5.x.</p>
         <p>It is not a replacement for patching. Upgrade PHP when you can. Use Howdah when you cannot, or until you can.</p>
       </div>
       <aside class="card" aria-labelledby="howdah-word">
@@ -68,7 +68,7 @@ const compare = [
   <section id="how" class="alt">
     <div class="wrap">
       <h2>How it works: four layers</h2>
-      <p>Howdah's protection is organised in four layers. <strong>Version 1.0 delivered Layer 1; version 1.1 added Layer 2; version 1.2 adds Layer 3.</strong> Layer 2 detects and logs SQL injection, path traversal and command/code injection in request values; Layer 3 guards the command-execution and <code>unserialize</code> sinks; neither blocks by default. Layer 4 is the roadmap, and this page never claims it is here yet.</p>
+      <p>Howdah's protection is organised in four layers. <strong>Version 1.0 delivered Layer 1; version 1.1 added Layer 2; version 1.2 added Layer 3, extended in 1.3.</strong> Layer 2 detects and logs SQL injection, path traversal and command/code injection in request values; Layer 3 guards dangerous sinks (command execution, <code>unserialize</code>, <code>include</code>, <code>eval</code>, and in 1.3 <code>phar://</code> and SSRF); neither blocks by default. Layer 4 is the roadmap, and this page never claims it is here yet.</p>
       <ol class="layers" aria-label="The four protection layers; a request flows from the top down">
         {layers.map((l) => (
           <li class={l.status}>
@@ -165,20 +165,22 @@ const compare = [
 
   <section id="sinks" class="alt">
     <div class="wrap">
-      <h2>Layer 3 — the sinks Howdah guards <span class="pill ok">1.2 · log-only</span></h2>
-      <p>Layer 2 looks at request values. Layer 3 looks at what the application does with them: it guards dangerous PHP functions, called <em>sinks</em>, with a flat allowlist policy in the style of Snuffleupagus. Version 1.2 <strong>actively guards four sinks. It detects and logs; it does not block by default.</strong> This is sink hardening, not XSS or output inspection.</p>
+      <h2>Layer 3 — the sinks Howdah guards <span class="pill ok">1.3 · log-only</span></h2>
+      <p>Layer 2 looks at request values. Layer 3 looks at what the application does with them: it guards dangerous PHP functions, called <em>sinks</em>, with a flat allowlist policy in the style of Snuffleupagus. Version 1.3 <strong>actively guards six sinks. It detects and logs; it does not block by default.</strong> This is sink hardening, not XSS or output inspection.</p>
       <div class="cols two" style="margin-top:1.5rem">
         <div>
-          <h3>Four active sinks</h3>
+          <h3>Six active sinks</h3>
           <div class="tablewrap" tabindex="0" role="region" aria-label="Layer 3 active sinks (scrolls sideways on narrow screens)">
             <table>
-              <caption class="sr-only">Layer 3 sinks guarded in 1.2</caption>
+              <caption class="sr-only">Layer 3 sinks guarded in 1.3</caption>
               <thead><tr><th scope="col">Sink</th><th scope="col">Functions</th><th scope="col">Default</th></tr></thead>
               <tbody>
                 <tr><th scope="row">Command execution</th><td><code>system</code>, <code>exec</code>, <code>shell_exec</code>, <code>passthru</code>, <code>popen</code>, <code>proc_open</code></td><td>Logs when not allowlisted</td></tr>
                 <tr><th scope="row">Unserialize</th><td><code>unserialize</code></td><td><strong>Off</strong>; opt in to log</td></tr>
-                <tr><th scope="row">Include</th><td><code>include</code>, <code>require</code> (PHP 7.0+)</td><td>Inert until <code>allow_paths</code> is set</td></tr>
-                <tr><th scope="row">Eval</th><td><code>eval</code> (PHP 7.0+)</td><td>Logs when reached</td></tr>
+                <tr><th scope="row">Include</th><td><code>include</code>, <code>require</code></td><td>Inert until <code>allow_paths</code> is set</td></tr>
+                <tr><th scope="row">Eval</th><td><code>eval</code></td><td>Logs when reached</td></tr>
+                <tr><th scope="row">Phar</th><td><code>phar://</code> via stream functions and <code>include</code></td><td><strong>Off</strong>; opt in per sink</td></tr>
+                <tr><th scope="row">SSRF</th><td><code>file_get_contents</code>, <code>fopen</code>, <code>get_headers</code>, <code>fsockopen</code>, <code>stream_socket_client</code>, curl</td><td><strong>Off</strong>; opt in per sink</td></tr>
               </tbody>
             </table>
           </div>
@@ -187,20 +189,22 @@ const compare = [
           <div class="tablewrap" tabindex="0" role="region" aria-label="Layer 3 coverage by PHP version (scrolls sideways on narrow screens)">
             <table>
               <caption class="sr-only">Layer 3 sink coverage by PHP version</caption>
-              <thead><tr><th scope="col">Sink</th><th scope="col">PHP 5.4–5.6</th><th scope="col">PHP 7.0–8.5</th></tr></thead>
+              <thead><tr><th scope="col">Sink</th><th scope="col">PHP 5.4–5.6</th><th scope="col">PHP 7.0–7.4</th><th scope="col">PHP 8.0–8.5</th></tr></thead>
               <tbody>
-                <tr><th scope="row">Command execution</th><td><span class="pill ok">detect + block</span></td><td><span class="pill ok">detect + block</span></td></tr>
-                <tr><th scope="row"><code>unserialize</code> (off by default)</th><td><span class="pill ok">detect + block</span></td><td><span class="pill ok">detect + block</span></td></tr>
-                <tr><th scope="row"><code>include</code> / <code>require</code></th><td><span class="pill na">not available</span></td><td><span class="pill ok">detect + block</span></td></tr>
-                <tr><th scope="row"><code>eval</code></th><td><span class="pill na">not available</span></td><td><span class="pill ok">detect + block</span></td></tr>
+                <tr><th scope="row">Command execution</th><td><span class="pill ok">detect + block</span></td><td><span class="pill ok">detect + block</span></td><td><span class="pill ok">detect + block</span></td></tr>
+                <tr><th scope="row"><code>unserialize</code> (off by default)</th><td><span class="pill ok">detect + block</span></td><td><span class="pill ok">detect + block</span></td><td><span class="pill ok">detect + block</span></td></tr>
+                <tr><th scope="row"><code>include</code> / <code>require</code></th><td><span class="pill ok">detect + block</span> (opcache caveat)</td><td><span class="pill ok">detect + block</span></td><td><span class="pill ok">detect + block</span></td></tr>
+                <tr><th scope="row"><code>eval</code></th><td><span class="pill ok">detect + block</span></td><td><span class="pill ok">detect + block</span></td><td><span class="pill ok">detect + block</span></td></tr>
+                <tr><th scope="row"><code>phar://</code> (off by default)</th><td><span class="pill ok">detect + block</span>, deserialization</td><td><span class="pill ok">detect + block</span>, deserialization</td><td><span class="pill ok">detect + block</span> only (no deserialization claim)</td></tr>
+                <tr><th scope="row">SSRF (off by default)</th><td><span class="pill ok">detect + block</span></td><td><span class="pill ok">detect + block</span></td><td><span class="pill ok">detect + block</span></td></tr>
               </tbody>
             </table>
           </div>
-          <p class="legend">Command execution and <code>unserialize</code> work on every supported PHP version. <code>include</code> and <code>eval</code> require PHP 7.0+; the mechanism is not feasible on the 5.x VM. Blocking an include or eval skips the opcode, so it never runs and the script continues. <code>phar://</code> and SSRF coverage are roadmap and are not in this table because they are not shipped.</p>
+          <p class="legend">Verified on PHP 5.4, 5.6, 7.4, 8.3 and 8.5; other minors build and are expected to work but are not independently verified. A debug-build leak review is pending. Blocking an include or eval stops it running and the script continues. <strong>PHP 5.x <code>include</code> is checked at compile time, so a file served from a warm opcache is not re-inspected</strong> (<code>eval</code> is unaffected; the 7.0+ opcode handler is not affected by opcache). <strong>Phar:</strong> on PHP 5.x/7.x this covers metadata deserialization via the stream wrapper; on 8.x it is detection and denial of <code>phar://</code> use only. The direct Phar API (<code>new Phar</code>, <code>PharData</code>, <code>Phar::loadPhar</code>, <code>Phar::mapPhar</code>, <code>Phar::getMetadata</code>) is not covered. <strong>SSRF</strong> is best-effort, resolve-at-check-time detection, not a connection-time boundary: DNS rebinding, redirects, <code>curl_multi_*</code>, <code>CURLOPT_RESOLVE</code>/<code>CONNECT_TO</code> and a non-string or absent <code>CURLOPT_URL</code> bypass it, and <code>copy</code>, <code>file</code>, <code>readfile</code>, <code>SoapClient</code>, <code>DOMDocument::load*</code> and <code>simplexml_load_file</code> are not hooked. It adds a DNS lookup per distinct outbound host with no timeout. More detail on the <a href="/coverage/">coverage page</a>.</p>
         </div>
         <div>
           <h3>Log-first, on purpose</h3>
-          <p>Layer 3 has its own <code>sinks.mode</code>, which defaults to <code>detect</code> (log only). It is independent of the global <code>howdah.mode</code>: setting <code>howdah.mode = block</code> does <strong>not</strong> arm sinks. Any active sink can block, and only when an operator sets that sink to <code>block</code> explicitly, after setting its allowlist.</p>
+          <p>Layer 3 has its own <code>sinks.mode</code>, which defaults to <code>detect</code> (log only). It is independent of the global <code>howdah.mode</code>: setting <code>howdah.mode = block</code> does <strong>not</strong> arm sinks. Any active sink can block, and only when an operator sets that sink to <code>block</code> explicitly, after setting its allowlist. The 1.3 <code>phar</code> and <code>ssrf</code> sinks are off by default and only an explicit per-sink mode arms them.</p>
           <h3 style="margin-top:1.5rem">The argument is never logged</h3>
           <p>An event records the sink and the function name (plus the class name for <code>unserialize</code>). The command line and the serialized payload are never written to the log.</p>
         </div>

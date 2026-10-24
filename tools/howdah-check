@@ -360,7 +360,7 @@ cmd_detect() {
     say "found $FOUND PHP install(s)"
   fi
   say "note: layer 2 input inspection (sql_injection, path_traversal, command_injection) is log-only by default; it blocks nothing unless [inspect] mode (or a rule_modes entry) is set to block, and global howdah.mode does not arm it (howdah-check does not read your howdah.config; see docs/config.md)"
-  say "note: layer 3 sinks (command_exec, unserialize) are log-only by default; they block nothing unless [sinks] mode (or a per-sink mode) is set to block, and global howdah.mode does not arm them. unserialize is off until opted in; include and eval are reserved and not active in 1.2 (see docs/config.md)"
+  say "note: layer 3 sinks (command_exec, unserialize, include, eval, phar, ssrf) are log-only by default; they block nothing unless [sinks] mode (or a per-sink mode) is set to block, and global howdah.mode does not arm them. unserialize, phar and ssrf are off until opted in, and phar/ssrf are armed only by an explicit per-sink mode (see docs/config.md)"
   return 0
 }
 

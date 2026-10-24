@@ -3,7 +3,7 @@
 All notable changes to Howdah are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [1.2.1] - 2026-10-23
 
 ### Security
 - Fixed a bypass of the multipart count rules (`max_parts`, `max_files`,

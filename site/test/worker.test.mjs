@@ -16,6 +16,15 @@ const x = await H.loadFrom(readFileSync(resolve(here, '../demo/howdah_wasm.wasm'
 const VERSION = '1.2.1';
 const req = (path, init) => new Request('https://cfg.howdah.org' + path, init);
 const run = (path, init) => handle(req(path, init), x, VERSION);
+const { defaultState } = require('../config-editor/schema.js');
+const fresh = () => defaultState(H.ruleCatalogWith(x));
+
+// 'z.' payload whose inflated size is `n` bytes (all NUL), tiny on the wire.
+async function bombPayload(n) {
+  const zeros = new Uint8Array(n);
+  const buf = await new Response(new Blob([zeros]).stream().pipeThrough(new CompressionStream('deflate-raw'))).arrayBuffer();
+  return 'z.' + E.b64urlEncode(new Uint8Array(buf));
+}
 
 test('valid payload returns the TOML with the pinned headers', async () => {
   const toml = 'mode = "detect"\n';
@@ -29,7 +38,8 @@ test('valid payload returns the TOML with the pinned headers', async () => {
 });
 
 test('compressed payload works', async () => {
-  const toml = 'mode = "block"\n[sinks.include]\nallow_paths = [' + Array(60).fill('"/var/www/app/vendor"').join(', ') + ']\n';
+  const s = Object.assign(fresh(), { 'howdah.mode': 'block', 'sinks.include.allow_paths': Array(60).fill('/var/www/app/vendor') });
+  const toml = E.emitToml(s, {});
   const p = await E.encodePayload(toml);
   assert.ok(p.startsWith('z.'));
   const r = await run('/v1/' + p);
@@ -62,6 +72,36 @@ test('ignores_query_and_trailing_slash', async () => {
   const p = await E.encodePayload('mode = "detect"\n');
   assert.equal((await run('/v1/' + p + '/?x=1')).status, 404);
   assert.equal((await run('/v1/' + p + '?x=1')).status, 200);
+});
+
+test('serves only what the editor emits: a hand-built config with shell lines in a multi-line string is refused', async () => {
+  // The core accepts this (a literal multi-line string), so validation alone
+  // would serve runnable shell text from cfg.howdah.org.
+  const lure = 'mode = "detect"\n[sinks.command_exec]\nallow = [\'\'\'\n\'\necho PWNED-FROM-CFG\n\'\n\'\'\']\n';
+  const r = await run('/v1/' + await E.encodePayload(lure));
+  assert.equal(r.status, 422);
+  const body = await r.text();
+  assert.ok(!body.includes('PWNED'), 'the caller\'s text must not be echoed');
+  assert.match(body, /editor/);
+});
+
+test('serves the editor emission with and without defaults-as-comments', async () => {
+  const s = Object.assign(fresh(), { 'limits.max_files': 50 });
+  for (const includeDefaults of [false, true]) {
+    const toml = E.emitToml(s, { includeDefaults });
+    const r = await run('/v1/' + await E.encodePayload(toml));
+    assert.equal(r.status, 200, 'includeDefaults=' + includeDefaults);
+    assert.equal(await r.text(), toml);
+  }
+});
+
+test('a decompression bomb gets 413 without being inflated', async () => {
+  const bomb = await bombPayload(8 * 1024 * 1024);
+  assert.ok(bomb.length < 12000, 'fixture payload must be under the URL limit: ' + bomb.length);
+  const t0 = Date.now();
+  const r = await run('/v1/' + bomb);
+  assert.equal(r.status, 413);
+  assert.ok(Date.now() - t0 < 500, 'took ' + (Date.now() - t0) + ' ms');
 });
 
 test('other paths and methods', async () => {

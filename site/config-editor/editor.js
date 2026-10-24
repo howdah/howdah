@@ -182,10 +182,24 @@
     return new Uint8Array(out);
   }
 
-  async function pipe(bytes, stream) {
-    var blob = new Blob([bytes]);
-    var buf = await new Response(blob.stream().pipeThrough(stream)).arrayBuffer();
-    return new Uint8Array(buf);
+  // Run bytes through a Compression/DecompressionStream, giving up as soon as
+  // the output passes `max` bytes (a deflate bomb is cancelled, not inflated).
+  async function pipe(bytes, stream, max) {
+    var reader = new Blob([bytes]).stream().pipeThrough(stream).getReader();
+    var chunks = [], total = 0;
+    for (;;) {
+      var r = await reader.read();
+      if (r.done) break;
+      total += r.value.length;
+      if (max !== undefined && total > max) {
+        await reader.cancel();
+        throw new Error('config too large');
+      }
+      chunks.push(r.value);
+    }
+    var out = new Uint8Array(total), off = 0;
+    chunks.forEach(function (c) { out.set(c, off); off += c.length; });
+    return out;
   }
 
   // TOML -> payload, or null when either limit is exceeded. Uses deflate-raw
@@ -212,7 +226,7 @@
     var bytes = b64urlDecode(compressed ? payload.slice(2) : payload);
     if (compressed) {
       if (typeof DecompressionStream === 'undefined') throw new Error('no deflate here');
-      bytes = await pipe(bytes, new DecompressionStream('deflate-raw'));
+      bytes = await pipe(bytes, new DecompressionStream('deflate-raw'), TOML_MAX);
     }
     if (bytes.length > TOML_MAX) throw new Error('config too large');
     return dec.decode(bytes);
@@ -231,7 +245,8 @@
   var api = {
     emitToml: emitToml, emitIni: emitIni, loadFromCanonical: loadFromCanonical,
     encodePayload: encodePayload, decodePayload: decodePayload, curlCommand: curlCommand,
-    tomlString: tomlString, TOML_MAX: TOML_MAX, PAYLOAD_MAX: PAYLOAD_MAX, CFG_BASE: CFG_BASE
+    tomlString: tomlString, b64urlEncode: b64urlEncode,
+    TOML_MAX: TOML_MAX, PAYLOAD_MAX: PAYLOAD_MAX, CFG_BASE: CFG_BASE
   };
   root.HowdahConfigEditor = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

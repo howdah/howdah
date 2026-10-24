@@ -10,7 +10,11 @@ let exportsPromise = null;
 
 export default {
   async fetch(request) {
-    if (!exportsPromise) exportsPromise = H.loadFrom(wasm);
+    if (!exportsPromise) {
+      exportsPromise = H.loadFrom(wasm);
+      // A failed instantiation must not poison every later request.
+      exportsPromise.catch(() => { exportsPromise = null; });
+    }
     const x = await exportsPromise;
     return handle(request, x, H.versionWith(x));
   },

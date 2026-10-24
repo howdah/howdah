@@ -41,8 +41,9 @@ All notable changes to Howdah are documented here. The format follows
   error text, verbatim), loads an existing file, and offers the result as copy,
   download or one `curl` command. The `curl` URL is served by `cfg.howdah.org`,
   a stateless Cloudflare Worker (`site/worker/`) that decodes the config from
-  the URL, re-validates it with the same core and stores nothing; it is
-  deployed on every release tag (`.github/workflows/worker.yml`).
+  the URL, re-validates it with the same core, serves only files the editor
+  itself wrote, and stores nothing; it is deployed on every push to `main`
+  that touches it and on every release tag (`.github/workflows/worker.yml`).
 - `howdah-wasm` exports `howdah_wasm_validate_config` (the parsed config as
   JSON, or the error), `howdah_wasm_rule_catalog` and `howdah_wasm_version`.
 

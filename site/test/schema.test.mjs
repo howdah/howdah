@@ -69,6 +69,25 @@ test('every [limits] key documented in docs/config.md is in the schema with the 
   }
 });
 
+test('Layer 2/3 rule names under [rules] are marked as having no effect', () => {
+  // The extension resolves Layer 2 overrides only from [inspect.rule_modes]
+  // and never reads [rules] for sinks; the core merely accepts these keys.
+  for (const k of sectionKeys('rules')) {
+    const noop = k.layer === 'inspect' || k.layer === 'sinks';
+    assert.equal(!!k.noop, noop, k.key);
+    if (noop) assert.match(k.note, /no effect/);
+    else assert.doesNotMatch(k.note, /no effect/);
+  }
+});
+
+test('ini path notes do not call suggestions defaults, and the missing-file note is right', () => {
+  const cfg = SCHEMA.ini.find((i) => i.key === 'howdah.config');
+  assert.match(cfg.note, /missing.*howdah\.mode|cannot be read.*howdah\.mode/i);
+  assert.match(cfg.note, /malformed.*block|malformed.*safe default/i);
+  assert.equal(cfg.suggested, true);
+  assert.equal(SCHEMA.ini.find((i) => i.key === 'howdah.log').suggested, true);
+});
+
 test('no schema key is named log or starts with log.', () => {
   for (const k of Object.keys(state)) {
     assert.ok(k !== 'log' && !k.startsWith('log.'), k);

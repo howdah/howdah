@@ -146,6 +146,29 @@ test('curl_command_is_null_when_payload_exceeds_limit', async () => {
   assert.equal(E.curlCommand(null, '/etc/howdah/howdah.toml'), null);
 });
 
+test('decodePayload stops inflating at TOML_MAX (decompression bomb)', async () => {
+  const zeros = new Uint8Array(4 * 1024 * 1024);
+  const buf = await new Response(new Blob([zeros]).stream().pipeThrough(new CompressionStream('deflate-raw'))).arrayBuffer();
+  const payload = 'z.' + E.b64urlEncode(new Uint8Array(buf));
+  const t0 = Date.now();
+  await assert.rejects(E.decodePayload(payload), /too large/);
+  assert.ok(Date.now() - t0 < 300, 'took ' + (Date.now() - t0) + ' ms');
+});
+
+test('curl_command_is_null_when_payload_exceeds_PAYLOAD_MAX_with_toml_under_TOML_MAX', async () => {
+  // Incompressible (deterministic pseudo-random base64url text), under 16 KiB
+  // of TOML, but over 12000 URL characters even after deflate.
+  let seed = 0x9e3779b9;
+  const rnd = () => { seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5; return (seed >>> 0); };
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  const word = (n) => Array.from({ length: n }, () => alphabet[rnd() % 64]).join('');
+  const s = fresh();
+  s['sinks.include.allow_paths'] = Array.from({ length: 340 }, () => '/' + word(40));
+  const toml = E.emitToml(s, {});
+  assert.ok(toml.length < E.TOML_MAX, 'toml ' + toml.length);
+  assert.equal(await E.encodePayload(toml), null);
+});
+
 test('curl command names the config path and the service', async () => {
   const p = await E.encodePayload('mode = "detect"\n');
   const c = E.curlCommand(p, '/etc/howdah/howdah.toml');

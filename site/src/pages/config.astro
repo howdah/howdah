@@ -75,7 +75,7 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
           <p class="small">Read once per PHP process at startup: per-pool, <code>.htaccess</code> or <code>ini_set()</code> values have no effect. Once <code>howdah.config</code> names a readable file, the file's <code>mode</code> wins over <code>howdah.mode</code>; this page keeps the two in step.</p>
           {SCHEMA.ini.map((k) => (
             <div class="ctl">
-              <label for={'i-' + k.key}><code>{k.key}</code> <span class="def">default: {k.default}</span></label>
+              <label for={'i-' + k.key}><code>{k.key}</code> <span class="def">{k.suggested ? 'suggested' : 'default'}: {k.default}</span></label>
               {k.type === 'enum'
                 ? <select id={'i-' + k.key} name={k.key} data-type="enum">{k.values.map((v) => <option value={v} selected={v === k.default}>{v}</option>)}</select>
                 : <input id={'i-' + k.key} name={k.key} data-type="path" type="text" value={k.default} />}
@@ -103,20 +103,37 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
 
         <fieldset>
           <legend>[rules]: per-rule mode</legend>
-          <p class="small"><strong>Critical</strong> rules block even when the mode is <code>detect</code>; <strong>Standard</strong> rules log in detect and block only in block mode. "inherit" leaves the rule at the global behaviour; <code>off</code> disables it entirely. Every rule name the core accepts is listed, so a loaded file never has a rule this form cannot show.</p>
-          {ruleGroups.map((g) => (
+          <p class="small"><strong>Critical</strong> rules block even when the mode is <code>detect</code>; <strong>Standard</strong> rules log in detect and block only in block mode. "inherit" leaves the rule at the global behaviour; <code>off</code> disables it entirely. Every rule name the core accepts is listed, so a loaded file never has a rule this form cannot show; the Layer 2 and 3 names are accepted by the core but not read by the extension, so they sit under their own heading.</p>
+          {ruleGroups.filter((g) => !g.keys[0].noop).map((g) => (
             <div class="group">
               <h3>{g.title}</h3>
               <div class="rules">
                 {g.keys.map((k) => (
                   <div class="ctl rule">
                     <label for={'r-' + k.key}><code>{k.key}</code> <span class={'tag ' + k.severity}>{k.severity}</span></label>
-                    <select id={'r-' + k.key} name={'rules.' + k.key} data-type="enum" data-rule={k.key} data-severity={k.severity}>{k.values.map((v) => <option value={v} selected={v === k.default}>{v}</option>)}</select>
+                    <select id={'r-' + k.key} name={'rules.' + k.key} data-type="enum" data-rule={k.key} data-severity={k.severity} data-noop="false">{k.values.map((v) => <option value={v} selected={v === k.default}>{v}</option>)}</select>
                   </div>
                 ))}
               </div>
             </div>
           ))}
+          <details class="noop">
+            <summary>Layer 2 and 3 rule names: accepted by the core, no effect in the extension</summary>
+            <p class="small">The extension reads Layer 2 overrides only from <code>[inspect.rule_modes]</code> and sink modes only from each <code>[sinks.&lt;sink&gt;]</code> table (both are in the sections below). A <code>[rules]</code> entry for these names is valid TOML that changes nothing; they are listed so a file that contains one can still be loaded, and the load message says so.</p>
+            {ruleGroups.filter((g) => g.keys[0].noop).map((g) => (
+              <div class="group">
+                <h3>{g.title}</h3>
+                <div class="rules">
+                  {g.keys.map((k) => (
+                    <div class="ctl rule">
+                      <label for={'r-' + k.key}><code>{k.key}</code> <span class="tag">no effect</span></label>
+                      <select id={'r-' + k.key} name={'rules.' + k.key} data-type="enum" data-rule={k.key} data-severity={k.severity} data-noop="true">{k.values.map((v) => <option value={v} selected={v === k.default}>{v}</option>)}</select>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </details>
         </fieldset>
 
         {sections.filter((s) => s.id === 'inspect' || s.id === 'sinks').map((sec) => (
@@ -291,7 +308,8 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
       }).catch(function (e) {
         if (my !== seq) return;
         valid.className = 'valid bad';
-        valid.textContent = 'Validation unavailable in this browser (' + (e && e.message || e) + '). Copy still works; the curl link does not, because it is only issued for configs the core has accepted.';
+        valid.textContent = 'Validation unavailable in this browser (' + (e && e.message || e) + '). Copy still works; download and the curl link do not, because they are only offered for configs the core has accepted.';
+        document.querySelectorAll('[data-download]').forEach(function (b) { b.disabled = true; });
         setCurl(null, 'Validation unavailable: no curl command.');
       });
     }
@@ -323,7 +341,12 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
         }
         writeState(r.state);
         render();
-        loadMsg.textContent = 'Loaded. The form now shows that file; the output is rebuilt from it.';
+        var noops = Object.keys(v.config.rules || {}).filter(function (name) {
+          var el = form.querySelector('[data-rule="' + name + '"]');
+          return el && el.getAttribute('data-noop') === 'true';
+        });
+        loadMsg.textContent = 'Loaded. The form now shows that file; the output is rebuilt from it.' +
+          (noops.length ? ' Note: [rules] ' + noops.join(', ') + ' in this file ' + (noops.length === 1 ? 'has' : 'have') + ' no effect in the extension (see the [rules] section).' : '');
       }).catch(function (e) { loadMsg.textContent = 'Could not validate: ' + (e && e.message || e); });
     }
     document.getElementById('load-btn').addEventListener('click', function () {
@@ -409,6 +432,8 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
   .ctl small { display: block; color: var(--muted); font-size: .85rem; margin-top: .3rem; max-width: 60ch; }
   .def { color: var(--muted); font-size: .85rem; margin-left: .4rem; }
   .rules { display: grid; gap: 0 1.5rem; grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); }
+  .noop { margin-top: 1rem; border-top: 1px solid var(--rule); padding-top: .5rem; }
+  .noop summary { cursor: pointer; font-weight: 600; min-height: 44px; display: flex; align-items: center; }
   .rule select { max-width: 12rem; }
   .tag { display: inline-block; font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; padding: .1rem .45rem; border-radius: 999px; margin-left: .4rem; vertical-align: middle; border: 1px solid var(--rule); }
   .tag.critical { background: var(--no-bg); color: var(--no); border-color: transparent; }

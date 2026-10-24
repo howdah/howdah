@@ -22,7 +22,10 @@ const ABOUT = [
 ].join('\n');
 
 function text(status, body, headers) {
-  return new Response(body, { status, headers: { 'content-type': TEXT, 'cache-control': 'no-store', ...headers } });
+  return new Response(body, {
+    status,
+    headers: { 'content-type': TEXT, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...headers },
+  });
 }
 
 export async function handle(request, exports, version) {
@@ -48,12 +51,25 @@ export async function handle(request, exports, version) {
   const v = H.validateConfigWith(exports, toml);
   if (!v.ok) return text(422, 'The Howdah core rejects this config, so it is not served: ' + v.error + '\n');
 
+  // Serve only files the editor produced: the decoded text must be byte for
+  // byte one of the editor's two emissions of the config the core parsed.
+  // Anything else (hand-written files, comments, multi-line strings) is
+  // refused, so this host can never serve text somebody else chose, such as
+  // shell lines hidden in a TOML string that `curl ... | sh` would run.
+  const catalog = H.ruleCatalogWith(exports);
+  const loaded = E.loadFromCanonical(v.config, catalog);
+  const editorMade = loaded.state && [false, true].some((includeDefaults) => E.emitToml(loaded.state, { includeDefaults }) === toml);
+  if (!editorMade) {
+    return text(422, 'Not served: this service only serves files exactly as the Howdah config editor (https://howdah.org/config/) writes them. Build the file there and use its curl command.\n');
+  }
+
   return new Response(head ? null : toml, {
     status: 200,
     headers: {
       'content-type': TEXT,
       'content-disposition': 'inline; filename="howdah.toml"',
       'cache-control': 'public, max-age=31536000, immutable',
+      'x-content-type-options': 'nosniff',
       'x-howdah-validated': version,
     },
   });

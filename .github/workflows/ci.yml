@@ -107,6 +107,17 @@ jobs:
         run: |
           cp target/wasm32-unknown-unknown/release/howdah_wasm.wasm site/demo/howdah_wasm.wasm
           node site/demo/verify.js
+      # The site's tests pin the config editor's schema to the core's defaults
+      # and rule catalog, so a core change that drifts fails here, on the PR.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - run: npm ci
+        working-directory: site
+      - run: npm test
+        working-directory: site
 
   lab:
     name: lab PHP ${{ matrix.php }}

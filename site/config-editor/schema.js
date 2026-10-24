@@ -16,13 +16,15 @@
 
   // php.ini directives. Read once per PHP process at startup; once
   // howdah.config names a readable file, that file's `mode` wins.
+  // `suggested: true` marks a value that is a suggestion, not the extension's
+  // registered default (both path directives default to empty).
   var INI = [
     { key: 'howdah.mode', type: 'enum', values: MODES, default: 'detect',
       note: 'block refuses offending requests, detect logs only, off disables everything. The shipped default is detect. Critical limits block even in detect. Once howdah.config names a readable file, the file’s mode is used and this value is ignored.' },
-    { key: 'howdah.log', type: 'path', default: '/var/log/howdah.log',
-      note: 'Where JSON event lines are written. The directory must be writable by the PHP worker. This ini directive is the only way to set the log path.' },
-    { key: 'howdah.config', type: 'path', default: '/etc/howdah/howdah.toml',
-      note: 'Path of the TOML file below. If the file is missing or malformed, Howdah falls back to its safe defaults (block mode, default limits) and keeps serving.' }
+    { key: 'howdah.log', type: 'path', default: '/var/log/howdah/events.log', suggested: true,
+      note: 'Where JSON event lines are written; empty means the SAPI error log. The directory must exist and be writable by the PHP worker (a subdirectory of /var/log, not /var/log itself). This ini directive is the only way to set the log path.' },
+    { key: 'howdah.config', type: 'path', default: '/etc/howdah/howdah.toml', suggested: true,
+      note: 'Path of the TOML file below. If the file is missing or cannot be read, Howdah uses howdah.mode and the built-in limits. If the file is present but malformed, Howdah falls back to its safe defaults (block mode, default limits) and keeps serving, and phpinfo still names the file: validate before deploying.' }
   ];
 
   var LIMITS = [
@@ -68,15 +70,21 @@
     critical: 'Critical: blocks even when the global mode is detect. Set to off to disable it entirely.',
     standard: 'Standard: logs in detect, blocks only in block mode.'
   };
+  // The core accepts every rule name under [rules], but the extension reads
+  // Layer 2 overrides only from [inspect.rule_modes] and sink modes only from
+  // [sinks.<sink>] mode; a [rules] entry for those names has no effect.
+  var NOOP_NOTE = 'Accepted by the core but has no effect: the extension does not read [rules] for this name. Use the Layer 2 per-class override ([inspect.rule_modes]) or the sink’s own mode ([sinks.<sink>] mode) instead.';
 
   // The [rules] keys are built from the core's catalog at runtime so the form
   // can never offer a rule the core rejects, or miss one it accepts.
   function rulesKeys(catalog) {
     return (catalog || []).map(function (r) {
+      var layer = RULE_LAYER[r.name] || 'other';
+      var noop = layer === 'inspect' || layer === 'sinks';
       return {
         key: r.name, type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
-        severity: r.severity, layer: RULE_LAYER[r.name] || 'other',
-        note: RULE_NOTES[r.severity] || ''
+        severity: r.severity, layer: layer, noop: noop,
+        note: noop ? NOOP_NOTE : (RULE_NOTES[r.severity] || '')
       };
     });
   }
@@ -121,7 +129,7 @@
       { id: 'limits', title: 'Limits', keys: LIMITS,
         groups: { multipart: 'Multipart body', input: 'Input shape', headers: 'Request headers' } },
       { id: 'rules', title: 'Per-rule mode', keys: [], rulesKeys: rulesKeys,
-        groups: { multipart: 'Multipart', input: 'Input shape', headers: 'Request headers', inspect: 'Layer 2 (inspection)', sinks: 'Layer 3 (sinks)', other: 'Other' } },
+        groups: { multipart: 'Multipart', input: 'Input shape', headers: 'Request headers', inspect: 'Layer 2 names (no effect here)', sinks: 'Layer 3 names (no effect here)', other: 'Other' } },
       { id: 'inspect', title: 'Layer 2: input inspection', keys: INSPECT },
       { id: 'sinks', title: 'Layer 3: sink hardening', keys: SINKS, php7Only: ['include', 'eval'] }
     ],

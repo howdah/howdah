@@ -1,10 +1,22 @@
 name: worker
 
-# Deploys the cfg.howdah.org Worker (site/worker) on every release tag, and on
-# demand. The wasm it bundles is built here from the same commit, so the
-# service never validates with a core older than the release it accompanies.
+# Deploys the cfg.howdah.org Worker (site/worker) whenever main changes
+# anything it is built from, on every release tag, and on demand. The site
+# (pages.yml) deploys from every push to main with a wasm built from that
+# commit; deploying the Worker on the same pushes keeps the page and the
+# service validating with the same core, so a config the page calls valid is
+# never refused by the service.
 on:
   push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'Cargo.*'
+      - 'site/worker/**'
+      - 'site/config-editor/**'
+      - 'site/demo/howdah-wasm.js'
+      - 'packaging/build-wasm.sh'
+      - '.github/workflows/worker.yml'
     tags: ['v*']
   workflow_dispatch:
     inputs:

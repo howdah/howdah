@@ -50,6 +50,8 @@ sudo apt-get update &amp;&amp; sudo apt-get install --only-upgrade php8.1-howdah
 sudo systemctl reload php8.1-fpm
 <span class="c"># yum / dnf</span>
 sudo yum update php81-howdah
+<span class="c"># cPanel, Plesk, CloudLinux, distribution EL PHP: the same, with that package's name</span>
+sudo dnf update ea-php81-php-howdah    <span class="c"># or plesk-php81-howdah, alt-php81-howdah, php-howdah</span>
 <span class="c"># tarball: verify + replace howdah.so for your PHP minor, then reload</span></code></pre>
       <p class="legend">Always verify the signature of a new tarball before replacing (see the <a href="/install/">install picker</a>). Your TOML and ini are not touched by an upgrade.</p>
 
@@ -59,6 +61,8 @@ sudo phpdismod -v 8.1 howdah &amp;&amp; sudo systemctl reload php8.1-fpm
 sudo apt-get purge php8.1-howdah
 <span class="c"># yum</span>
 sudo yum remove php81-howdah
+<span class="c"># cPanel, Plesk, CloudLinux, distribution EL PHP: remove that package</span>
+sudo dnf remove ea-php81-php-howdah    <span class="c"># or plesk-php81-howdah, alt-php81-howdah, php-howdah</span>
 <span class="c"># tarball: remove the extension=howdah.so line (or the conf.d file) and reload</span></code></pre>
       <p class="legend">Removal never breaks PHP: the package maintainer scripts only enable/disable the module and never fail the transaction.</p>
 

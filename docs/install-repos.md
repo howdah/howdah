@@ -3,7 +3,12 @@
 Howdah is published as signed apt and yum repositories at `https://pkg.howdah.org`
 (HTTPS only). One package per PHP minor: `php<minor>-howdah` on Debian/Ubuntu
 (for example `php7.4-howdah`) and `php<XY>-howdah` on RPM systems using the Remi
-layout (for example `php74-howdah`).
+layout (for example `php74-howdah`). Panel and distribution PHP builds have
+their own repositories and package names: [cPanel](#cpanel-easyapache-4),
+[Plesk](#plesk), [CloudLinux alt-php](#cloudlinux-alt-php) and
+[stock RHEL, Alma, Rocky and Amazon Linux](#stock-rhel-alma-rocky-and-amazon-linux-php).
+`howdah-check detect` names the right one for every PHP on the box; the full
+table and its vendor sources are in [packaging-layouts.md](packaging-layouts.md).
 
 > **Status: live.** The repositories are published and signed with the
 > project key (see [Key](#key) below), and the commands in this document work
@@ -26,6 +31,10 @@ non-debug, non-threaded (NTS) PHP.
 
 Supported: Ubuntu 16.04 (xenial), 22.04 (jammy), 24.04 (noble); Debian 11
 (bullseye), 12 (bookworm). Architectures: amd64, arm64.
+
+The same package fits the distribution's own PHP as well as Surý's: Debian's
+and Ubuntu's PHP SAPI packages provide `phpapi-<N>` too, and use the same
+paths. Checked with Ubuntu 20.04's own PHP 7.4.
 
 **Ubuntu 16.04 only** (apt 1.2 cannot fetch HTTPS without this):
 
@@ -79,10 +88,8 @@ sudo apt-get purge php7.4-howdah    # remove everything including the ini
 sudo systemctl reload php7.4-fpm    # or apache2
 ```
 
-The repository index lists only the most recent publish, so older versions
-cannot be pinned or rolled back to through the repo until that is changed (a
-tracked follow-up before the second release). Keep the previous package file if
-you may need to downgrade.
+The repository index keeps every published version, so you can pin or roll
+back through the repo, for example `sudo apt-get install php7.4-howdah=1.2.0-1`.
 
 Removal never breaks PHP: the maintainer scripts only enable/disable the module
 and never fail the transaction.
@@ -93,8 +100,8 @@ Supported: CentOS 7, AlmaLinux and Rocky Linux 8 and 9 (and RHEL equivalents).
 Architectures: x86_64, aarch64 (CentOS 7 aarch64 depends on your PHP source;
 Remi publishes no EL7 aarch64). Packages follow the Remi software-collection
 layout: `php<XY>-howdah` installs into `/opt/remi/php<XY>/` and requires
-`php<XY>-php-common` from Remi. Stock distribution PHP (non-Remi) is not
-packaged yet; use the tarball.
+`php<XY>-php-common` from Remi. For the distribution's own PHP, see
+[stock RHEL, Alma, Rocky and Amazon Linux](#stock-rhel-alma-rocky-and-amazon-linux-php).
 
 ```sh
 sudo rpm --import https://howdah.org/key.asc
@@ -137,6 +144,174 @@ sudo systemctl reload php74-php-fpm
 ```
 
 A locally edited ini is kept as `40-howdah.ini.rpmsave`.
+
+## Panel and distribution PHP
+
+The repositories in this section are separate from the two above, one per
+layout, signed with the same key. They are new: they appear at their URLs
+after the next run of the publish workflow. Until
+`https://pkg.howdah.org/<layout>/...` answers, use the tarball as described
+in [packaging-layouts.md](packaging-layouts.md). Each package installs the
+same `howdah.so` and `howdah.ini` as the tarball for that PHP minor, into the
+vendor's paths, and depends on the vendor's PHP package for that minor, so it
+cannot load into a PHP with a different ABI. None has install scripts; the
+ini drop-in is the enable step. Validation status per layout is in
+[packaging-layouts.md](packaging-layouts.md#what-was-validated-and-what-was-not).
+
+Run `howdah-check detect` first: it prints a `layout:` and a
+`howdah package:` line for every PHP install, including the repository URL.
+
+### cPanel (EasyApache 4)
+
+Package `ea-php<XY>-php-howdah` for cPanel's `ea-php<XY>` (for example
+`ea-php74-php-howdah`): `/opt/cpanel/ea-php<XY>/root/usr/lib64/php/modules/howdah.so`
+and `/opt/cpanel/ea-php<XY>/root/etc/php.d/20-howdah.ini`. Requires
+`ea-php<XY>-php-common`. x86_64 only.
+
+Install it with the package manager. The EasyApache 4 interface only installs
+cPanel-provided PHP packages; cPanel's documentation says custom PHP packages
+must go through the package manager.
+
+AlmaLinux, Rocky, CloudLinux or CentOS 7 with cPanel:
+
+```sh
+sudo rpm --import https://howdah.org/key.asc
+sudo tee /etc/yum.repos.d/howdah-cpanel.repo >/dev/null <<'REPO'
+[howdah-cpanel]
+name=Howdah for cPanel EasyApache 4
+baseurl=https://pkg.howdah.org/cpanel/yum
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://howdah.org/key.asc
+REPO
+sudo dnf install ea-php74-php-howdah     # yum on CentOS 7
+```
+
+Ubuntu with cPanel:
+
+```sh
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://howdah.org/key.asc | sudo tee /etc/apt/keyrings/howdah.asc >/dev/null
+echo "deb [signed-by=/etc/apt/keyrings/howdah.asc] https://pkg.howdah.org/cpanel/apt stable main" \
+  | sudo tee /etc/apt/sources.list.d/howdah-cpanel.list
+sudo apt-get update
+sudo apt-get install ea-php81-php-howdah
+```
+
+Verify, then restart PHP-FPM (WHM, Restart Services, or the restartsrv script):
+
+```sh
+/opt/cpanel/ea-php74/root/usr/bin/php -m | grep -i howdah
+sudo /scripts/restartsrv_apache_php_fpm
+```
+
+EasyApache 4 updates: this package is not in cPanel's EA4 repository, and
+provisioning an EasyApache 4 profile installs that profile's packages and
+uninstalls the others. After you provision a profile, check
+`rpm -q ea-php74-php-howdah` (`dpkg -s` on Ubuntu) and install it again if it
+is gone. Updating the `ea-php` packages with `dnf`/`yum`/`apt` leaves it in
+place.
+
+Roll back: `sudo dnf remove ea-php74-php-howdah` (or `apt-get purge`), then
+restart PHP-FPM.
+
+### Plesk
+
+Package `plesk-php<XY>-howdah` for Plesk's PHP `X.Y` (for example
+`plesk-php74-howdah`): `/opt/plesk/php/X.Y/lib64/php/modules/howdah.so` on
+RPM systems, `/opt/plesk/php/X.Y/lib/php/modules/howdah.so` on Debian and
+Ubuntu, and `/opt/plesk/php/X.Y/etc/php.d/howdah.ini`. Requires
+`plesk-php<XY>`. RPM: x86_64; deb: amd64 and arm64.
+
+RPM systems: the `.repo` file is the one for cPanel above with
+`[howdah-plesk]` and `baseurl=https://pkg.howdah.org/plesk/yum`, then:
+
+```sh
+sudo dnf install plesk-php74-howdah
+```
+
+Debian and Ubuntu: the apt line is
+`deb [signed-by=/etc/apt/keyrings/howdah.asc] https://pkg.howdah.org/plesk/apt stable main`, then:
+
+```sh
+sudo apt-get update
+sudo apt-get install plesk-php74-howdah
+```
+
+Verify and restart:
+
+```sh
+/opt/plesk/php/7.4/bin/php -m | grep -i howdah
+sudo plesk bin php_handler --reread      # Plesk's PHP settings page lists the module
+sudo systemctl restart plesk-php74-fpm
+```
+
+Roll back: `sudo dnf remove plesk-php74-howdah` (or `apt-get purge`), then
+restart `plesk-php74-fpm`.
+
+### CloudLinux alt-php
+
+Package `alt-php<XY>-howdah` for CloudLinux's `alt-php<XY>` (for example
+`alt-php74-howdah`): `/opt/alt/php<XY>/usr/lib64/php/modules/howdah.so`, and
+`howdah.ini` in both `/opt/alt/php<XY>/etc/php.d.all/` (the PHP Selector's
+module list) and `/opt/alt/php<XY>/etc/php.d.std/`, as CloudLinux's own
+module packages do. Requires `alt-php<XY>`. x86_64 only. Not install-tested:
+alt-php binaries need a CloudLinux licence.
+
+The `.repo` file is the one for cPanel above with `[howdah-cloudlinux]` and
+`baseurl=https://pkg.howdah.org/cloudlinux/yum`, then:
+
+```sh
+sudo yum install alt-php74-howdah
+sudo cagefsctl --setup-cl-selector
+sudo selectorctl --version=7.4 --enable-extensions=howdah   # default for every user on alt-php 7.4
+```
+
+or enable it per user in the PHP Selector. On a CloudLinux server with cPanel,
+`ea-php` versions take the cPanel package above and `alt-php` versions this
+one; `howdah-check detect` says which applies to each PHP.
+
+### Stock RHEL, Alma, Rocky and Amazon Linux PHP
+
+Package `php-howdah` for the distribution's own PHP (`/usr/bin/php`):
+`/usr/lib64/php/modules/howdah.so` and `/etc/php.d/40-howdah.ini`, which loads
+the module by absolute path (Amazon Linux 2023 keeps its own modules in
+`/usr/lib64/php<X.Y>/modules`). Requires `php(zend-abi) = <API>-64`, the exact
+ABI of your PHP. x86_64 and aarch64.
+
+The distribution PHP's package names carry no minor, so there is one
+repository per minor. Use the one for your PHP (`php -v`), here 7.4:
+
+```sh
+sudo rpm --import https://howdah.org/key.asc
+sudo tee /etc/yum.repos.d/howdah-el.repo >/dev/null <<'REPO'
+[howdah-el]
+name=Howdah for the distribution PHP 7.4
+baseurl=https://pkg.howdah.org/el/php7.4/yum
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://howdah.org/key.asc
+REPO
+sudo dnf install php-howdah              # yum on CentOS 7
+php -m | grep -i howdah
+sudo systemctl reload php-fpm            # or httpd
+```
+
+If you change PHP minor later (for example `dnf module switch-to php:8.2`),
+remove `php-howdah` first, change `baseurl` to the new minor, then install it
+again. Roll back: `sudo dnf remove php-howdah`.
+
+### DirectAdmin and other builds
+
+DirectAdmin's CustomBuild compiles PHP from source into `/usr/local/php<XY>`,
+which no package owns, so there is no package. Use the tarball:
+`howdah-check detect` names it and the extension directory; copy `howdah.so`
+there and `howdah.ini` to `/usr/local/php<XY>/lib/php.conf.d/90-howdah.ini`,
+then restart that PHP's FPM and Apache. The same tarball route covers any
+PHP `detect` reports as `layout: unknown`. Details:
+[packaging-layouts.md](packaging-layouts.md#how-each-layout-loads-the-module).
 
 ## Key
 

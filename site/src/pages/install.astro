@@ -22,9 +22,19 @@ const MINORS = ['5.4','5.5','5.6','7.0','7.1','7.2','7.3','7.4','8.0','8.1','8.2
       <form id="picker" class="picker" aria-label="Choose your setup">
         <fieldset>
           <legend>1. Operating system</legend>
-          <label><input type="radio" name="os" value="debian" checked /> Debian / Ubuntu <small>Ubuntu 16.04–24.04, Debian 11–12 — installs with <b>apt</b></small></label>
-          <label><input type="radio" name="os" value="rhel" /> RHEL / CentOS / Alma / Rocky <small>CentOS 7, Alma/Rocky 8–9 (Remi layout) — installs with <b>yum/dnf</b></small></label>
-          <label><input type="radio" name="os" value="other" /> Other / panel / stock PHP <small>Amazon Linux, cPanel, Plesk, CloudLinux, older distros — install from the <b>signed tarball</b></small></label>
+          <label><input type="radio" name="os" value="debian" checked /> Debian / Ubuntu <small>Ubuntu 16.04–24.04, Debian 11–12, Surý or the distribution's PHP — installs with <b>apt</b></small></label>
+          <label><input type="radio" name="os" value="rhel" /> RHEL / CentOS / Alma / Rocky with Remi PHP <small>CentOS 7, Alma/Rocky 8–9, Remi's <code>php74</code>-style collections — installs with <b>yum/dnf</b></small></label>
+          <label><input type="radio" name="os" value="el" /> RHEL / Alma / Rocky / Amazon Linux, distribution PHP <small>The OS's own <code>php</code> in <code>/usr/bin</code> — installs with <b>yum/dnf</b></small></label>
+          <label><input type="radio" name="os" value="cpanel" /> cPanel (EasyApache 4) <small>cPanel's <code>ea-php</code> versions — installs with <b>dnf/yum</b> or <b>apt</b>, not the EasyApache 4 screen</small></label>
+          <label><input type="radio" name="os" value="plesk" /> Plesk <small>Plesk's PHP versions in <code>/opt/plesk/php</code> — installs with <b>dnf/yum</b> or <b>apt</b></small></label>
+          <label><input type="radio" name="os" value="cloudlinux" /> CloudLinux alt-php <small>PHP Selector versions in <code>/opt/alt</code> — installs with <b>yum</b></small></label>
+          <label><input type="radio" name="os" value="other" /> DirectAdmin / other <small>DirectAdmin CustomBuild, self-built PHP, older distros — install from the <b>signed tarball</b></small></label>
+        </fieldset>
+
+        <fieldset data-when-os="cpanel plesk" hidden>
+          <legend>2. Server operating system</legend>
+          <label><input type="radio" name="panel_os" value="el" checked /> AlmaLinux / Rocky / CloudLinux / CentOS <small>Installs with <b>dnf</b> (or <b>yum</b> on CentOS 7)</small></label>
+          <label><input type="radio" name="panel_os" value="deb" /> Ubuntu / Debian <small>Installs with <b>apt</b></small></label>
         </fieldset>
 
         <fieldset data-when-os="debian">
@@ -89,7 +99,9 @@ sudo systemctl reload php8.1-fpm</code></pre>
         </ol>
       </div>
 
-      <p id="distro-note" class="legend" hidden>Your PHP comes from the distribution, not Surý. The package targets the Surý/Debian module layout and the matching ABI (<code>phpapi-N</code>). If <code>apt</code> reports no installation candidate for your version, your distribution's PHP has no matching build — switch to <b>Other / stock PHP</b> above and use the signed tarball.</p>
+      <p id="distro-note" class="legend" hidden>Your PHP comes from the distribution, not Surý. The same package fits: Debian's and Ubuntu's PHP packages provide the same <code>phpapi-N</code> ABI marker and use the same paths (checked with Ubuntu 20.04's own PHP 7.4).</p>
+
+      <p id="layout-note" class="legend" hidden>These panel and distribution repositories are new and are published with the next release of the repositories. If the repository URL does not answer yet, use the signed tarball (<b>DirectAdmin / other</b> above); <code>howdah-check detect</code> names the right one either way. Paths, sources and what was tested: <a href="https://github.com/howdah/howdah/blob/main/docs/packaging-layouts.md">packaging layouts</a>.</p>
 
       <div class="note" id="cgi-note" hidden>
         <h3>A note for php-cgi / FastCGI</h3>
@@ -106,6 +118,7 @@ sudo systemctl reload php8.1-fpm</code></pre>
   const result = document.getElementById('result-steps');
   const cgiNote = document.getElementById('cgi-note');
   const distroNote = document.getElementById('distro-note');
+  const layoutNote = document.getElementById('layout-note');
   const jsNote = document.querySelector('[data-nojs]');
   if (jsNote) jsNote.textContent = 'These commands update as you change the choices above. One build per PHP minor version.';
 
@@ -131,13 +144,26 @@ sudo systemctl reload php8.1-fpm</code></pre>
     const sapi = val('sapi');
     cgiNote.hidden = sapi !== 'cgi';
     distroNote.hidden = !(os === 'debian' && val('src_deb') === 'distro');
+    layoutNote.hidden = !['el', 'cpanel', 'plesk', 'cloudlinux'].includes(os);
 
-    // show/hide os-conditional fieldsets + the xenial question
+    // show/hide os-conditional fieldsets (data-when-os lists the os values,
+    // space-separated) + the xenial question
     form.querySelectorAll('[data-when-os]').forEach((fs) => {
-      const show = fs.getAttribute('data-when-os') === os;
+      const show = fs.getAttribute('data-when-os').split(' ').includes(os);
       // the xenial fieldset is the second debian one — toggle both with os
       fs.hidden = !show;
     });
+
+    // the signed-key setup shared by every yum/dnf and apt repository below
+    const yumRepo = (id, name, path) => ['sudo rpm --import https://howdah.org/key.asc',
+      `sudo tee /etc/yum.repos.d/${id}.repo >/dev/null <<'REPO'`,
+      `[${id}]`, `name=${name}`, `baseurl=${PKG}/${path}/yum`,
+      'enabled=1', 'gpgcheck=1', 'repo_gpgcheck=1', 'gpgkey=https://howdah.org/key.asc', 'REPO'];
+    const aptRepo = (id, path) => ['sudo install -d -m 0755 /etc/apt/keyrings',
+      'curl -fsSL https://howdah.org/key.asc | sudo tee /etc/apt/keyrings/howdah.asc >/dev/null',
+      `echo "deb [signed-by=/etc/apt/keyrings/howdah.asc] ${PKG}/${path}/apt stable main" | sudo tee /etc/apt/sources.list.d/${id}.list`];
+    const deb = val('panel_os') === 'deb';
+    const cgiReload = '# restart your FastCGI process manager';
 
     let steps = '';
     if (os === 'debian') {
@@ -181,6 +207,57 @@ sudo systemctl reload php8.1-fpm</code></pre>
          `/opt/remi/php${xy}/root/usr/bin/php --ri howdah`, reload]);
       steps += step('Roll back at any time', 'A locally edited ini is kept as 40-howdah.ini.rpmsave.',
         [`sudo yum remove php${xy}-howdah`, reload]);
+    } else if (os === 'el') {
+      const reload = sapi === 'apache' ? 'sudo systemctl reload httpd'
+                    : sapi === 'cgi' ? cgiReload : 'sudo systemctl reload php-fpm';
+      steps += step(`Import the key and add the repository for PHP ${minor}`,
+        `One repository per PHP minor: the distribution's package names carry no version. Both package and metadata signatures are enforced.`,
+        yumRepo('howdah-el', `Howdah for the distribution PHP ${minor}`, `el/php${minor}`));
+      steps += step('Install the package', `Installs only against PHP ${minor}'s exact ABI (<code>php(zend-abi)</code>).`,
+        ['sudo dnf install php-howdah      # yum on CentOS 7']);
+      steps += step('Verify it is loaded, then reload your server', '',
+        ['php -m | grep -i howdah', 'php --ri howdah          # Howdah => enabled, Mode => detect', reload]);
+      steps += step('Roll back, or change PHP minor', 'Before switching PHP minor, remove the package, point <code>baseurl</code> at the new minor, then install again.',
+        ['sudo dnf remove php-howdah', reload]);
+    } else if (os === 'cpanel') {
+      const reload = sapi === 'apache' ? 'sudo /scripts/restartsrv_httpd'
+                    : sapi === 'cgi' ? cgiReload : 'sudo /scripts/restartsrv_apache_php_fpm';
+      const pkg = `ea-php${xy}-php-howdah`;
+      steps += step('Import the key and add the cPanel repository', 'Both package and metadata signatures are enforced.',
+        deb ? aptRepo('howdah-cpanel', 'cpanel') : yumRepo('howdah-cpanel', 'Howdah for cPanel EasyApache 4', 'cpanel'));
+      steps += step(`Install with ${deb ? 'apt' : 'dnf or yum'}, not the EasyApache 4 screen`,
+        `The EasyApache 4 interface only installs cPanel's own PHP packages. Requires <code>ea-php${xy}-php-common</code>.`,
+        deb ? ['sudo apt-get update', `sudo apt-get install ${pkg}`] : [`sudo dnf install ${pkg}     # yum on CentOS 7`]);
+      steps += step('Verify it is loaded, then restart PHP', '',
+        [`/opt/cpanel/ea-php${xy}/root/usr/bin/php -m | grep -i howdah`,
+         `/opt/cpanel/ea-php${xy}/root/usr/bin/php --ri howdah`, reload]);
+      steps += step('After provisioning an EasyApache 4 profile', 'Provisioning installs the profile\'s packages and uninstalls the rest, and this package is not in cPanel\'s EA4 repository. Check it is still there, and install it again if not. Updating the ea-php packages with the package manager leaves it in place.',
+        [deb ? `dpkg -s ${pkg} | grep Status` : `rpm -q ${pkg}`]);
+      steps += step('Roll back at any time', '',
+        [deb ? `sudo apt-get purge ${pkg}` : `sudo dnf remove ${pkg}`, reload]);
+    } else if (os === 'plesk') {
+      const reload = sapi === 'cgi' ? cgiReload : `sudo systemctl restart plesk-php${xy}-fpm`;
+      const pkg = `plesk-php${xy}-howdah`;
+      steps += step('Import the key and add the Plesk repository', 'Both package and metadata signatures are enforced.',
+        deb ? aptRepo('howdah-plesk', 'plesk') : yumRepo('howdah-plesk', 'Howdah for Plesk PHP', 'plesk'));
+      steps += step('Install the package for your Plesk PHP', `Requires <code>plesk-php${xy}</code>.`,
+        deb ? ['sudo apt-get update', `sudo apt-get install ${pkg}`] : [`sudo dnf install ${pkg}`]);
+      steps += step('Verify it is loaded, then restart PHP', '<code>php_handler --reread</code> makes Plesk\'s PHP settings page list the module.',
+        [`/opt/plesk/php/${minor}/bin/php -m | grep -i howdah`, 'sudo plesk bin php_handler --reread', reload]);
+      steps += step('Roll back at any time', '',
+        [deb ? `sudo apt-get purge ${pkg}` : `sudo dnf remove ${pkg}`, reload]);
+    } else if (os === 'cloudlinux') {
+      const pkg = `alt-php${xy}-howdah`;
+      steps += step('Import the key and add the CloudLinux repository', 'Both package and metadata signatures are enforced.',
+        yumRepo('howdah-cloudlinux', 'Howdah for CloudLinux alt-php', 'cloudlinux'));
+      steps += step('Install, then enable it in the PHP Selector', `The module goes into alt-php ${minor}'s PHP Selector list; it loads for the users it is enabled for. Not install-tested: alt-php needs a CloudLinux licence.`,
+        [`sudo yum install ${pkg}`, 'sudo cagefsctl --setup-cl-selector',
+         `sudo selectorctl --version=${minor} --enable-extensions=howdah   # all users on alt-php ${minor}; or per user in the PHP Selector`]);
+      steps += step('Verify from a site that uses it', 'Sends two harmless requests and reports whether Howdah answered.',
+        ['curl -fsSLO https://github.com/howdah/howdah/releases/latest/download/howdah-check',
+         'sh howdah-check web https://your.site/']);
+      steps += step('Roll back at any time', '',
+        [`sudo selectorctl --version=${minor} --disable-extensions=howdah`, `sudo yum remove ${pkg}`]);
     } else {
       // tarball / manual
       const reload = sapi === 'apache' ? 'sudo systemctl reload apache2   # or httpd'
@@ -199,15 +276,16 @@ sudo systemctl reload php8.1-fpm</code></pre>
          'gpg --verify SHA256SUMS.asc SHA256SUMS',
          'tar xzf $T',
          `sudo cp howdah-${VERSION}-php${minor}/howdah.so  "$(php-config --extension-dir)/"`,
-         `sudo cp howdah-${VERSION}-php${minor}/howdah.ini <your PHP conf.d dir, e.g. /etc/php/${minor}/mods-available/>`]);
+         `sudo cp howdah-${VERSION}-php${minor}/howdah.ini <your PHP conf.d dir, e.g. /etc/php/${minor}/mods-available/>`,
+         `# DirectAdmin: php-config is /usr/local/php${xy}/bin/php-config; the ini goes to /usr/local/php${xy}/lib/php.conf.d/90-howdah.ini`]);
       steps += step('Enable and verify', 'Howdah ships in detect mode; the critical limits still block.',
         ['php --ri howdah', 'howdah-check web https://your.site/', reload]);
       steps += step('Roll back', 'Remove the ini line (or the conf.d file) and reload.', [reload]);
     }
 
     result.innerHTML = steps;
-    // keep the os-step legend numbers sensible (debian has an extra "source" step)
-    const osHasSource = os === 'debian';
+    // keep the os-step legend numbers sensible (debian, cPanel and Plesk have an extra step)
+    const osHasSource = ['debian', 'cpanel', 'plesk'].includes(os);
     document.querySelectorAll('[data-os-step]').forEach((e) => e.textContent = osHasSource ? '3' : '2');
     document.querySelectorAll('[data-os-step2]').forEach((e) => e.textContent = osHasSource ? '4' : '3');
   }

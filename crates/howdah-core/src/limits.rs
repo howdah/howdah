@@ -311,6 +311,10 @@ pub enum RuleId {
     SqlInjection,
     PathTraversal,
     CommandInjection,
+    CommandExec,
+    Include,
+    Eval,
+    Unserialize,
 }
 
 impl RuleId {
@@ -326,7 +330,11 @@ impl RuleId {
             | RuleId::MaxRequestHeaderBytes
             | RuleId::SqlInjection
             | RuleId::PathTraversal
-            | RuleId::CommandInjection => Severity::Standard,
+            | RuleId::CommandInjection
+            | RuleId::CommandExec
+            | RuleId::Include
+            | RuleId::Eval
+            | RuleId::Unserialize => Severity::Standard,
             _ => Severity::Critical,
         }
     }
@@ -483,6 +491,10 @@ mod tests {
         assert_eq!(RuleId::SqlInjection.severity(), Severity::Standard);
         assert_eq!(RuleId::PathTraversal.severity(), Severity::Standard);
         assert_eq!(RuleId::CommandInjection.severity(), Severity::Standard);
+        assert_eq!(RuleId::CommandExec.severity(), Severity::Standard);
+        assert_eq!(RuleId::Include.severity(), Severity::Standard);
+        assert_eq!(RuleId::Eval.severity(), Severity::Standard);
+        assert_eq!(RuleId::Unserialize.severity(), Severity::Standard);
         assert_eq!(RuleId::MaxParts.severity(), Severity::Critical);
         assert_eq!(RuleId::MaxFiles.severity(), Severity::Critical);
         assert_eq!(RuleId::MaxPartHeaders.severity(), Severity::Critical);

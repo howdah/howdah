@@ -23,13 +23,14 @@ use std::ffi::{c_char, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::config::Config;
+use crate::config::{Config, Mode};
 use crate::input::InputState;
 use crate::inspect::{class_rule, scan, InspectClass, Source};
 use crate::limits::{LimitHit, RuleId, Severity};
 use crate::log::{log_line, new_request_id, EventRecord};
 use crate::multipart::{Event, MultipartState};
 use crate::rules::{decide, Action};
+use crate::sinks::{command_allowed, include_allowed, unserialize_classes, SinkId};
 
 /// Action codes returned over the ABI. Pinned: Allow=0, Log=1, Block=2.
 pub const HOWDAH_ALLOW: i32 = 0;
@@ -41,6 +42,12 @@ pub const HOWDAH_SRC_GET: i32 = 0;
 pub const HOWDAH_SRC_POST: i32 = 1;
 pub const HOWDAH_SRC_COOKIE: i32 = 2;
 pub const HOWDAH_SRC_PATH: i32 = 3;
+
+// Layer-3 sink ids (howdah_sink_check).
+pub const HOWDAH_SINK_COMMAND_EXEC: i32 = 0;
+pub const HOWDAH_SINK_INCLUDE: i32 = 1;
+pub const HOWDAH_SINK_EVAL: i32 = 2;
+pub const HOWDAH_SINK_UNSERIALIZE: i32 = 3;
 
 fn code(a: Action) -> i32 {
     match a {
@@ -92,6 +99,8 @@ pub struct howdah_ctx {
     /// Layer-2 per-request aggregate scan budget; reset in `request_begin`.
     inspect_values: usize,
     inspect_bytes: usize,
+    /// Layer-3 per-hit sink line; dedicated slot, never shares `log`/`worst`.
+    sink_log: Option<String>,
 }
 
 fn describe(r: RuleId) -> &'static str {
@@ -114,6 +123,10 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::SqlInjection => "possible SQL injection in request input",
         RuleId::PathTraversal => "possible path traversal in request input",
         RuleId::CommandInjection => "possible command injection in request input",
+        RuleId::CommandExec => "command execution sink called with a disallowed command",
+        RuleId::Include => "file include sink called with a disallowed path",
+        RuleId::Eval => "eval sink invoked",
+        RuleId::Unserialize => "unserialize sink invoked on untrusted data",
     }
 }
 
@@ -159,6 +172,7 @@ impl howdah_ctx {
             input: InputState::new(),
             inspect_values: 0,
             inspect_bytes: 0,
+            sink_log: None,
         }
     }
 
@@ -256,6 +270,66 @@ impl howdah_ctx {
         let reason = format!("{class_name} pattern in {src_name} variable '{}'", String::from_utf8_lossy(n));
         let hit = LimitHit { rule, severity: Severity::Standard, detail: reason.clone() };
         self.apply_with_mode(&hit, mode, &overrides, &reason)
+    }
+
+    /// Layer-3 sink check. `arg` is scanned, never logged. Independent of
+    /// `worst`/`log`: a hit goes only to `sink_log`. All sinks honor block;
+    /// include/eval block is enforced by the C opcode handler (PHP 7.0+), which
+    /// is not installed on PHP 5.x, so on 5.x this is never called for them.
+    fn sink_check(&mut self, sink: SinkId, name: &[u8], arg: &[u8]) -> Action {
+        #[cfg(test)]
+        if tests::FORCE_PANIC.with(|f| f.get()) {
+            panic!("injected test panic");
+        }
+        let mode = self.config.sinks.effective_mode(sink, self.config.mode);
+        if mode == Mode::Off {
+            return Action::Allow;
+        }
+        let sinks = &self.config.sinks;
+        let n = String::from_utf8_lossy(&name[..name.len().min(64)]).into_owned();
+        let (rule, matched): (RuleId, Option<String>) = match sink {
+            SinkId::CommandExec => (
+                RuleId::CommandExec,
+                (!command_allowed(arg, &sinks.command_exec.allow))
+                    .then(|| format!("non-allowlisted command via {n}")),
+            ),
+            SinkId::Include => (
+                RuleId::Include,
+                (!sinks.include.allow_paths.is_empty() && !include_allowed(arg, &sinks.include.allow_paths))
+                    .then(|| format!("include path outside allowlist via {n}")),
+            ),
+            SinkId::Eval => (RuleId::Eval, Some(format!("dynamic code evaluation via {n}"))),
+            SinkId::Unserialize => {
+                let scan = unserialize_classes(arg);
+                let allow = &sinks.unserialize.allow_classes;
+                let bad = scan.classes.iter().find(|c| !allow.contains(c));
+                let m = if scan.capped {
+                    Some(format!("unserialize via {n}: too many classes to enumerate (fail closed)"))
+                } else {
+                    bad.map(|c| format!("unserialize via {n}: class '{c}' not allowlisted"))
+                };
+                (RuleId::Unserialize, m)
+            }
+        };
+        let Some(reason) = matched else {
+            return Action::Allow;
+        };
+        let action = match mode {
+            Mode::Block => Action::Block,
+            _ => Action::Log,
+        };
+        let rec = EventRecord {
+            ts: now(),
+            request_id: self.request_id.clone(),
+            rule,
+            action,
+            client_ip: self.meta.client_ip.clone(),
+            method: self.meta.method.clone(),
+            uri: self.meta.uri.clone(),
+            reason,
+        };
+        self.sink_log = Some(log_line(&rec));
+        action
     }
 
     /// Record the self-test marker: always a Log event, NEVER a block. A
@@ -439,6 +513,7 @@ pub unsafe extern "C" fn howdah_request_begin(
         c.input = InputState::new();
         c.inspect_values = 0;
         c.inspect_bytes = 0;
+        c.sink_log = None;
         c.meta = match meta.as_ref() {
             Some(m) => Meta {
                 client_ip: copy_str(m.client_ip, m.client_ip_len),
@@ -596,6 +671,71 @@ pub unsafe extern "C" fn howdah_take_log_line(ctx: *mut howdah_ctx) -> *mut c_ch
         return std::ptr::null_mut();
     }
     catch_unwind(AssertUnwindSafe(|| match (*ctx).log.take() {
+        Some(s) => CString::new(s.replace('\0', ""))
+            .map(|c| c.into_raw())
+            .unwrap_or(std::ptr::null_mut()),
+        None => std::ptr::null_mut(),
+    }))
+    .unwrap_or(std::ptr::null_mut())
+}
+
+/// Layer-3 sink check: `sink` is a `HOWDAH_SINK_*` id, `name` the guarded
+/// function/construct, `arg` the sink argument (binary-safe; scanned, never
+/// logged). Returns 0 Allow / 1 Log / 2 Block. NULL ctx, unknown sink or panic
+/// returns 0 (fail-open: a sink-check bug must never neutralize a legitimate
+/// call). A hit is retrievable with `howdah_take_sink_log_line`.
+///
+/// # Safety
+/// `ctx` NULL or live; `name`/`arg` NULL or valid for their lengths.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_sink_check(
+    ctx: *mut howdah_ctx,
+    sink: i32,
+    name: *const c_char,
+    name_len: usize,
+    arg: *const c_char,
+    arg_len: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let id = match sink {
+        HOWDAH_SINK_COMMAND_EXEC => SinkId::CommandExec,
+        HOWDAH_SINK_INCLUDE => SinkId::Include,
+        HOWDAH_SINK_EVAL => SinkId::Eval,
+        HOWDAH_SINK_UNSERIALIZE => SinkId::Unserialize,
+        _ => return HOWDAH_ALLOW,
+    };
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let n: &[u8] = if name.is_null() || name_len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(name as *const u8, name_len)
+        };
+        let a: &[u8] = if arg.is_null() || arg_len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(arg as *const u8, arg_len)
+        };
+        code((*ctx).sink_check(id, n, a))
+    }));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// Take the pending sink log line, or NULL if none. Same ownership contract as
+/// `howdah_take_log_line`; free with `howdah_free_str`.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_take_sink_log_line(ctx: *mut howdah_ctx) -> *mut c_char {
+    if ctx.is_null() {
+        return std::ptr::null_mut();
+    }
+    catch_unwind(AssertUnwindSafe(|| match (*ctx).sink_log.take() {
         Some(s) => CString::new(s.replace('\0', ""))
             .map(|c| c.into_raw())
             .unwrap_or(std::ptr::null_mut()),
@@ -954,6 +1094,189 @@ mod tests {
         begin(c);
         assert_eq!(inspect(c, 99, "q", b"' OR 1=1 --"), HOWDAH_ALLOW);
         assert_eq!(unsafe { howdah_inspect_value(c, 0, std::ptr::null(), 0, std::ptr::null(), 0) }, HOWDAH_ALLOW);
+        unsafe { howdah_free(c) };
+    }
+
+    fn sink(c: *mut howdah_ctx, id: i32, name: &str, arg: &[u8]) -> i32 {
+        unsafe { howdah_sink_check(c, id, name.as_ptr() as _, name.len(), arg.as_ptr() as _, arg.len()) }
+    }
+    fn take_sink(c: *mut howdah_ctx) -> Option<String> {
+        unsafe {
+            let p = howdah_take_sink_log_line(c);
+            if p.is_null() {
+                return None;
+            }
+            let s = CStr::from_ptr(p).to_string_lossy().into_owned();
+            howdah_free_str(p);
+            Some(s)
+        }
+    }
+
+    #[test]
+    fn sink_logs_under_global_block_when_sinks_detect() {
+        let c = init("mode = \"block\"");
+        begin(c);
+        assert_eq!(sink(c, HOWDAH_SINK_COMMAND_EXEC, "system", b"id"), HOWDAH_LOG);
+        let line = take_sink(c).expect("sink line");
+        assert!(line.contains("\"rule\":\"command_exec\""), "{line}");
+        assert!(line.contains("\"action\":\"log\""), "{line}");
+        assert!(line.contains("system"), "{line}");
+        assert!(take(c).is_none(), "layer-1/2 slot untouched");
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn sink_blocks_only_when_sink_mode_block() {
+        let c = init("[sinks.command_exec]\nmode=\"block\"");
+        begin(c);
+        assert_eq!(sink(c, HOWDAH_SINK_COMMAND_EXEC, "system", b"id"), HOWDAH_BLOCK);
+        let line = take_sink(c).expect("sink line");
+        assert!(line.contains("\"action\":\"block\""), "{line}");
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn command_allow_silences() {
+        let c = init("[sinks.command_exec]\nmode=\"block\"\nallow=[\"id\"]");
+        begin(c);
+        assert_eq!(sink(c, HOWDAH_SINK_COMMAND_EXEC, "system", b"id"), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn sink_log_omits_argument() {
+        let c = init("");
+        begin(c);
+        sink(c, HOWDAH_SINK_COMMAND_EXEC, "system", b"cat /etc/shadow");
+        let line = take_sink(c).expect("sink line");
+        assert!(line.contains("system") && line.contains("command_exec"), "{line}");
+        assert!(!line.contains("shadow") && !line.contains("/etc/"), "{line}");
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn multiple_sink_hits_each_emit() {
+        let c = init("[limits]\nmax_input_vars = 2\n");
+        begin(c);
+        for n in ["a", "b", "c"] {
+            unsafe { howdah_input_var(c, n.as_ptr() as _, n.len()) };
+        }
+        for (i, a) in [&b"id"[..], b"ls", b"whoami"].iter().enumerate() {
+            assert_eq!(sink(c, HOWDAH_SINK_COMMAND_EXEC, "system", a), HOWDAH_LOG, "{i}");
+            assert!(take_sink(c).is_some(), "hit {i} dropped");
+            assert!(take_sink(c).is_none());
+        }
+        let l1 = take(c).expect("layer-1 line survives sink hits");
+        assert!(l1.contains("max_input_vars"), "{l1}");
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn sink_log_reset_on_request_begin() {
+        let c = init("");
+        begin(c);
+        sink(c, HOWDAH_SINK_COMMAND_EXEC, "system", b"id");
+        begin(c);
+        assert!(take_sink(c).is_none());
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn unserialize_off_by_default_is_allow() {
+        let c = init("");
+        begin(c);
+        assert_eq!(sink(c, HOWDAH_SINK_UNSERIALIZE, "unserialize", b"O:8:\"stdClass\":0:{}"), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn unserialize_class_logged_unless_allowed() {
+        let c = init("[sinks.unserialize]\nmode=\"block\"\nallow_classes=[\"Good\"]");
+        begin(c);
+        assert_eq!(sink(c, HOWDAH_SINK_UNSERIALIZE, "unserialize", b"O:4:\"Good\":0:{}"), HOWDAH_ALLOW);
+        assert_eq!(sink(c, HOWDAH_SINK_UNSERIALIZE, "unserialize", b"a:1:{i:0;i:1;}"), HOWDAH_ALLOW);
+        assert_eq!(sink(c, HOWDAH_SINK_UNSERIALIZE, "unserialize", b"O:3:\"Bad\":0:{}"), HOWDAH_BLOCK);
+        let line = take_sink(c).expect("line");
+        assert!(line.contains("Bad") && line.contains("\"rule\":\"unserialize\""), "{line}");
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn include_eval_block_when_armed() {
+        // include/eval honor block (enforced by the C opcode handler on PHP 7+);
+        // the core returns Block and never logs the path/code (the arg).
+        let c = init("[sinks.include]\nmode=\"block\"\nallow_paths=[\"/var/www/app\"]");
+        begin(c);
+        assert_eq!(sink(c, HOWDAH_SINK_INCLUDE, "include", b"/etc/passwd"), HOWDAH_BLOCK);
+        let line = take_sink(c).expect("line");
+        assert!(line.contains("\"action\":\"block\"") && line.contains("\"rule\":\"include\""), "{line}");
+        assert!(!line.contains("passwd"), "{line}");
+        unsafe { howdah_free(c) };
+        let c = init("[sinks.eval]\nmode=\"block\"");
+        begin(c);
+        assert_eq!(sink(c, HOWDAH_SINK_EVAL, "eval", b"1"), HOWDAH_BLOCK);
+        assert!(take_sink(c).unwrap().contains("\"action\":\"block\""));
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn include_detect_logs_not_block() {
+        let c = init("[sinks.include]\nallow_paths=[\"/var/www/app\"]");
+        begin(c);
+        assert_eq!(sink(c, HOWDAH_SINK_INCLUDE, "include", b"/etc/passwd"), HOWDAH_LOG);
+        assert!(take_sink(c).unwrap().contains("\"action\":\"log\""));
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn include_inert_without_allow_paths() {
+        let c = init("");
+        begin(c);
+        assert_eq!(sink(c, HOWDAH_SINK_INCLUDE, "include", b"/etc/passwd"), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn unserialize_capped_fails_closed() {
+        let c = init("[sinks.unserialize]\nmode=\"block\"\nallow_classes=[\"A\"]");
+        begin(c);
+        let payload = "O:1:\"A\":0:{}".repeat(70);
+        assert_eq!(sink(c, HOWDAH_SINK_UNSERIALIZE, "unserialize", payload.as_bytes()), HOWDAH_BLOCK);
+        assert!(take_sink(c).is_some());
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn global_off_silences_sinks() {
+        let c = init("mode = \"off\"\n[sinks.command_exec]\nmode=\"block\"");
+        begin(c);
+        assert_eq!(sink(c, HOWDAH_SINK_COMMAND_EXEC, "system", b"id"), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn sink_check_panic_fails_open() {
+        let c = init("[sinks.command_exec]\nmode=\"block\"");
+        begin(c);
+        FORCE_PANIC.with(|f| f.set(true));
+        assert_eq!(sink(c, HOWDAH_SINK_COMMAND_EXEC, "system", b"id"), HOWDAH_ALLOW);
+        FORCE_PANIC.with(|f| f.set(false));
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn sink_unknown_id_and_null_are_allow() {
+        assert_eq!(unsafe { howdah_sink_check(std::ptr::null_mut(), 0, std::ptr::null(), 0, std::ptr::null(), 0) }, 0);
+        assert!(unsafe { howdah_take_sink_log_line(std::ptr::null_mut()) }.is_null());
+        let c = init("");
+        begin(c);
+        assert_eq!(sink(c, 99, "x", b"id"), HOWDAH_ALLOW);
+        assert_eq!(sink(c, -1, "x", b"id"), HOWDAH_ALLOW);
+        assert_eq!(unsafe { howdah_sink_check(c, 0, std::ptr::null(), 0, std::ptr::null(), 0) }, HOWDAH_LOG);
         unsafe { howdah_free(c) };
     }
 

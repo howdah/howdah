@@ -87,6 +87,7 @@ function cell(sapi: any) {
           <li><strong>CVE-2012-1823 (php-cgi argument injection) is out of reach and not protected:</strong> that query is consumed by php-cgi during its own startup, before any PHP extension loads. It belongs with CVE-2019-11043 — both happen before extension code runs. Use a web-server or front-proxy rule.</li>
           <li>The input-shape and request-header limits are enforced best-effort on the response (the variable is always dropped and logged; the 403 may arrive at request shutdown on lazy-superglobal SAPIs). See <a href="/docs/configuration/">Configuration</a>.</li>
           <li>Layer 2 (input inspection, added in 1.1) is not covered by this table. It detects and logs SQL injection, path traversal and command-injection patterns in request values, is best-effort and can be bypassed, which is why it logs, and it does not block by default.</li>
+          <li>Layer 3 (sink hardening, added in 1.2) is not covered by this table either. It guards four sinks: command execution and <code>unserialize</code> on every supported PHP, and <code>include</code>/<code>require</code> and <code>eval</code> on PHP 7.0+ only. It detects and logs by default, and does not block unless explicitly armed. It is best-effort and can be bypassed. <code>phar://</code>/SSRF are roadmap.</li>
           <li>Coverage results were recorded on Linux x86_64. aarch64 is build-verified; the scenario matrix has not been re-run on arm64.</li>
         </ul>
       </div>

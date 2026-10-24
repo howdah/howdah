@@ -42,6 +42,10 @@ fn rule_name(r: RuleId) -> &'static str {
         RuleId::SqlInjection => "sql_injection",
         RuleId::PathTraversal => "path_traversal",
         RuleId::CommandInjection => "command_injection",
+        RuleId::CommandExec => "command_exec",
+        RuleId::Include => "include",
+        RuleId::Eval => "eval",
+        RuleId::Unserialize => "unserialize",
     }
 }
 
@@ -103,6 +107,14 @@ mod tests {
             uri: "/upload.php?a=1\n\"x\"".into(),
             reason: "too many\nparts".into(),
         }
+    }
+
+    #[test]
+    fn layer3_rule_names_are_snake_case() {
+        assert_eq!(rule_name(RuleId::CommandExec), "command_exec");
+        assert_eq!(rule_name(RuleId::Include), "include");
+        assert_eq!(rule_name(RuleId::Eval), "eval");
+        assert_eq!(rule_name(RuleId::Unserialize), "unserialize");
     }
 
     #[test]

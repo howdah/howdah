@@ -30,8 +30,9 @@ fn main() {
 
     // Compile the C shim (ZEND_MODULE_BUILD_ID) against the same headers.
     println!("cargo:rerun-if-changed=shim.c");
+    println!("cargo:rerun-if-changed=sink_hook.c");
     let mut shim = cc::Build::new();
-    shim.file("shim.c").warnings(false);
+    shim.file("shim.c").file("sink_hook.c").warnings(false);
     for inc in includes.split_whitespace() {
         if let Some(dir) = inc.strip_prefix("-I") {
             shim.include(dir);

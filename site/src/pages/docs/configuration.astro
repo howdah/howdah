@@ -104,6 +104,27 @@ max_values      = 2000      <span class="c"># per-request value count budget</sp
 <span class="c"># sql_injection = "block"   # example only; also path_traversal, command_injection</span></code></pre>
       <p class="legend">The <code>[inspect]</code> table lives in the TOML file named by <code>howdah.config</code>, not in <code>howdah.ini</code>. A <code>[inspect.rule_modes]</code> entry overrides <code>inspect.mode</code> for that class only. Values past a scan budget are not scanned. Events carry the rule, source and variable name, never the matched value. Full reference: <a href={`${REPO}/blob/main/docs/config.md`}>docs/config.md</a>.</p>
 
+      <h2 id="layer-3-sinks">Layer 3 — sink hardening (<code>[sinks]</code>)</h2>
+      <p><strong>Sinks log by default; they do not block.</strong> Layer 3 watches dangerous PHP functions and writes an event when one is called with something your allowlist does not cover. Version 1.2 actively guards four sinks: <code>command_exec</code> (<code>system</code>, <code>exec</code>, <code>shell_exec</code>, <code>passthru</code>, <code>popen</code>, <code>proc_open</code>) and <code>unserialize</code> on every supported PHP version, plus <code>include</code>/<code>require</code> and <code>eval</code> on PHP 7.0+ only (not available on PHP 5.x). <code>sinks.mode</code> is <strong>independent</strong> of the global <code>howdah.mode</code>: a global <code>howdah.mode = block</code> does <strong>not</strong> arm any sink. To block, set a sink's mode to <code>"block"</code> explicitly and set its allowlist first, because with an empty allowlist every call is not allowlisted. Layer 3 adds no php.ini directives.</p>
+      <pre tabindex="0"><code>[sinks]
+enabled = true            <span class="c"># master on/off for Layer 3</span>
+mode    = "detect"        <span class="c"># detect = log only (default); block; off</span>
+
+[sinks.command_exec]      <span class="c"># system/exec/shell_exec/passthru/popen/proc_open</span>
+<span class="c"># mode = "block"         # optional per-sink override; set allow FIRST</span>
+allow = []                <span class="c"># anything else is logged (or blocked in block mode)</span>
+
+[sinks.unserialize]       <span class="c"># OFF by default: object unserialize is high-volume</span>
+<span class="c"># mode = "detect"        # opt in (log only)</span>
+allow_classes = []        <span class="c"># class names that may be unserialized</span>
+
+<span class="c"># PHP 7.0+ ONLY (not available on PHP 5.x)</span>
+[sinks.include]           <span class="c"># include/require. Inert until allow_paths is set</span>
+allow_paths = []          <span class="c"># directories include/require may load from</span>
+
+[sinks.eval]</code></pre>
+      <p class="legend">The <code>[sinks]</code> table lives in the TOML file named by <code>howdah.config</code>, not in <code>howdah.ini</code>. <code>command_exec</code> <code>allow</code> patterns are anchored literal strings with an optional single trailing <code>*</code>, not regular expressions. <strong>The sink argument is never logged</strong>: events carry the sink and function name (and the class name for <code>unserialize</code>), never the command line or the serialized payload. <code>[sinks.include]</code> and <code>[sinks.eval]</code> are active on PHP 7.0+ only and do nothing on PHP 5.x; <code>include</code> is inert until <code>allow_paths</code> is set, and blocking skips the opcode so the include/eval never runs. <code>phar://</code> and SSRF coverage are roadmap. Known limitation: <code>proc_open</code> with an array command (PHP 7.4+) is not inspected. This is best-effort hardening and can be bypassed. Full reference: <a href={`${REPO}/blob/main/docs/config.md`}>docs/config.md</a>.</p>
+
       <h2>Rule modes and severity</h2>
       <p>Each <code>[rules]</code> key is a rule name set to <code>block</code>, <code>detect</code>, or <code>off</code>. Rules carry a severity:</p>
       <div class="cols two">

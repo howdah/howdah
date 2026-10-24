@@ -439,6 +439,10 @@ unsafe extern "C" fn minit(_type: c_int, module_number: c_int) -> c_int {
     PRIOR_INPUT_FILTER = (*ptr::addr_of!(sys::sapi_module)).input_filter;
     (*ptr::addr_of_mut!(sys::sapi_module)).input_filter = Some(input_filter::filter);
 
+    // Layer 3: install the function-table sink hooks (process-global; no
+    // MSHUTDOWN restore, like the other installs).
+    sys::howdah_install_sink_hooks(crate::sink_filter::decide);
+
     SUCCESS
 }
 

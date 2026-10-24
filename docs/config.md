@@ -137,6 +137,97 @@ A `[inspect.rule_modes]` entry overrides `inspect.mode` for that class only.
 The `[inspect.limits]` budgets bound the scanning work per value and per
 request; values past a budget are not scanned.
 
+## `[sinks]` — Layer 3 sink hardening (log-only by default)
+
+**Sinks log by default; they do not block.** Layer 3 watches dangerous PHP
+functions ("sinks") and writes an event when one is called with something your
+allowlist does not cover. In 1.2 it **actively guards four sinks**:
+
+- `command_exec` — `system`, `exec`, `shell_exec`, `passthru`, `popen` and
+  `proc_open`.
+- `unserialize` — object unserialization.
+- `include` / `require` — **PHP 7.0+ only**. Inert until `allow_paths` is set.
+- `eval` — **PHP 7.0+ only**.
+
+| Sink | PHP 5.4–5.6 | PHP 7.0–8.5 |
+|------|-------------|-------------|
+| `command_exec` | detect + block | detect + block |
+| `unserialize` (off by default) | detect + block | detect + block |
+| `include` / `require` | not available | detect + block |
+| `eval` | not available | detect + block |
+
+`command_exec` and `unserialize` work on every supported PHP version;
+`include`/`eval` require PHP 7.0+ (the opcode mechanism is not feasible on the
+5.x VM). phar:// and SSRF are roadmap, not shipped.
+
+`sinks.mode` defaults to `detect` (log only) and is **independent of the global
+`howdah.mode`**: a global `howdah.mode = block` does **not** arm any sink. To
+block, set a sink's mode to `block` explicitly, and **set its allowlist first**
+— with an empty allowlist every call is "not allowlisted". Any active sink can
+block when explicitly armed.
+
+**The sink argument is never logged.** An event records only the sink and the
+function name (plus the class name for `unserialize`) — never the command line
+or the serialized payload.
+
+Like `[inspect]`, `[sinks]` lives in the TOML file named by the `howdah.config`
+php.ini setting. It adds **no new php.ini directives**.
+
+```toml
+[sinks]
+enabled = true            # master on/off for Layer 3
+mode = "detect"           # detect = log only (default); block; off. INDEPENDENT of the global howdah.mode.
+
+[sinks.command_exec]      # system/exec/shell_exec/passthru/popen/proc_open
+# mode = "block"          # optional per-sink override; unset inherits sinks.mode. Set allow FIRST.
+allow = []                # commands that are fine; anything else is logged (or blocked in block mode)
+
+[sinks.unserialize]       # OFF by default: object unserialize is high-volume
+# mode = "detect"         # opt in (log only). "block" refuses non-allowlisted classes.
+allow_classes = []        # class names that may be unserialized
+
+# PHP 7.0+ ONLY. Not available on PHP 5.x (accepted there, but nothing is hooked).
+[sinks.include]           # include/require. Inert until allow_paths is set.
+# mode = "block"          # optional per-sink override; unset inherits sinks.mode
+allow_paths = []          # directories include/require may load from
+[sinks.eval]              # eval
+```
+
+### `command_exec`
+
+`allow` patterns are **anchored literal strings with an optional single
+trailing `*`** (any suffix). They are not regular expressions.
+
+- `"id"` matches only the command `id`.
+- `"/usr/bin/convert *"` matches any command starting with `/usr/bin/convert `.
+- A bare `"*"` allows every command (useful to keep the sink silent).
+
+### `unserialize`
+
+Off by default. Opt in with `[sinks.unserialize] mode = "detect"` to log
+unserialize calls that create objects of classes not listed in `allow_classes`.
+Set `mode = "block"` only after the log shows your application's legitimate
+classes are all in `allow_classes`.
+
+### `include` / `require` and `eval` (PHP 7.0+ only)
+
+Active on PHP 7.0 and later, in detect and block modes. **Not available on
+PHP 5.x**: the opcode-operand mechanism is not feasible on the 5.x VM, so there
+these tables are accepted but nothing is hooked. `include`/`require` is **inert
+until `allow_paths` is set**. Blocking works by skipping the opcode: the
+include/eval never runs and the script continues. As always, the argument is
+never logged.
+
+### Known limitations
+
+- **Only a string first argument is inspected.** A guarded call whose first
+  argument is not a plain string — an array (e.g. `proc_open` with an array
+  command on PHP 7.4+), or any non-string value — fails open and is chained
+  unguarded. In practice real injection targets (request values, concatenated
+  strings) are always strings and are guarded.
+- As with `[inspect]`, this is best-effort hardening, not a substitute for
+  fixing the application. phar:// and SSRF coverage are on the roadmap.
+
 ## Enforcement timing (honest caveat)
 
 The multipart limits refuse the request *while the body is parsed*, before PHP

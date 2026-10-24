@@ -26,6 +26,8 @@ mod module;
 mod response;
 #[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]
 mod rfc1867;
+#[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]
+mod sink_filter;
 
 /// Belt-and-suspenders (carry-forward #2): confirm at runtime that this binary
 /// actually catches panics (i.e. was built `panic = "unwind"`). Returns true

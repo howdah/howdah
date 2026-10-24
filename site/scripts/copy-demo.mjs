@@ -34,7 +34,16 @@ for (const f of files) {
   copyFileSync(resolve(src, f), resolve(dst, f));
 }
 
+// Config editor runtime (schema table + emitter/codec) -> public/config/
+const cfgSrc = resolve(here, '../config-editor');
+const cfgDst = resolve(here, '../public/config');
+mkdirSync(cfgDst, { recursive: true });
+const cfgFiles = ['schema.js', 'editor.js'];
+for (const f of cfgFiles) {
+  copyFileSync(resolve(cfgSrc, f), resolve(cfgDst, f));
+}
+
 // Public signing key -> public/key.asc
 copyFileSync(resolve(here, '../../packaging/howdah-release-signing.asc'), resolve(here, '../public/key.asc'));
 
-console.log(`demo assets copied: ${files.join(', ')} -> site/public/demo/; key.asc -> site/public/`);
+console.log(`demo assets copied: ${files.join(', ')} -> site/public/demo/; ${cfgFiles.join(', ')} -> site/public/config/; key.asc -> site/public/`);

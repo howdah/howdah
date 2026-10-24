@@ -47,12 +47,11 @@ jobs:
         working-directory: site
       - run: npm run build
         working-directory: site
+      # Scripts, styles, images, frames, forms and fetches must be first-party.
+      # Hyperlinks to sources are fine. Same check as site/test/external.test.mjs.
       - name: No third-party requests in the build
-        run: |
-          if grep -rhoE 'https?://[^"'"'"' )<>]+' site/dist --include='*.html' --include='*.css' --include='*.js' \
-             | grep -vE '^https://((pkg|cfg)\.)?howdah\.org|^https://github\.com/howdah/howdah|^http://www\.w3\.org/2000/svg|^https://your\.site/' ; then
-            echo "::error::unexpected external URL in build output"; exit 1
-          fi
+        run: node scripts/check-external.mjs dist
+        working-directory: site
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site/dist

@@ -27,15 +27,21 @@
 typedef int (*howdah_sink_decide_t)(int sink, const char *name, size_t name_len,
                                     const char *arg, size_t arg_len);
 
+/* Path constness: char * through 5.5, const char * from 5.6 (verified against
+ * the 5.4 and 5.6 php_streams.h). opened_path: char ** until 7.0, zend_string **
+ * from 7.0. TSRMLS is threaded only on PHP 5. */
+#if PHP_VERSION_ID >= 50600
+# define HOWDAH_CP  const char *
+#else
+# define HOWDAH_CP  char *
+#endif
 #if PHP_VERSION_ID >= 70000
 # define HOWDAH_TSD
 # define HOWDAH_TSC
-# define HOWDAH_CP  const char *
 # define HOWDAH_OPP zend_string **
 #else
 # define HOWDAH_TSD TSRMLS_DC
 # define HOWDAH_TSC TSRMLS_CC
-# define HOWDAH_CP  char *
 # define HOWDAH_OPP char **
 #endif
 
@@ -57,7 +63,7 @@ static int howdah_phar_blocked(HOWDAH_CP url) {
 static php_stream *howdah_phar_open(php_stream_wrapper *w, HOWDAH_CP fn, HOWDAH_CP mode,
                                     int options, HOWDAH_OPP op,
                                     php_stream_context *c STREAMS_DC HOWDAH_TSD) {
-    if (howdah_phar_blocked(fn)) {
+    if (howdah_phar_blocked(fn) || !howdah_phar_orig_ops.stream_opener) {
         return NULL;
     }
     return howdah_phar_orig_ops.stream_opener(w, fn, mode, options, op, c
@@ -66,7 +72,7 @@ static php_stream *howdah_phar_open(php_stream_wrapper *w, HOWDAH_CP fn, HOWDAH_
 
 static int howdah_phar_stat(php_stream_wrapper *w, HOWDAH_CP url, int flags,
                             php_stream_statbuf *ssb, php_stream_context *c HOWDAH_TSD) {
-    if (howdah_phar_blocked(url)) {
+    if (howdah_phar_blocked(url) || !howdah_phar_orig_ops.url_stat) {
         return -1;
     }
     return howdah_phar_orig_ops.url_stat(w, url, flags, ssb, c HOWDAH_TSC);
@@ -75,7 +81,7 @@ static int howdah_phar_stat(php_stream_wrapper *w, HOWDAH_CP url, int flags,
 static php_stream *howdah_phar_dir(php_stream_wrapper *w, HOWDAH_CP fn, HOWDAH_CP mode,
                                    int options, HOWDAH_OPP op,
                                    php_stream_context *c STREAMS_DC HOWDAH_TSD) {
-    if (howdah_phar_blocked(fn)) {
+    if (howdah_phar_blocked(fn) || !howdah_phar_orig_ops.dir_opener) {
         return NULL;
     }
     return howdah_phar_orig_ops.dir_opener(w, fn, mode, options, op, c
@@ -84,7 +90,7 @@ static php_stream *howdah_phar_dir(php_stream_wrapper *w, HOWDAH_CP fn, HOWDAH_C
 
 static int howdah_phar_unlink(php_stream_wrapper *w, HOWDAH_CP url, int options,
                               php_stream_context *c HOWDAH_TSD) {
-    if (howdah_phar_blocked(url)) {
+    if (howdah_phar_blocked(url) || !howdah_phar_orig_ops.unlink) {
         return 0;
     }
     return howdah_phar_orig_ops.unlink(w, url, options, c HOWDAH_TSC);
@@ -92,7 +98,8 @@ static int howdah_phar_unlink(php_stream_wrapper *w, HOWDAH_CP url, int options,
 
 static int howdah_phar_rename(php_stream_wrapper *w, HOWDAH_CP from, HOWDAH_CP to,
                               int options, php_stream_context *c HOWDAH_TSD) {
-    if (howdah_phar_blocked(from)) {
+    if (howdah_phar_blocked(from) || howdah_phar_blocked(to)
+        || !howdah_phar_orig_ops.rename) {
         return 0;
     }
     return howdah_phar_orig_ops.rename(w, from, to, options, c HOWDAH_TSC);
@@ -100,7 +107,7 @@ static int howdah_phar_rename(php_stream_wrapper *w, HOWDAH_CP from, HOWDAH_CP t
 
 static int howdah_phar_mkdir(php_stream_wrapper *w, HOWDAH_CP url, int mode,
                              int options, php_stream_context *c HOWDAH_TSD) {
-    if (howdah_phar_blocked(url)) {
+    if (howdah_phar_blocked(url) || !howdah_phar_orig_ops.stream_mkdir) {
         return 0;
     }
     return howdah_phar_orig_ops.stream_mkdir(w, url, mode, options, c HOWDAH_TSC);
@@ -108,7 +115,7 @@ static int howdah_phar_mkdir(php_stream_wrapper *w, HOWDAH_CP url, int mode,
 
 static int howdah_phar_rmdir(php_stream_wrapper *w, HOWDAH_CP url, int options,
                              php_stream_context *c HOWDAH_TSD) {
-    if (howdah_phar_blocked(url)) {
+    if (howdah_phar_blocked(url) || !howdah_phar_orig_ops.stream_rmdir) {
         return 0;
     }
     return howdah_phar_orig_ops.stream_rmdir(w, url, options, c HOWDAH_TSC);
@@ -123,7 +130,7 @@ int howdah_install_phar_hook(howdah_sink_decide_t cb) {
     TSRMLS_FETCH();
 #endif
 
-    if (!h) {
+    if (!cb || !h) {
         return 0;
     }
 #if PHP_VERSION_ID >= 70000
@@ -138,6 +145,9 @@ int howdah_install_phar_hook(howdah_sink_decide_t cb) {
 #endif
     if (!pw || !pw->wops) {
         return 0;
+    }
+    if (pw == &howdah_phar_our_wrapper) {
+        return 1; /* already installed: copying again would make orig_ops self-recurse */
     }
 
     howdah_phar_decide = cb;

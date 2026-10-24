@@ -88,7 +88,7 @@ function cell(sapi: any) {
           <li>The input-shape and request-header limits are enforced best-effort on the response (the variable is always dropped and logged; the 403 may arrive at request shutdown on lazy-superglobal SAPIs). See <a href="/docs/configuration/">Configuration</a>.</li>
           <li>Layer 2 (input inspection, added in 1.1) is not covered by this table. It detects and logs SQL injection, path traversal and command-injection patterns in request values, is best-effort and can be bypassed, which is why it logs, and it does not block by default.</li>
           <li>Layer 3 (sink hardening, added in 1.2) is not covered by this table either. It guards four sinks: command execution and <code>unserialize</code> on every supported PHP, and <code>include</code>/<code>require</code> and <code>eval</code> on PHP 7.0+ only. It detects and logs by default, and does not block unless explicitly armed. It is best-effort and can be bypassed. <code>phar://</code>/SSRF are roadmap.</li>
-          <li>Coverage results were recorded on Linux x86_64. aarch64 is build-verified; the scenario matrix has not been re-run on arm64.</li>
+          <li>Coverage results were recorded on Linux x86_64. aarch64 is build-verified for all 14 minors (PHP 5.4 included since the 1.2.2 build fix); the scenario matrix has not been re-run on arm64.</li>
         </ul>
       </div>
     </div>

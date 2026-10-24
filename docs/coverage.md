@@ -177,14 +177,15 @@ that populate superglobals lazily. See caveats 5–7.
    front-proxy rule (or a patched php-cgi) to cover it.
 8. **Platforms: Linux x86_64 and aarch64, NTS builds only.** Release tarballs
    are built on a glibc-2.17 baseline for both architectures. x86_64 covers all
-   14 PHP minors (5.4 to 8.5). aarch64 is provided for the minors whose
-   from-source build succeeds on native arm64 CI runners (Remi has no aarch64
-   EL7 packages, so every arm64 minor builds from PHP source); **PHP 5.x on
-   aarch64 is best-effort** because the old `./configure` may not detect
-   aarch64. The release assets are the definitive per-arch list. The core is
-   arch-agnostic pure Rust, but arm64 is **build-verified only** (PHP 7.4 and
-   8.4 locally under QEMU; the rest in CI). Every matrix result in the tables
-   above was recorded on x86_64; the scenario matrix has not been run on arm64.
+   14 PHP minors (5.4 to 8.5). aarch64 builds every minor from PHP source on
+   native arm64 CI runners (Remi has no aarch64 EL7 packages); PHP 5.4's 2008
+   `config.guess` cannot identify an aarch64 host, so the build passes an
+   explicit `--build` triple (releases before 1.2.2 shipped no 5.4 arm64
+   tarball for that reason). The release assets are the definitive per-arch
+   list. The core is arch-agnostic pure Rust, but arm64 is **build-verified
+   only** (PHP 5.4, 7.4 and 8.4 locally under QEMU; the rest in CI). Every
+   matrix result in the tables above was recorded on x86_64; the scenario
+   matrix has not been run on arm64.
 
 ## Reproduce
 

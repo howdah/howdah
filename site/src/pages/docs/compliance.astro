@@ -1,0 +1,349 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { REPO, RELEASES } from '../../lib/site';
+
+// Source of truth: docs/compliance.md. Code blocks are kept here as raw
+// strings so braces, quotes and backslashes reach the page unchanged.
+const PCI_LIB = 'https://www.pcisecuritystandards.org/document_library/';
+const CLOUDAWARE = 'https://ce.prod.cloudaware.com/frameworks/pci-dss-v4.0.1/06/04/02';
+const COALFIRE = 'https://www.contrastsecurity.com/security-influencers/coalfire-pci-compliance';
+const GUIDEPOINT = 'https://www.guidepointsecurity.com/blog/using-rasp-to-protect-applications-and-comply-with-the-pci-dss/';
+const CRS_PCI = 'https://coreruleset.org/20250810/how-crs-contributes-to-pci-dss-compliance/';
+const CVE_2024_4577 = 'https://github.com/php/php-src/security/advisories/GHSA-3qgc-jrrr-25jv';
+const FPM_CONF = 'https://www.php.net/manual/en/install.fpm.configuration.php';
+const PHP_SUPPORTED = 'https://www.php.net/supported-versions.php';
+const BEAZLEY = 'https://beazley.com/globalassets/product-documents/app-form/beazley-cyber-insurance-application-long-sub-20m.pdf';
+const ALLENS = 'https://www.allens.com.au/insights-news/insights/2023/05/a-ticking-time-bomb-limitations-in-cyber-cover-for-known-vulnerabilities-and-end-of-life-hardware/';
+const NIS2 = 'https://eur-lex.europa.eu/eli/dir/2022/2555/oj';
+const AICPA = 'https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022';
+const ECFR = 'https://www.ecfr.gov/current/title-45/subtitle-A/subchapter-C/part-164/subpart-C/section-164.312';
+const COVERAGE_MD = `${REPO}/blob/main/docs/coverage.md`;
+
+const running = String.raw`howdah-check detect                      # every PHP build on the host, and whether Howdah is loaded in each SAPI
+php --ri howdah                          # CLI: version, mode, config file, log path
+howdah-check web https://shop.example/   # the web SAPI: a harmless self-test over HTTP`;
+
+const version = String.raw`dpkg-query -W 'php*-howdah'           # Debian/Ubuntu: installed package and version
+apt-cache policy php7.4-howdah        # installed vs. newest available in the repository
+rpm -qa 'php*-howdah'                 # RHEL family
+yum check-update php74-howdah         # exit code 100 means an update is waiting
+php --ri howdah | grep -i version     # the version PHP actually loaded`;
+
+const logIni = String.raw`howdah.log = /var/log/howdah/events.log`;
+
+const samples = String.raw`{"action":"block","client_ip":"203.0.113.7","method":"POST","reason":"multipart file count exceeds limit","request_id":"2a9f3c1e7b5d0a4c62","rule":"max_files","ts":"1792834862000","uri":"/upload.php"}
+{"action":"log","client_ip":"198.51.100.23","method":"GET","reason":"sql_injection pattern in get variable 'id'","request_id":"2b51c08e9d3a7f6e14","rule":"sql_injection","ts":"1792834901000","uri":"/product.php"}
+{"action":"log","client_ip":"192.0.2.44","method":"POST","reason":"non-allowlisted command via shell_exec","request_id":"2c07d4e1a96b3f8c25","rule":"command_exec","ts":"1792834977000","uri":"/admin/tools.php"}`;
+
+const logDir = String.raw`# The directory belongs to the PHP worker user (www-data on Debian, apache or nginx on RHEL).
+sudo install -d -m 0750 -o www-data -g www-data /var/log/howdah`;
+
+const logrotate = String.raw`# /etc/logrotate.d/howdah: three months on the host
+/var/log/howdah/events.log {
+    daily
+    rotate 92
+    dateext
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 www-data www-data
+}`;
+
+const rsyslog = String.raw`# /etc/rsyslog.d/30-howdah.conf: copy each line to a central log server
+module(load="imfile")
+input(type="imfile" File="/var/log/howdah/events.log" Tag="howdah:" Facility="local6" Severity="notice")
+local6.* @@logs.example.internal:514`;
+
+const toml = String.raw`# /etc/howdah/howdah.toml, kept in version control.
+# Every change from a default has a DECISION comment: date, owner, why.
+mode = "block"
+
+[rules]
+# DECISION 2026-10-24 owner=jdoe(web ops): SSO proxy adds ~40 headers.
+# Watch 30 days, then remove this line to return to block.
+max_request_headers = "detect"
+
+[sinks.command_exec]
+# DECISION 2026-10-24 owner=jdoe(web ops): the thumbnailer is the only
+# legitimate shell call. Allowlist set first, then armed.
+allow = ["/usr/bin/convert *"]
+mode = "block"`;
+
+const byRule = String.raw`zcat -f /var/log/howdah/events.log* | jq -r 'select(.action == "block") | .rule' | sort | uniq -c | sort -rn`;
+
+const byDay = String.raw`zcat -f /var/log/howdah/events.log* \
+  | jq -r 'select(.action == "block") | [(.ts | tonumber / 1000 | floor | strftime("%Y-%m-%d")), .rule] | @tsv' \
+  | sort | uniq -c`;
+
+const noJq = String.raw`zcat -f /var/log/howdah/events.log* | awk -F'"rule":"' '/"action":"block"/ { split($2, a, /"/); print a[1] }' | sort | uniq -c | sort -rn`;
+---
+<Layout
+  title="Howdah compliance evidence"
+  description="How Howdah maps to PCI DSS 4.0.1 requirement 6.4.2, what evidence to hand an assessor (audit log fields, retention, decision record, blocked-attack summary), and how to answer end-of-life questions honestly."
+  path="/docs/compliance/"
+>
+  <div class="pagehead">
+    <div class="wrap">
+      <p class="crumbs"><a href="/">Home</a> / <a href="/docs/">Docs</a> / <span aria-current="page">Compliance</span></p>
+      <h1>Compliance evidence</h1>
+      <p class="lede">What Howdah does against PCI DSS 4.0.1 requirement 6.4.2, the evidence a server running it can produce, and what it does not cover. Short notes on insurance questionnaires, NIS2, SOC 2 and HIPAA follow.</p>
+    </div>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <div class="note" role="note" aria-labelledby="not-heading">
+        <h3 id="not-heading">What this page is not</h3>
+        <ul>
+          <li><strong>Not legal advice.</strong> Nothing here tells you what a law, standard or policy requires of you. Ask your assessor, auditor, counsel or broker.</li>
+          <li><strong>Not a certification.</strong> Howdah is not certified, validated, listed or approved by the PCI Security Standards Council, the AICPA, HHS, ENISA or any insurer. It has no SOC 2 report and no PCI attestation of its own.</li>
+          <li><strong>No third-party audit.</strong> Howdah's code has had no third-party security audit yet. Its coverage claims come from the project's own lab (<a href="/coverage/">coverage</a>), not from an independent test.</li>
+          <li><strong>Not reviewed by an assessor.</strong> No QSA, auditor or insurer has reviewed this page. Whether Howdah meets a requirement in your environment is their decision, not ours.</li>
+        </ul>
+      </div>
+      <p>Facts about Howdah on this page come from the source, <a href={`${REPO}/blob/main/docs/config.md`}>docs/config.md</a> and <a href={COVERAGE_MD}>docs/coverage.md</a>. Every external claim has a link; the sources are listed again at the end. The same text, versioned with the code, is in <a href={`${REPO}/blob/main/docs/compliance.md`}>docs/compliance.md</a>.</p>
+
+      <h2 id="pci-6-4-2">PCI DSS 4.0.1 requirement 6.4.2</h2>
+      <h3>The requirement</h3>
+      <p>PCI DSS v4.0.1 (June 2024), requirement 6.4.2, page 152:</p>
+      <blockquote>
+        <p>For public-facing web applications, an automated technical solution is deployed that continually detects and prevents web-based attacks, with at least the following:</p>
+        <ul>
+          <li>Is installed in front of public-facing web applications and is configured to detect and prevent web-based attacks.</li>
+          <li>Actively running and up to date as applicable.</li>
+          <li>Generating audit logs.</li>
+          <li>Configured to either block web-based attacks or generate an alert that is immediately investigated.</li>
+        </ul>
+      </blockquote>
+      <p>The applicability note says it was &ldquo;a best practice until 31 March 2025, after which it will be required&rdquo;, and that it replaces requirement 6.4.1. The testing procedure is to &ldquo;examine the system configuration settings and audit logs, and interview responsible personnel&rdquo;. The standard is in the <a href={PCI_LIB}>PCI SSC document library</a>. The same bullet text is reproduced at <a href={CLOUDAWARE}>Cloudaware</a>.</p>
+
+      <h3>Bullet by bullet</h3>
+      <div class="tablewrap map" tabindex="0" role="region" aria-label="PCI DSS 6.4.2 mapping (scrolls sideways on narrow screens)">
+        <table>
+          <caption class="sr-only">Each 6.4.2 bullet: what Howdah does, the evidence to collect, and what Howdah does not do</caption>
+          <thead><tr><th scope="col">6.4.2 bullet</th><th scope="col">What Howdah does</th><th scope="col">Evidence to collect</th><th scope="col">What Howdah does not do</th></tr></thead>
+          <tbody>
+            <tr>
+              <th scope="row">Installed in front of public-facing web applications and configured to detect and prevent web-based attacks</th>
+              <td>Loads into every PHP worker as an extension. Checks the request as PHP parses it, which for most inputs is before the application's first line runs (Layers 1 and 2; see the timing note below). Checks dangerous function calls while the application runs (Layer 3).</td>
+              <td><code>php --ri howdah</code> for each PHP build; <code>howdah-check web</code> output against the live site; the <code>howdah.ini</code> and <code>howdah.toml</code> files in use.</td>
+              <td>It is not on the network. It never sees requests that do not reach PHP: static files, non-PHP applications, and bugs that fire before PHP extensions load. It does not cover XSS, CSRF, authentication, access control or business logic. See <a href="#attack-classes">the 6.2.4 table</a>.</td>
+            </tr>
+            <tr>
+              <th scope="row">Actively running and up to date as applicable</th>
+              <td>Runs on every request while loaded. Its rules are compiled into the extension; there is no separate signature feed. &ldquo;Up to date&rdquo; means the latest release for your PHP minor and a reviewed config.</td>
+              <td>Installed package version and the <code>php --ri howdah</code> &ldquo;Version&rdquo; row, compared with the <a href={RELEASES}>latest release</a>; a daily <code>howdah-check web</code> run and the <code>self_test</code> log line it leaves.</td>
+              <td>It does not update itself. It does not alert you if it stops loading: PHP starts without an extension it cannot load, and a malformed TOML falls back to built-in defaults. Watch for the daily <code>self_test</code> line.</td>
+            </tr>
+            <tr>
+              <th scope="row">Generating audit logs</th>
+              <td>Writes one JSON line per security event to the file named by <code>howdah.log</code>: timestamp, request id, rule, action, client IP, method, path and reason.</td>
+              <td>The <code>howdah.log</code> setting, sample lines, the rotation config and the off-host shipping config (<a href="#audit-log">below</a>).</td>
+              <td>No syslog or network transport: it writes a file only. Lines are not signed or chained. The file is writable by the PHP user. It logs security events, not every request. It never logs bodies, cookies, <code>Authorization</code> headers, query strings, matched values or sink arguments.</td>
+            </tr>
+            <tr>
+              <th scope="row">Configured to either block web-based attacks or generate an alert that is immediately investigated</th>
+              <td>Layer 1 Critical rules block (403/413) in both <code>block</code> and <code>detect</code> mode. Standard rules block in <code>block</code> mode. Layer 2 and the Layer 3 sinks only log (and <code>unserialize</code>, <code>phar</code> and <code>ssrf</code> are off) until you arm a class or sink with <code>mode = "block"</code>.</td>
+              <td><code>howdah.toml</code> with each mode and the reason for it (<a href="#decision-record">decision record</a>); for log-only rules, the alert rule in your log system and records of alerts being investigated.</td>
+              <td>It sends no alerts: no email, webhook or pager. Alerting has to come from your log pipeline. An armed Layer 2 class does not stop the script: the variable reaches the application and the 403 is set at the end of the request. Treat Layer 2 as detection.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="legend">Enforcement timing differs by layer. The multipart limits refuse the request while the body is parsed, before the script runs. The input-shape and header limits drop the offending variable and log; their 403 is best-effort and can arrive after the script has produced output. An armed Layer 3 sink refuses the call and the script continues. Details: <a href="/docs/configuration/">configuration, &ldquo;Enforcement timing&rdquo;</a>.</p>
+
+      <h3 id="in-front-of">&ldquo;Installed in front of&rdquo;: the in-process question</h3>
+      <p>Howdah does not sit in front of the web server. It runs inside the PHP process. It inspects the request after PHP has parsed it and before the application code runs, and it checks dangerous calls as the application makes them. Whether that placement meets &ldquo;installed in front of public-facing web applications&rdquo; is your assessor's call. These are the points to put to them:</p>
+      <ul class="facts">
+        <li><strong>The standard's own guidance names RASP.</strong> The guidance for requirement 6.4.1, which 6.4.2 replaces, says: &ldquo;Another example of an automated technical solution is Runtime Application Self-Protection (RASP) technologies. When implemented correctly, RASP solutions can detect and block anomalous behavior by the software during execution. While WAFs typically monitor the application perimeter, RASP solutions monitor and block behavior within the application.&rdquo; (PCI DSS v4.0.1, page 151.) The guidance for 6.4.2 itself (page 152) gives only a WAF as its example.</li>
+        <li><strong>Some assessors have accepted in-process tools.</strong> Coalfire, a PCI QSA company, evaluated Contrast Security's Assess and Protect tools (Protect is a RASP) and said they &ldquo;may be used to replace some of the traditional approaches to assessing and protecting applications&rdquo; (vendor-published summary, 2019, <a href={COALFIRE}>Contrast Security</a>). GuidePoint Security writes that RASP is a route to meeting requirement 6.6 in PCI DSS 3.2.1 and 6.4.1 in 4.0 (<a href={GUIDEPOINT}>GuidePoint</a>).</li>
+        <li><strong>Nothing settles it.</strong> We found no PCI SSC FAQ that rules on in-process enforcement for 6.4.2, either way.</li>
+        <li><strong>Howdah is partly WAF, partly RASP.</strong> Layers 1 and 2 inspect the request the way a WAF does, but after PHP's own parser has decoded it. Layer 3 works like a RASP: it checks <code>system</code>, <code>include</code>, <code>eval</code>, <code>unserialize</code>, <code>phar://</code> and outbound requests at the moment they are called.</li>
+      </ul>
+      <p>Howdah complements a network WAF; it does not replace one. Keep or add a WAF, CDN rule or web server rule for:</p>
+      <ul class="facts">
+        <li><strong>Non-PHP assets on the same host:</strong> static files, other languages, admin panels that are not PHP.</li>
+        <li><strong>Bugs that fire before PHP extensions load.</strong> php-cgi argument injection (CVE-2012-1823, and CVE-2024-4577, its 2024 bypass on Windows: <a href={CVE_2024_4577}>PHP advisory GHSA-3qgc-jrrr-25jv</a>) is consumed by php-cgi at startup, before any extension hook runs. So is the php-fpm bug CVE-2019-11043. Howdah cannot see these (<a href={COVERAGE_MD}>docs/coverage.md</a>, caveat 7). Howdah also builds for Linux only, so it does not run on Windows at all.</li>
+        <li><strong>Volume:</strong> Howdah has no rate limiting and no bot management.</li>
+      </ul>
+
+      <h3 id="attack-classes">Which attack classes Howdah sees</h3>
+      <p>The 6.4.2 guidance points at the attacks listed in requirement 6.2.4. This is how they line up with Howdah 1.3.</p>
+      <div class="tablewrap map" tabindex="0" role="region" aria-label="PCI DSS 6.2.4 attack classes (scrolls sideways on narrow screens)">
+        <table>
+          <caption class="sr-only">PCI DSS 6.2.4 attack classes and Howdah 1.3 coverage</caption>
+          <thead><tr><th scope="col">6.2.4 attack class</th><th scope="col">Howdah 1.3</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Injection: SQL, LDAP, XPath, command and other injection</th><td>SQL-injection and command-injection shapes in GET, POST, cookie and path values: Layer 2, detection only, best-effort and bypassable. OS command execution: the <code>command_exec</code> sink, which blocks when armed. LDAP and XPath: not inspected.</td></tr>
+            <tr><th scope="row">Attacks on data and data structures</th><td>Layer 1 limits on multipart parts and files, input variable count, array nesting, key and header sizes (Critical rules block). Object injection: the <code>unserialize</code> and <code>phar</code> sinks, off by default. Memory-safety bugs in PHP itself are covered only where they need one of these shapes.</td></tr>
+            <tr><th scope="row">Attacks on cryptography</th><td>Not covered.</td></tr>
+            <tr><th scope="row">Attacks on business logic, including XSS and CSRF</th><td>Not covered. Howdah does not inspect responses or output.</td></tr>
+            <tr><th scope="row">Attacks on access control</th><td>Not covered. Path-traversal shapes: Layer 2 detection. File includes outside an allowlist: the <code>include</code> sink, which blocks when armed.</td></tr>
+            <tr><th scope="row">&ldquo;High-risk&rdquo; vulnerabilities (6.3.1)</th><td>Case by case. <a href="/coverage/">Coverage</a> lists the CVEs the lab has tested and the ones Howdah cannot reach.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h2 id="assessor">What to hand your assessor</h2>
+      <p>The evidence below comes from the server itself. Collect it per host, date it, and keep it with your other PCI evidence.</p>
+
+      <h3>1. Where Howdah is loaded, and proof it is running</h3>
+      <pre tabindex="0"><code>{running}</code></pre>
+      <p><code>php --ri howdah</code> only proves the CLI loads it. PHP-FPM and Apache <code>mod_php</code> have their own configuration, so the web check is the one that counts. <code>howdah-check web</code> sends two requests. The first carries a self-test marker: Howdah writes a <code>self_test</code> line to the log and adds an <code>X-Howdah-Selftest</code> header. The second sends 2001 empty form fields, one over the default <code>max_parts</code> limit, which Howdah refuses with a 403 even in <code>detect</code> mode. Neither request carries an attack payload.</p>
+      <p><code>howdah-check</code> is a read-only POSIX shell script. It ships in every release tarball and as a <a href={`${RELEASES}/latest/download/howdah-check`}>standalone release asset</a>.</p>
+      <p>Run <code>howdah-check web</code> once a day from cron and keep the output. Together with the <code>self_test</code> lines in the log, that shows the control was running continuously, not only on the day of the assessment.</p>
+
+      <h3>2. Proof it is up to date</h3>
+      <pre tabindex="0"><code>{version}</code></pre>
+      <p>Compare the loaded version with the <a href={RELEASES}>latest release</a> and the <a href={`${REPO}/blob/main/CHANGELOG.md`}>changelog</a>. Howdah's rules are part of the extension, so upgrading the package is the whole update. A package upgrade needs a PHP-FPM or Apache reload before the new version is loaded; the <code>php --ri</code> line confirms it.</p>
+
+      <h3 id="audit-log">3. The audit log</h3>
+      <p>Set the log path explicitly:</p>
+      <pre tabindex="0"><code>{logIni}</code></pre>
+      <p>If <code>howdah.log</code> is empty, or the file cannot be opened, Howdah writes the line to the process's stderr with a <code>howdah-event</code> prefix. PHP-FPM sends worker stderr to <code>/dev/null</code> unless <code>catch_workers_output = yes</code> (<a href={FPM_CONF}>php.net</a>), so an unset log path on FPM can mean no log at all.</p>
+      <p>Each line is one JSON object with exactly these fields (from <a href={`${REPO}/blob/main/crates/howdah-core/src/log.rs`}>crates/howdah-core/src/log.rs</a>):</p>
+      <div class="tablewrap" tabindex="0" role="region" aria-label="Log fields (scrolls sideways on narrow screens)">
+        <table>
+          <caption class="sr-only">Howdah log fields and the PCI DSS 10.2.2 element each one supplies</caption>
+          <thead><tr><th scope="col">Field</th><th scope="col">Content</th><th scope="col">PCI DSS 10.2.2 element</th></tr></thead>
+          <tbody>
+            <tr><th scope="row"><code>ts</code></th><td>UTC time of the event, Unix epoch milliseconds, as a string. Taken from the system clock, so keep NTP running (10.6.1).</td><td>Date and time</td></tr>
+            <tr><th scope="row"><code>request_id</code></th><td>An id for the request. The block response body prints it, so a user's report maps to one line.</td><td>(correlation)</td></tr>
+            <tr><th scope="row"><code>rule</code></th><td>The rule or sink that fired, for example <code>max_parts</code>, <code>sql_injection</code>, <code>command_exec</code>.</td><td>Type of event</td></tr>
+            <tr><th scope="row"><code>action</code></th><td><code>block</code> (refused) or <code>log</code> (allowed and recorded).</td><td>Success and failure indication</td></tr>
+            <tr><th scope="row"><code>client_ip</code></th><td><code>REMOTE_ADDR</code> as PHP sees it. Behind a proxy or CDN this is the proxy's address.</td><td>Origination of event</td></tr>
+            <tr><th scope="row"><code>method</code></th><td>The HTTP method.</td><td>Identity of affected resource</td></tr>
+            <tr><th scope="row"><code>uri</code></th><td>The request path. The query string is removed.</td><td>Identity of affected resource</td></tr>
+            <tr><th scope="row"><code>reason</code></th><td>A short description. Layer 2 adds the source and the variable name, never the value. <code>ssrf</code> adds host, port, resolved IP and range class.</td><td>Type of event (detail)</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Howdah does not know who the application user is, so there is no user identification field (10.2.2's first element). Correlate with your web server and application logs by time, client IP and path.</p>
+      <p>Sample lines (keys are written in this sorted order):</p>
+      <pre tabindex="0"><code>{samples}</code></pre>
+      <p>Layers 1 and 2 write at most one line per request: the most severe hit. Each Layer 3 sink event is its own line.</p>
+
+      <h3>4. Retention, rotation and shipping off the host</h3>
+      <p>PCI DSS 10.5.1: &ldquo;Retain audit log history for at least 12 months, with at least the most recent three months immediately available for analysis.&rdquo; 10.3.3 asks for logs to be &ldquo;promptly backed up to a secure, central, internal log server(s) or other media that is difficult to modify.&rdquo; A sample setup that does both:</p>
+      <pre tabindex="0"><code>{logDir}</code></pre>
+      <pre tabindex="0"><code>{logrotate}</code></pre>
+      <p>Howdah opens the file for each line it writes, so rename-based rotation is safe. No <code>copytruncate</code> and no PHP reload are needed.</p>
+      <pre tabindex="0"><code>{rsyslog}</code></pre>
+      <p><code>@@</code> is TCP. Add TLS to match your logging setup. Keep 12 months or more on the central server. Any shipper that tails a file works the same way (Vector, Fluent Bit, Filebeat).</p>
+      <p>Two things to say plainly to the assessor:</p>
+      <ul class="facts">
+        <li>The log file is writable by the PHP worker user, because PHP writes it. A compromised application could alter the local copy. The central copy is the one to rely on (10.3.2, 10.3.3). Point file-integrity monitoring (10.3.4) at the rotated files.</li>
+        <li>Read access should be limited (10.3.1). The <code>0750</code> directory and <code>0640</code> files above do that. The <code>uri</code> path is logged; if your URLs carry personal data in the path, treat the log as containing it.</li>
+      </ul>
+
+      <h3 id="decision-record">5. The decision record</h3>
+      <p>Reviewers look for &ldquo;documented rationales for rule removals&rdquo; and &ldquo;a clear understanding of what's being excluded and why&rdquo; (<a href={CRS_PCI}>OWASP CRS on PCI DSS</a>). Howdah's levers are a rule's mode (<code>block</code>, <code>detect</code>, <code>off</code>) and a sink's allowlist. It has no per-URL or per-parameter exclusions. Record every change from the defaults in one table:</p>
+      <div class="tablewrap" tabindex="0" role="region" aria-label="Decision record template (scrolls sideways on narrow screens)">
+        <table>
+          <caption class="sr-only">Decision record template with example rows</caption>
+          <thead><tr><th scope="col">Rule or sink</th><th scope="col">Mode</th><th scope="col">Justification</th><th scope="col">Owner</th><th scope="col">Date</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">max_request_headers</th><td><code>detect</code></td><td>Our SSO proxy adds about 40 headers. Watching for 30 days before <code>block</code>.</td><td>J. Doe, web ops</td><td>2026-10-24</td></tr>
+            <tr><th scope="row">command_exec</th><td><code>block</code>, allow <code>/usr/bin/convert *</code></td><td>The thumbnailer is the only legitimate shell call.</td><td>J. Doe, web ops</td><td>2026-10-24</td></tr>
+            <tr><th scope="row">sql_injection</th><td><code>detect</code> (default)</td><td>Layer 2 is bypassable and does not stop the script. Used as a SIEM detection feed; alerts go to on-call.</td><td>A. Smith, security</td><td>2026-10-24</td></tr>
+            <tr><th scope="row">unserialize</th><td><code>off</code> (default)</td><td>Not opted in. The app unserializes only its own session data. Review at next release.</td><td>A. Smith, security</td><td>2026-10-24</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Then make the config file carry the same record, so the rationale lives next to the setting it explains:</p>
+      <pre tabindex="0"><code>{toml}</code></pre>
+      <p><code>grep -n DECISION /etc/howdah/howdah.toml</code> prints the record, and the version history of the file shows when each decision changed. Validate the file before deploying it: the <a href="/config/">config editor</a> checks it with the extension's own parser.</p>
+
+      <h3>6. Blocked-attack summary</h3>
+      <p>A count of blocks by rule, across the current and rotated files:</p>
+      <pre tabindex="0"><code>{byRule}</code></pre>
+      <p>Blocks per day and rule, tab-separated for a spreadsheet:</p>
+      <pre tabindex="0"><code>{byDay}</code></pre>
+      <p>The same count by rule on a host without <code>jq</code>:</p>
+      <pre tabindex="0"><code>{noJq}</code></pre>
+      <p>Replace <code>block</code> with <code>log</code> to see what the log-only rules recorded. PCI DSS 10.4.1 asks for security events to be reviewed at least once daily; this output is a starting point for that review, not a substitute for it.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h2 id="insurance">Cyber-insurance questionnaires and end-of-life PHP</h2>
+      <p>Insurance applications ask about end-of-life software directly. Beazley's application asks the applicant to confirm: &ldquo;You do not have any End of Life (Eol) software or Operating System (OS) exposed to the internet&rdquo;, Yes or No (<a href={BEAZLEY}>Beazley application</a>). If an internet-facing server runs PHP 8.1 or older (October 2026; check <a href={PHP_SUPPORTED}>php.net</a>), the true answer is No, with or without Howdah.</p>
+      <p>Howdah does not make an end-of-life PHP supported and does not patch it. It is a compensating control: it reduces exposure to some attack classes while the old runtime stays in place. It mitigates the multipart and input-flood shapes before they exhaust memory, refuses armed sink calls (<code>system</code>, <code>include</code>, <code>eval</code>, <code>unserialize</code>, <code>phar://</code>, internal outbound requests), and logs SQL-injection, traversal and command-injection shapes. It does not fix bugs in PHP's own code, does not see anything that fires before PHP extensions load, and does not cover the classes marked &ldquo;Not covered&rdquo; above. The full list is on the <a href="/coverage/">coverage</a> page.</p>
+      <p>Answer the question as asked and attach a short note: which hosts run which PHP version, why they cannot be upgraded yet, the planned upgrade date, which controls sit in front of them, and what those controls do not cover. Policies can limit or exclude cover for incidents involving end-of-life software or known unpatched vulnerabilities, &ldquo;not tied to the organisation having actual knowledge of the issue&rdquo; (<a href={ALLENS}>Allens, 2023</a>). A compensating control does not change those terms. Read your policy wording.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h2 id="frameworks">Other frameworks</h2>
+      <p>None of these frameworks names a WAF or requires Howdah. Each asks for outcomes. Howdah can be one of the measures you describe, and its log can be part of your evidence.</p>
+
+      <h3>NIS2</h3>
+      <p>NIS2 Article 21(1) asks essential and important entities to &ldquo;take appropriate and proportionate technical, operational and organisational measures to manage the risks posed to the security of network and information systems&rdquo;. Article 21(2) lists areas the measures must cover, including &ldquo;(b) incident handling&rdquo; and &ldquo;(e) security in network and information systems acquisition, development and maintenance, including vulnerability handling and disclosure&rdquo; (<a href={NIS2}>Directive (EU) 2022/2555, EUR-Lex</a>). It is a directive, so the binding text is your country's transposing law. If you run an end-of-life PHP application while a migration is under way, Howdah can be one documented measure for that risk, and its log can feed incident handling. It is not a substitute for the vulnerability handling itself.</p>
+
+      <h3>SOC 2</h3>
+      <p>SOC 2 reports test your controls against the AICPA Trust Services Criteria. The criteria describe outcomes, and you choose the controls. Three criteria are specific enough to map:</p>
+      <div class="tablewrap map" tabindex="0" role="region" aria-label="SOC 2 criteria mapping (scrolls sideways on narrow screens)">
+        <table>
+          <caption class="sr-only">SOC 2 criteria CC6.6, CC7.1 and CC7.2 and what Howdah contributes</caption>
+          <thead><tr><th scope="col">Criterion</th><th scope="col">Text</th><th scope="col">What Howdah contributes</th><th scope="col">What it does not</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">CC6.6</th><td>&ldquo;The entity implements logical access security measures to protect against threats from sources outside its system boundaries.&rdquo;</td><td>Refuses some malicious request shapes from outside: Layer 1 limits, and sinks you arm.</td><td>Network access control, authentication, anything outside PHP.</td></tr>
+            <tr><th scope="row">CC7.1</th><td>&ldquo;To meet its objectives, the entity uses detection and monitoring procedures to identify (1) changes to configurations that result in the introduction of new vulnerabilities, and (2) susceptibilities to newly discovered vulnerabilities.&rdquo;</td><td>A version-controlled <code>howdah.toml</code> with decision comments is a configuration change record. The log can show probes against a newly disclosed bug.</td><td>It does not scan for vulnerabilities or track your software versions.</td></tr>
+            <tr><th scope="row">CC7.2</th><td>&ldquo;The entity monitors system components and the operation of those components for anomalies that are indicative of malicious acts, natural disasters, and errors affecting the entity's ability to meet its objectives; anomalies are analyzed to determine whether they represent security events.&rdquo;</td><td>A structured event log of attack shapes for your monitoring.</td><td>The analysis. Someone, or your SIEM, has to read the log.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="legend">Criterion text: AICPA, TSP Section 100, 2017 Trust Services Criteria (March 2020 edition), from the <a href={AICPA}>AICPA</a>.</p>
+
+      <h3>HIPAA</h3>
+      <p>The HIPAA Security Rule is risk-based. One standard is specific enough to map:</p>
+      <div class="tablewrap map" tabindex="0" role="region" aria-label="HIPAA audit controls mapping (scrolls sideways on narrow screens)">
+        <table>
+          <caption class="sr-only">45 CFR 164.312(b) and what Howdah contributes</caption>
+          <thead><tr><th scope="col">Standard</th><th scope="col">Text</th><th scope="col">What Howdah contributes</th><th scope="col">What it does not</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">45 CFR 164.312(b), Audit controls</th><td>&ldquo;Implement hardware, software, and/or procedural mechanisms that record and examine activity in information systems that contain or use electronic protected health information.&rdquo;</td><td>Records one kind of activity: requests and calls that hit a Howdah rule. Bodies, cookies, <code>Authorization</code> headers and query strings are never logged.</td><td>It does not record who accessed which records. That has to come from the application. The <code>uri</code> path is logged, so a route that carries a patient identifier puts it in the log.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="legend">Text: <a href={ECFR}>45 CFR 164.312, eCFR</a>.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h2 id="sources">Sources</h2>
+      <ul class="facts">
+        <li>PCI SSC, <cite>PCI DSS v4.0.1 Requirements and Testing Procedures</cite>, June 2024: requirement 6.4.1 guidance (p. 151), 6.4.2 (p. 152), 6.2.4, 10.2.2, 10.3.1 to 10.3.4, 10.4.1, 10.5.1, 10.6.1. <a href={PCI_LIB}>Document library</a>.</li>
+        <li>Cloudaware, PCI DSS v4.0.1 6.4.2 text: <a href={CLOUDAWARE}>{CLOUDAWARE}</a></li>
+        <li>Contrast Security on Coalfire's evaluation (5 August 2019): <a href={COALFIRE}>{COALFIRE}</a></li>
+        <li>GuidePoint Security, using RASP for PCI DSS: <a href={GUIDEPOINT}>{GUIDEPOINT}</a></li>
+        <li>OWASP CRS, how CRS contributes to PCI DSS compliance (10 August 2025): <a href={CRS_PCI}>{CRS_PCI}</a></li>
+        <li>PHP security advisory for CVE-2024-4577: <a href={CVE_2024_4577}>{CVE_2024_4577}</a></li>
+        <li>PHP-FPM <code>catch_workers_output</code>: <a href={FPM_CONF}>{FPM_CONF}</a></li>
+        <li>PHP supported versions: <a href={PHP_SUPPORTED}>{PHP_SUPPORTED}</a></li>
+        <li>Beazley cyber insurance application: <a href={BEAZLEY}>{BEAZLEY}</a></li>
+        <li>Allens, limitations in cyber cover for known vulnerabilities and end-of-life systems (17 May 2023): <a href={ALLENS}>{ALLENS}</a></li>
+        <li>Directive (EU) 2022/2555 (NIS2), Article 21: <a href={NIS2}>{NIS2}</a></li>
+        <li>AICPA, 2017 Trust Services Criteria: <a href={AICPA}>{AICPA}</a></li>
+        <li>45 CFR 164.312: <a href={ECFR}>{ECFR}</a></li>
+      </ul>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  blockquote { margin: 1rem 0 1.5rem; padding: .25rem 0 .25rem 1.25rem; border-left: 4px solid var(--rule); max-width: 46rem; }
+  blockquote ul { margin: 0 0 .5rem; }
+  .note ul { margin: .25rem 0 0; padding-left: 1.2rem; }
+  .note li { margin-bottom: .4rem; }
+  .map tbody th { font-family: var(--sans); font-weight: 600; white-space: normal; min-width: 11rem; }
+  .facts a { overflow-wrap: anywhere; }
+</style>

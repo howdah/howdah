@@ -4,3 +4,4 @@ dist/
 public/demo/
 public/config/
 public/key.asc
+.build.lock/

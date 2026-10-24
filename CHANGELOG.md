@@ -27,6 +27,23 @@ All notable changes to Howdah are documented here. The format follows
   it. The wasm is no longer committed; the Pages workflow builds it from the
   same commit it deploys, and the site build fails if it is missing.
 
+### Docs
+- A compliance evidence page, `docs/compliance.md` and
+  https://howdah.org/docs/compliance/ (linked from the docs index and the
+  footer). It maps each bullet of PCI DSS 4.0.1 requirement 6.4.2 to what
+  Howdah does, the evidence to collect and what Howdah does not do; states
+  that acceptance of in-process enforcement for "installed in front of" is the
+  assessor's call; documents the eight log fields against PCI DSS 10.2.2;
+  gives a sample retention, rotation and off-host shipping setup, a
+  decision-record template for rule modes and allowlists, and `jq`/`awk`
+  one-liners for a blocked-attack summary; and covers end-of-life questions
+  on cyber-insurance forms, NIS2, SOC 2 and HIPAA. It says plainly that it is
+  not legal advice or a certification and that Howdah has had no third-party
+  audit.
+- The configuration page's log example used field names the extension never
+  writes (`id`, `ip`, an ISO timestamp) and said events could go to syslog.
+  It now shows a real line and says the log is a file only.
+
 ## [1.3.0] - 2026-10-24
 
 ### Added

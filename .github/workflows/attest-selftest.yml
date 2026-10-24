@@ -12,8 +12,6 @@ name: attest-selftest
 # entries for them to the public Sigstore transparency log).
 on:
   workflow_dispatch:
-  push:
-    branches: [feat/release-provenance]   # TEMPORARY: one run on the PR branch, removed before review
 
 permissions:
   contents: read

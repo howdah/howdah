@@ -25,6 +25,12 @@ extern "C" {
     /// code (0 ALLOW / 1 LOG / 2 BLOCK); on BLOCK the C trampoline neutralizes
     /// the call (returns false without invoking the original).
     pub fn howdah_install_sink_hooks(cb: HowdahSinkDecide);
+
+    /// Proxy the `phar://` stream wrapper's ops (see `phar_hook.c`). Returns 1 if
+    /// phar was found and proxied, 0 if phar is not registered (honest no-op).
+    /// Each op passes the full `phar://...` URL to `cb`; on BLOCK it returns the
+    /// missing-file sentinel without calling phar.
+    pub fn howdah_install_phar_hook(cb: HowdahSinkDecide) -> ::std::ffi::c_int;
 }
 
 /// The glue decision callback the C sink trampolines invoke. `sink` is a

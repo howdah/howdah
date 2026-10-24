@@ -328,16 +328,17 @@ neutralize (`RETVAL_FALSE` + return without calling the original) is **proven** 
 blocked call returns false, does not run, and the script continues, on all three ABIs.
 So **`command_exec` and `unserialize` support `block` in 1.2.**
 
-**Scope narrowed further (2026-10-23):** `include`/`eval` are **NOT hooked in 1.2** at
-all — not even detect. The opcode handler *fires* (proven, §9), but reading the include
-**path operand** across the PHP 5/7/8 ABI (CONST vs CV/VAR/TMP operands, per-generation
-stack macros) is known-fragile and was **not** proven, and an `include` guard without
-reliable path inspection is not worth shipping ("include of user paths" needs the path).
-So 1.2 **actively hooks only `command_exec` + `unserialize`**. The `[sinks.include]` /
-`[sinks.eval]` config and their FFI policy are built, tested and forward-compatible, but
-are **dormant/reserved** in 1.2 (no opcode handler is installed, so they never fire); the
-generated ini and docs label them "reserved — not active in 1.2." They activate in the
-Layer-3 fast-follow (§8) once the operand read is proven, together with `block` for them.
+**Scope, final (2026-10-23 — superseding the earlier narrowing):** the owner asked to add
+include/eval, so a follow-up spike settled the operand question. On **PHP 7.0+** the
+`ZEND_INCLUDE_OR_EVAL` opcode handler reads op1 (the include path / eval code) for both
+literal (`IS_CONST`) and dynamic (`IS_CV`/`IS_VAR`/`IS_TMP_VAR`) operands, classifies
+include vs eval via `extended_value`, and **neutralizes on block** by skipping the opcode
+(result NULL, `opline` advanced) — proven live on 7.4/8.3. On **PHP 5.x** it is NOT
+feasible (5.5+ stores operands off `execute_data` behind a `static inline` accessor an
+extension cannot call), so the opcode handler is not installed there and include/eval stay
+dormant; command_exec + unserialize still work on 5.x. **So 1.2 guards four sinks:
+command_exec + unserialize on all supported versions (5.4–8.5), include + eval (detect AND
+block) on PHP 7.0+ only.** phar:// and SSRF remain the Layer-3 fast-follow (§8).
 
 **10.5 `command_exec` `allow` patterns are full-string anchored — and literal, not
 regex.** A substring match would let an `allow` pattern `ls` also permit `ls; rm -rf /`,

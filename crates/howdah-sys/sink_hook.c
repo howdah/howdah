@@ -11,16 +11,30 @@
  * macros, which is why this lives in C (like `shim.c`) rather than in bindgen.
  * NTS only, like the rest of Howdah.
  *
- * 1.2 scope: this installs ONLY the function-table-swap sinks. include/eval
- * (the ZEND_INCLUDE_OR_EVAL opcode) are NOT hooked in 1.2 — see design §10.4.
+ * Two mechanisms:
+ *  - a function-table handler swap over the command/code-exec functions and
+ *    `unserialize` (all PHP versions), and
+ *  - a ZEND_INCLUDE_OR_EVAL user opcode handler for include/require/eval
+ *    (PHP 7.0+ ONLY — the PHP 5.x VM stores opcode operands off `execute_data`
+ *    behind a static-inline accessor not callable from an extension, so
+ *    include/eval stay dormant on 5.x; command_exec + unserialize still work
+ *    there). On include/eval BLOCK the opcode is skipped (result set NULL,
+ *    opline advanced) so the include/eval never runs and the script continues.
  */
 #include "main/php.h"
 #include "Zend/zend_API.h"
+#if PHP_VERSION_ID >= 70000
+#include "Zend/zend_compile.h"
+#include "Zend/zend_execute.h"
+#endif
 
+#include <string.h>
 #include <stddef.h>
 
 /* Sink ids: must match HOWDAH_SINK_* in howdah-core's ffi.rs. */
 #define HOWDAH_SINK_COMMAND_EXEC 0
+#define HOWDAH_SINK_INCLUDE      1
+#define HOWDAH_SINK_EVAL         2
 #define HOWDAH_SINK_UNSERIALIZE  3
 /* Action code returned by the decide callback (0 ALLOW, 1 LOG, 2 BLOCK) — this
  * is an ACTION, not a sink id (hence not in the HOWDAH_SINK_* family). */
@@ -119,9 +133,61 @@ HOWDAH_DEFINE_SINK(unserialize, "unserialize", HOWDAH_SINK_UNSERIALIZE)
     } while (0)
 #endif
 
-/* Install all Layer-3 function-table hooks. Call once at MINIT, after the
- * builtin modules have registered their functions. `cb` is the glue decision
- * callback; a NULL cb leaves the trampolines chaining unguarded. */
+#if PHP_VERSION_ID >= 70000
+/* ---- include/require/eval: ZEND_INCLUDE_OR_EVAL user opcode handler (7.0+) ----
+ * op1 is the filename (include/require) or the code (eval). Read it as a string,
+ * classify via extended_value, and ask the glue. On BLOCK, skip the opcode: set
+ * its result NULL (if used) and advance the instruction pointer, so the
+ * include/eval never runs and the VM continues. Fail-open (DISPATCH) on anything
+ * unexpected — a non-string op1, no callback, or a non-block decision. */
+static zval *howdah_op1_zval(zend_execute_data *execute_data) {
+    const zend_op *opline = EX(opline);
+    switch (opline->op1_type) {
+        case IS_CONST:
+#if PHP_VERSION_ID >= 70300
+            return RT_CONSTANT(opline, opline->op1);
+#else
+            return EX_CONSTANT(opline->op1);
+#endif
+        case IS_CV:
+        case IS_VAR:
+        case IS_TMP_VAR:
+            return EX_VAR(opline->op1.var);
+        default:
+            return NULL;
+    }
+}
+
+static int howdah_include_or_eval(zend_execute_data *execute_data) {
+    const zend_op *opline = EX(opline);
+    int is_eval = (opline->extended_value == ZEND_EVAL);
+    zval *v;
+    if (!howdah_g_decide) {
+        return ZEND_USER_OPCODE_DISPATCH;
+    }
+    v = howdah_op1_zval(execute_data);
+    if (!v || Z_TYPE_P(v) != IS_STRING) {
+        return ZEND_USER_OPCODE_DISPATCH; /* non-string operand: fail open */
+    }
+    {
+        int sink = is_eval ? HOWDAH_SINK_EVAL : HOWDAH_SINK_INCLUDE;
+        const char *name = is_eval ? "eval" : "include";
+        int d = howdah_g_decide(sink, name, strlen(name), Z_STRVAL_P(v), Z_STRLEN_P(v));
+        if (d == HOWDAH_ACTION_BLOCK) {
+            if (opline->result_type != IS_UNUSED) {
+                ZVAL_NULL(EX_VAR(opline->result.var));
+            }
+            EX(opline) = opline + 1; /* skip the include/eval */
+            return ZEND_USER_OPCODE_CONTINUE;
+        }
+    }
+    return ZEND_USER_OPCODE_DISPATCH;
+}
+#endif
+
+/* Install all Layer-3 hooks. Call once at MINIT, after the builtin modules have
+ * registered their functions. `cb` is the glue decision callback; a NULL cb
+ * leaves the trampolines chaining unguarded. */
 void howdah_install_sink_hooks(howdah_sink_decide_t cb) {
     howdah_g_decide = cb;
     HOWDAH_INSTALL_SINK(system, "system");
@@ -131,4 +197,7 @@ void howdah_install_sink_hooks(howdah_sink_decide_t cb) {
     HOWDAH_INSTALL_SINK(popen, "popen");
     HOWDAH_INSTALL_SINK(proc_open, "proc_open");
     HOWDAH_INSTALL_SINK(unserialize, "unserialize");
+#if PHP_VERSION_ID >= 70000
+    zend_set_user_opcode_handler(ZEND_INCLUDE_OR_EVAL, howdah_include_or_eval);
+#endif
 }

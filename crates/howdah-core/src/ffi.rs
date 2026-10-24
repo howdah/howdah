@@ -273,8 +273,9 @@ impl howdah_ctx {
     }
 
     /// Layer-3 sink check. `arg` is scanned, never logged. Independent of
-    /// `worst`/`log`: a hit goes only to `sink_log`. Include/Eval are
-    /// detect-only in 1.2 (clamped to Log even in block mode).
+    /// `worst`/`log`: a hit goes only to `sink_log`. All sinks honor block;
+    /// include/eval block is enforced by the C opcode handler (PHP 7.0+), which
+    /// is not installed on PHP 5.x, so on 5.x this is never called for them.
     fn sink_check(&mut self, sink: SinkId, name: &[u8], arg: &[u8]) -> Action {
         #[cfg(test)]
         if tests::FORCE_PANIC.with(|f| f.get()) {
@@ -313,13 +314,10 @@ impl howdah_ctx {
         let Some(reason) = matched else {
             return Action::Allow;
         };
-        let mut action = match mode {
+        let action = match mode {
             Mode::Block => Action::Block,
             _ => Action::Log,
         };
-        if matches!(sink, SinkId::Include | SinkId::Eval) && action == Action::Block {
-            action = Action::Log;
-        }
         let rec = EventRecord {
             ts: now(),
             request_id: self.request_id.clone(),
@@ -685,8 +683,7 @@ pub unsafe extern "C" fn howdah_take_log_line(ctx: *mut howdah_ctx) -> *mut c_ch
 /// function/construct, `arg` the sink argument (binary-safe; scanned, never
 /// logged). Returns 0 Allow / 1 Log / 2 Block. NULL ctx, unknown sink or panic
 /// returns 0 (fail-open: a sink-check bug must never neutralize a legitimate
-/// call). Include/eval never exceed Log. A hit is retrievable with
-/// `howdah_take_sink_log_line`.
+/// call). A hit is retrievable with `howdah_take_sink_log_line`.
 ///
 /// # Safety
 /// `ctx` NULL or live; `name`/`arg` NULL or valid for their lengths.
@@ -1207,18 +1204,29 @@ mod tests {
     }
 
     #[test]
-    fn include_eval_detect_only_even_in_block() {
+    fn include_eval_block_when_armed() {
+        // include/eval honor block (enforced by the C opcode handler on PHP 7+);
+        // the core returns Block and never logs the path/code (the arg).
         let c = init("[sinks.include]\nmode=\"block\"\nallow_paths=[\"/var/www/app\"]");
         begin(c);
-        assert_eq!(sink(c, HOWDAH_SINK_INCLUDE, "include", b"/etc/passwd"), HOWDAH_LOG);
+        assert_eq!(sink(c, HOWDAH_SINK_INCLUDE, "include", b"/etc/passwd"), HOWDAH_BLOCK);
         let line = take_sink(c).expect("line");
-        assert!(line.contains("\"action\":\"log\"") && line.contains("\"rule\":\"include\""), "{line}");
+        assert!(line.contains("\"action\":\"block\"") && line.contains("\"rule\":\"include\""), "{line}");
         assert!(!line.contains("passwd"), "{line}");
         unsafe { howdah_free(c) };
         let c = init("[sinks.eval]\nmode=\"block\"");
         begin(c);
-        assert_eq!(sink(c, HOWDAH_SINK_EVAL, "eval", b"1"), HOWDAH_LOG);
-        assert!(take_sink(c).unwrap().contains("\"rule\":\"eval\""));
+        assert_eq!(sink(c, HOWDAH_SINK_EVAL, "eval", b"1"), HOWDAH_BLOCK);
+        assert!(take_sink(c).unwrap().contains("\"action\":\"block\""));
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn include_detect_logs_not_block() {
+        let c = init("[sinks.include]\nallow_paths=[\"/var/www/app\"]");
+        begin(c);
+        assert_eq!(sink(c, HOWDAH_SINK_INCLUDE, "include", b"/etc/passwd"), HOWDAH_LOG);
+        assert!(take_sink(c).unwrap().contains("\"action\":\"log\""));
         unsafe { howdah_free(c) };
     }
 

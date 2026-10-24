@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use howdah_core::limits::rule_catalog;
-use howdah_core::log::{log_line, new_request_id, EventRecord, EVENT_FIELDS, SCHEMA_VERSION};
+use howdah_core::log::{log_line, new_request_id, rule_layer, EventRecord, EVENT_FIELDS, SCHEMA_VERSION};
 use howdah_core::rules::Action;
 use serde_json::Value;
 
@@ -156,6 +156,22 @@ fn schema_lists_exactly_the_emitted_fields() {
 }
 
 #[test]
+fn layer_enum_is_exactly_the_layers_rules_use() {
+    let s = schema();
+    let mut want: Vec<u64> = rule_catalog().iter().map(|r| u64::from(rule_layer(*r))).collect();
+    want.sort_unstable();
+    want.dedup();
+    let got: Vec<u64> = s["properties"]["layer"]["enum"]
+        .as_array()
+        .expect("layer has an enum")
+        .iter()
+        .map(|v| v.as_u64().unwrap())
+        .collect();
+    assert_eq!(got, want);
+    assert_eq!(want, vec![1, 2, 3, 4]);
+}
+
+#[test]
 fn every_rule_and_action_validates() {
     let s = schema();
     for r in rule_catalog() {
@@ -193,6 +209,7 @@ fn validator_rejects_broken_events() {
         ("missing layer", Box::new(|v| drop(v.as_object_mut().unwrap().remove("layer")))),
         ("layer as string", Box::new(|v| v["layer"] = Value::from("1"))),
         ("layer 0", Box::new(|v| v["layer"] = Value::from(0))),
+        ("layer 5", Box::new(|v| v["layer"] = Value::from(5))),
         ("schema 1", Box::new(|v| v["schema"] = Value::from(1))),
         ("ts as number", Box::new(|v| v["ts"] = Value::from(1761318132123u64))),
         ("ts iso", Box::new(|v| v["ts"] = Value::from("2026-10-24T09:41:02Z"))),

@@ -12,7 +12,7 @@
 use crate::limits::RuleId;
 use crate::rules::Action;
 
-/// Version of the event line format. 1 was the unversioned 1.0-1.3 line.
+/// Version of the event line format. 1 was the unversioned 1.0 to 1.4.0 line.
 pub const SCHEMA_VERSION: u32 = 2;
 
 /// Every key of a schema-2 event line, in documentation order.
@@ -23,8 +23,9 @@ pub const EVENT_FIELDS: [&str; 11] = [
 
 /// The protection layer a rule belongs to: 1 = request-shape limits
 /// (multipart, input shape, request headers, and the self-test marker),
-/// 2 = input inspection, 3 = sink hardening. Exhaustive on purpose: a new
-/// `RuleId` variant does not compile until it is given a layer.
+/// 2 = input inspection, 3 = sink hardening, 4 = after-breach behaviour.
+/// Exhaustive on purpose: a new `RuleId` variant does not compile until it is
+/// given a layer.
 pub fn rule_layer(r: RuleId) -> u8 {
     match r {
         RuleId::MaxParts
@@ -49,6 +50,7 @@ pub fn rule_layer(r: RuleId) -> u8 {
         | RuleId::Unserialize
         | RuleId::Phar
         | RuleId::Ssrf => 3,
+        RuleId::UploadExec | RuleId::UnexpectedBinary | RuleId::UnexpectedEgress | RuleId::PhpWrite => 4,
     }
 }
 
@@ -262,7 +264,12 @@ mod tests {
             (RuleId::Unserialize, 3),
             (RuleId::Phar, 3),
             (RuleId::Ssrf, 3),
+            (RuleId::UploadExec, 4),
+            (RuleId::UnexpectedBinary, 4),
+            (RuleId::UnexpectedEgress, 4),
+            (RuleId::PhpWrite, 4),
         ];
+        assert_eq!(rule_catalog().len(), 28);
         assert_eq!(want.len(), rule_catalog().len(), "layer table and rule_catalog differ");
         for r in rule_catalog() {
             let w = want.iter().find(|(x, _)| x == r).unwrap_or_else(|| panic!("{r:?} has no layer in this table")).1;

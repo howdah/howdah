@@ -6,7 +6,7 @@
   "required": ["schema", "version", "ts", "request_id", "layer", "rule", "action", "client_ip", "method", "uri", "reason"],
   "properties": {
     "schema": {
-      "description": "Version of this line format. 2 since Howdah 1.4; 1.0 to 1.3 lines have no `schema` key (treat them as 1).",
+      "description": "Version of this line format: 2 in releases after 1.4.0. Lines from 1.0 to 1.4.0 have no `schema` key (treat them as 1).",
       "type": "integer",
       "const": 2
     },
@@ -27,9 +27,9 @@
       "maxLength": 64
     },
     "layer": {
-      "description": "Protection layer of `rule`: 1 = request-shape limits (multipart, input shape, request headers, self-test), 2 = input inspection, 3 = sink hardening. A future layer adds the next integer.",
+      "description": "Protection layer of `rule`: 1 = request-shape limits (multipart, input shape, request headers, self-test), 2 = input inspection, 3 = sink hardening, 4 = after-breach behaviour. A future layer is added to this enum without changing `schema`.",
       "type": "integer",
-      "minimum": 1
+      "enum": [1, 2, 3, 4]
     },
     "rule": {
       "description": "Rule name, the same spelling as the [rules], [inspect.rule_modes] and [sinks.<sink>] config keys. The full list is in docs/log-schema.md.",

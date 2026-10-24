@@ -42,7 +42,8 @@ test('every log field the core writes is documented', () => {
   const src = readFileSync(resolve(site, '../crates/howdah-core/src/log.rs'), 'utf8');
   const body = src.match(/serde_json::json!\(\{([\s\S]*?)\}\)/)?.[1] ?? '';
   const fields = [...body.matchAll(/"(\w+)":/g)].map((m) => m[1]);
-  assert.equal(fields.length, 8, 'unexpected log_line shape in log.rs');
+  // Schema 2: the eight 1.x fields plus schema, version and layer.
+  assert.equal(fields.length, 11, 'unexpected log_line shape in log.rs');
   // Scoped styles add data-astro-cid-* attributes, so allow attributes on <code>.
   for (const f of fields) assert.match(html, new RegExp(`<code[^>]*>${f}</code>`), `field ${f} not documented`);
 });

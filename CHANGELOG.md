@@ -58,22 +58,68 @@ All notable changes to Howdah are documented here. The format follows
   prints the ini scan directory.
 - The install picker offers cPanel, Plesk, CloudLinux and distribution EL PHP,
   with the repository and package commands for each.
+- Event log schema 2. Every line gains `schema` (the integer 2), `version`
+  (the extension version) and `layer` (1 request-shape limits, 2 input
+  inspection, 3 sinks, derived from the rule). The eight 1.x fields keep their
+  names and types, so existing consumers keep working. The contract is
+  `docs/log-schema.md`, with a JSON Schema in `docs/howdah-event.schema.json`;
+  tests check both against what the code writes for every rule.
+- `[log] destination = "file" | "syslog" | "stderr"` in the TOML file, with
+  `syslog_facility` (default `local0`) and `syslog_ident` (default `howdah`).
+  The default, `file`, is the 1.x behaviour. Syslog lines go to `/dev/log`
+  framed as glibc frames them (severity warning for `block`, notice for
+  `log`), written by Howdah itself rather than through `openlog()`, which PHP
+  owns and resets at the end of every request. A missing socket or a full
+  daemon queue sends the line to stderr; the request never waits. Tested on
+  PHP 7.4 and 8.3 (built-in server and php-fpm), Apache mod_php prefork on
+  8.3, and against a real journald.
+- `[log] exec`: run a program once per event with the JSON line on stdin.
+  Off unless set; the path must be absolute. The program gets no arguments,
+  an environment of only `HOWDAH_RULE`, `HOWDAH_ACTION` and a fixed `PATH`,
+  no inherited descriptors besides stdin/stdout/stderr, and its own session;
+  Howdah does not wait for it. At most `exec_rate_limit` starts per second
+  (default 10, 1 to 100) and 64 running hooks per PHP process; a missing,
+  non-executable or world-writable program is refused. It runs as the PHP
+  worker user: see the security notes in `docs/config.md`.
+- `php --ri howdah` rows `Log hook ([log] exec)` (when set) and
+  `Log schema => 2`.
+- SIEM starting points in `docs/integrations/`: a Wazuh decoder and rules
+  (event file or syslog) and a Promtail pipeline for Loki, run against real
+  event lines in wazuh-manager 4.12.0 and Promtail 3.5.1 by
+  `lab/integration/siem_snippets.sh`.
+- `lab/integration/log_contract.sh`: `[log] path`, the three destinations and
+  the hook against the real extension, under `php -S` and php-fpm.
+
 
 ### Changed
 - `docs/install-repos.md` no longer says the apt index lists only the latest
   publish (it keeps every version), and says the Debian/Ubuntu package also
   fits the distribution's own PHP, which provides the same `phpapi-<N>`
   (checked with Ubuntu 20.04's PHP 7.4).
+- The `php --ri howdah` row `Log (howdah.log)` is now `Log destination` and
+  shows where lines actually go, for example
+  `/var/log/howdah/events.log (from [log] path)` or
+  `syslog (/dev/log, facility local0, ident howdah)`.
+- The config editor and `cfg.howdah.org` refuse to load a file with any
+  `[log]` key (before, only `path`), because the form cannot carry the new
+  keys and a round trip would drop them.
 
 ### Fixed
+- `[log] path` in the TOML file was parsed but ignored. It is now used when
+  `howdah.log` is empty; `howdah.log` still wins when both are set.
+- Request ids repeated across php-fpm workers and Apache prefork children:
+  each worker forked with the parent's id counter and hash keys, so the lab
+  saw three FPM workers log the same id. The id now also hashes the process
+  id and the clock.
+- An event line was written to the log file in two `write()` calls (the line,
+  then the newline), so lines from concurrent workers could interleave. It is
+  one call now.
 - Stale trust surfaces: `SECURITY.md` (supported versions, scope, response
   times, key fingerprint), the site status banner (now names all three
   layers), the config editor notes that said `include`/`eval` are PHP 7.0+
   only (they are active on 5.x since 1.3), and the "not live yet" banners in
   `docs/install-repos.md` and `packaging/repo/GO-LIVE.md`. Added issue and
   pull request templates.
-- `docs/config.md` claimed `[log] path` in the TOML overrides `howdah.log`;
-  the extension never reads it. The log path is set only by the ini directive.
 - The browser demo ran a stale core: `site/demo/howdah_wasm.wasm` was a
   committed binary last built at 1.0 and nothing in the site deploy rebuilt
   it. The wasm is no longer committed; the Pages workflow builds it from the
@@ -85,7 +131,7 @@ All notable changes to Howdah are documented here. The format follows
   footer). It maps each bullet of PCI DSS 4.0.1 requirement 6.4.2 to what
   Howdah does, the evidence to collect and what Howdah does not do; states
   that acceptance of in-process enforcement for "installed in front of" is the
-  assessor's call; documents the eight log fields against PCI DSS 10.2.2;
+  assessor's call; documents the log fields against PCI DSS 10.2.2;
   gives a sample retention, rotation and off-host shipping setup, a
   decision-record template for rule modes and allowlists, and `jq`/`awk`
   one-liners for a blocked-attack summary; and covers end-of-life questions
@@ -93,8 +139,12 @@ All notable changes to Howdah are documented here. The format follows
   not legal advice or a certification and that Howdah has had no third-party
   audit.
 - The configuration page's log example used field names the extension never
-  writes (`id`, `ip`, an ISO timestamp) and said events could go to syslog.
-  It now shows a real line and says the log is a file only.
+  writes (`id`, `ip`, an ISO timestamp) and said events could go to syslog
+  when they could not. It and the home page now show real lines from a lab
+  run, and the configuration page documents every field, the three
+  destinations, the hook and a "Ship to a SIEM" section. `docs/config.md`
+  documents rotation (the file is opened per event, so rename-based rotation
+  and `copytruncate` both work without a reload) and file permissions.
 
 ## [1.4.0] - 2026-10-24
 

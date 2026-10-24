@@ -22,7 +22,7 @@
     { key: 'howdah.mode', type: 'enum', values: MODES, default: 'detect',
       note: 'block refuses offending requests, detect logs only, off disables everything. The shipped default is detect. Critical limits block even in detect. Once howdah.config names a readable file, the file’s mode is used and this value is ignored.' },
     { key: 'howdah.log', type: 'path', default: '/var/log/howdah/events.log', suggested: true,
-      note: 'Where JSON event lines are written; empty means the SAPI error log. The directory must exist and be writable by the PHP worker (a subdirectory of /var/log, not /var/log itself). This ini directive is the only way to set the log path.' },
+      note: 'Where JSON event lines are written. The directory must exist and be writable by the PHP worker (a subdirectory of /var/log, not /var/log itself). It wins over [log] path in the TOML file. Empty, with no [log] table, means stderr, which php-fpm discards unless catch_workers_output = yes. Syslog and a per-event hook are set in a [log] table, which this page does not edit yet.' },
     { key: 'howdah.config', type: 'path', default: '/etc/howdah/howdah.toml', suggested: true,
       note: 'Path of the TOML file below. If the file is missing or cannot be read, Howdah uses howdah.mode and the built-in limits. If the file is present but malformed, Howdah falls back to its safe defaults (block mode, default limits) and keeps serving, and phpinfo still names the file: validate before deploying.' }
   ];

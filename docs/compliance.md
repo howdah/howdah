@@ -55,8 +55,8 @@ The same bullet text is reproduced at
 |---|---|---|---|
 | Installed in front of public-facing web applications and configured to detect and prevent web-based attacks | Loads into every PHP worker as an extension. Checks the request as PHP parses it, which for most inputs is before the application's first line runs (Layers 1 and 2; see the timing note below). Checks dangerous function calls while the application runs (Layer 3). | `php --ri howdah` for each PHP build; `howdah-check web` output against the live site; the `howdah.ini` and `howdah.toml` files in use. | It is not on the network. It never sees requests that do not reach PHP: static files, non-PHP applications, and bugs that fire before PHP extensions load. It does not cover XSS, CSRF, authentication, access control or business logic. See [the 6.2.4 table](#which-attack-classes-howdah-sees). |
 | Actively running and up to date as applicable | Runs on every request while loaded. Its rules are compiled into the extension; there is no separate signature feed. "Up to date" means the latest release for your PHP minor and a reviewed config. | Installed package version and `php --ri howdah` "Version" row, compared with the [latest release](https://github.com/howdah/howdah/releases); a daily `howdah-check web` run and the `self_test` log line it leaves. | It does not update itself. It does not alert you if it stops loading: PHP starts without an extension it cannot load, and a malformed TOML falls back to built-in defaults. Watch for the daily `self_test` line. |
-| Generating audit logs | Writes one JSON line per security event to the file named by `howdah.log`: `ts`, `request_id`, `rule`, `action`, `client_ip`, `method`, `uri`, `reason`. | The `howdah.log` setting, sample lines, the rotation config and the off-host shipping config ([below](#3-the-audit-log)). | No syslog or network transport: it writes a file only. Lines are not signed or chained. The file is writable by the PHP user. It logs security events, not every request. It never logs bodies, cookies, `Authorization` headers, query strings, matched values or sink arguments. |
-| Configured to either block web-based attacks or generate an alert that is immediately investigated | Layer 1 Critical rules block (403/413) in both `block` and `detect` mode. Standard rules block in `block` mode. Layer 2 and the Layer 3 sinks only log (and `unserialize`, `phar` and `ssrf` are off) until you arm a class or sink with `mode = "block"`. | `howdah.toml` with each mode and the reason for it ([decision record](#5-the-decision-record)); for log-only rules, the alert rule in your log system and records of alerts being investigated. | It sends no alerts: no email, webhook or pager. Alerting has to come from your log pipeline. An armed Layer 2 class does not stop the script: the variable reaches the application and the 403 is set at the end of the request. Treat Layer 2 as detection. |
+| Generating audit logs | Writes one JSON line per security event to a log file (`howdah.log`, or `[log] path`) or to the local syslog socket (`[log] destination = "syslog"`): `schema`, `version`, `ts`, `request_id`, `layer`, `rule`, `action`, `client_ip`, `method`, `uri`, `reason`. | The `php --ri howdah` "Log destination" row, sample lines, the rotation config and the off-host shipping config ([below](#3-the-audit-log)). | No network transport of its own: it writes a file, the local syslog socket or stderr, and shipping off the host is your collector's job. Lines are not signed or chained. A log file is writable by the PHP user. It logs security events, not every request. It never logs bodies, cookies, `Authorization` headers, query strings, matched values or sink arguments. |
+| Configured to either block web-based attacks or generate an alert that is immediately investigated | Layer 1 Critical rules block (403/413) in both `block` and `detect` mode. Standard rules block in `block` mode. Layer 2 and the Layer 3 sinks only log (and `unserialize`, `phar` and `ssrf` are off) until you arm a class or sink with `mode = "block"`. | `howdah.toml` with each mode and the reason for it ([decision record](#5-the-decision-record)); for log-only rules, the alert rule in your log system (or the `[log] exec` program) and records of alerts being investigated. | It has no built-in email, webhook or pager integration. Alerts come from your log pipeline, or from a program you write that Howdah runs once per event (`[log] exec`, at most 10 starts per second per PHP process by default; beyond that events are logged but not passed on). An armed Layer 2 class does not stop the script: the variable reaches the application and the 403 is set at the end of the request. Treat Layer 2 as detection. |
 
 Enforcement timing differs by layer. The multipart limits refuse the request
 while the body is parsed, before the script runs. The input-shape and header
@@ -179,19 +179,32 @@ Set the log path explicitly:
 howdah.log = /var/log/howdah/events.log
 ```
 
-If `howdah.log` is empty, or the file cannot be opened, Howdah writes the line
-to the process's stderr with a `howdah-event` prefix. PHP-FPM sends worker
-stderr to `/dev/null` unless `catch_workers_output = yes`
+or send the lines to the host's syslog (journald or rsyslog) in the TOML file,
+which avoids file permissions and gives you the host's existing shipping:
+
+```toml
+[log]
+destination = "syslog"   # facility local0, tag "howdah" unless set
+```
+
+If neither is set, or the file cannot be opened, or there is no syslog socket,
+Howdah writes the line to the process's stderr with a `howdah-event` prefix.
+PHP-FPM sends worker stderr to `/dev/null` unless `catch_workers_output = yes`
 ([php.net](https://www.php.net/manual/en/install.fpm.configuration.php)), so an
-unset log path on FPM can mean no log at all.
+unset log path on FPM can mean no log at all. `php --ri howdah` shows where
+lines go in its "Log destination" row.
 
 Each line is one JSON object with exactly these fields (from
-`crates/howdah-core/src/log.rs`):
+`crates/howdah-core/src/log.rs`; the full contract is
+[log-schema.md](log-schema.md)):
 
 | Field | Content | PCI DSS 10.2.2 element |
 |---|---|---|
+| `schema` | Version of the line format, `2`. Lines from Howdah 1.0 to 1.3 have no `schema` key. | (format) |
+| `version` | Version of the Howdah extension that wrote the line. | (provenance) |
 | `ts` | UTC time of the event, Unix epoch milliseconds, as a string. Taken from the system clock, so keep NTP running (10.6.1). | Date and time |
 | `request_id` | An id for the request. The block response body prints it, so a user's report maps to one line. | (correlation) |
+| `layer` | Which protection layer the rule belongs to: 1 request-shape limits, 2 input inspection, 3 sinks. | Type of event |
 | `rule` | The rule or sink that fired, for example `max_parts`, `sql_injection`, `command_exec`. | Type of event |
 | `action` | `block` (refused) or `log` (allowed and recorded). | Success and failure indication |
 | `client_ip` | `REMOTE_ADDR` as PHP sees it. Behind a proxy or CDN this is the proxy's address. | Origination of event |
@@ -203,12 +216,13 @@ Howdah does not know who the application user is, so there is no user
 identification field (10.2.2's first element). Correlate with your web server
 and application logs by time, client IP and path.
 
-Sample lines (keys are written in this sorted order):
+Sample lines from a lab run (PHP 7.4, php-fpm; keys are written in sorted
+order):
 
 ```json
-{"action":"block","client_ip":"203.0.113.7","method":"POST","reason":"multipart file count exceeds limit","request_id":"2a9f3c1e7b5d0a4c62","rule":"max_files","ts":"1792834862000","uri":"/upload.php"}
-{"action":"log","client_ip":"198.51.100.23","method":"GET","reason":"sql_injection pattern in get variable 'id'","request_id":"2b51c08e9d3a7f6e14","rule":"sql_injection","ts":"1792834901000","uri":"/product.php"}
-{"action":"log","client_ip":"192.0.2.44","method":"POST","reason":"non-allowlisted command via shell_exec","request_id":"2c07d4e1a96b3f8c25","rule":"command_exec","ts":"1792834977000","uri":"/admin/tools.php"}
+{"action":"block","client_ip":"203.0.113.7","layer":1,"method":"POST","reason":"multipart part count exceeds limit","request_id":"12feab0bc42ea29d0","rule":"max_parts","schema":2,"ts":"1792862615157","uri":"/index.php","version":"1.3.0"}
+{"action":"log","client_ip":"203.0.113.7","layer":2,"method":"GET","reason":"sql_injection pattern in get variable 'q'","request_id":"1aa8be308b30a2f10","rule":"sql_injection","schema":2,"ts":"1792862615161","uri":"/index.php","version":"1.3.0"}
+{"action":"log","client_ip":"203.0.113.7","layer":3,"method":"GET","reason":"non-allowlisted command via system","request_id":"16fbb40494928d080","rule":"command_exec","schema":2,"ts":"1792862615164","uri":"/index.php","version":"1.3.0"}
 ```
 
 Layers 1 and 2 write at most one line per request: the most severe hit. Each
@@ -260,7 +274,9 @@ Two things to say plainly to the assessor:
 - The log file is writable by the PHP worker user, because PHP writes it. A
   compromised application could alter the local copy. The central copy is the
   one to rely on (10.3.2, 10.3.3). Point file-integrity monitoring (10.3.4) at
-  the rotated files.
+  the rotated files. With `[log] destination = "syslog"` the PHP user cannot
+  rewrite lines already written, but any local process can send lines tagged
+  `howdah`, so the central copy is still the one to rely on.
 - Read access should be limited (10.3.1). The `0750` directory and `0640`
   files above do that. The `uri` path is logged; if your URLs carry personal
   data in the path, treat the log as containing it.

@@ -12,7 +12,7 @@ small, tested starting points:
 `lab/integration/siem_snippets.sh` runs both against real event lines in the
 real tools (Promtail 3.5.1 `--dry-run`, and `wazuh-logtest` in
 wazuh-manager 4.12.0). It needs Docker and network access to pull the images.
-`site/test/integrations.test.mjs` checks on every CI run that the files still
+`site/test/log-contract.test.mjs` checks on every CI run that the files still
 parse and only use fields the schema defines.
 
 ## Wazuh

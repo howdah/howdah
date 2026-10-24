@@ -2,12 +2,10 @@
 // unless dist/config/index.html is newer than the page source.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, statSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { ensureBuilt, site } from './build-site.mjs';
 
-const site = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const out = resolve(site, 'dist/config/index.html');
 // Every source whose change must trigger a rebuild before these checks run.
 const srcs = [
@@ -18,15 +16,7 @@ const srcs = [
   'src/components/Footer.astro',
 ].map((p) => resolve(site, p));
 
-function fresh() {
-  if (!existsSync(out)) return false;
-  const built = statSync(out).mtimeMs;
-  return srcs.every((s) => existsSync(s) && built >= statSync(s).mtimeMs);
-}
-if (!fresh()) {
-  const r = spawnSync('npm', ['run', 'build'], { cwd: site, encoding: 'utf8' });
-  if (r.status !== 0) console.error(r.stdout, r.stderr);
-}
+ensureBuilt(out, srcs);
 const html = existsSync(out) ? readFileSync(out, 'utf8') : '';
 
 test('the config page is built', () => {

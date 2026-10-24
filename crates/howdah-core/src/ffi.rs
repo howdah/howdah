@@ -423,6 +423,29 @@ impl howdah_ctx {
         action
     }
 
+    /// A host too long to resolve (>256 bytes; DNS max is 253) is never
+    /// legitimate and can hide a zero-padded numeric IP, so it is treated as
+    /// suspicious per the effective mode. The host bytes are never logged.
+    fn sink_ssrf_oversize(&mut self) -> Action {
+        let mode = self.config.sinks.effective_mode(SinkId::Ssrf, self.config.mode);
+        if mode == Mode::Off {
+            return Action::Allow;
+        }
+        let action = if mode == Mode::Block { Action::Block } else { Action::Log };
+        let rec = EventRecord {
+            ts: now(),
+            request_id: self.request_id.clone(),
+            rule: RuleId::Ssrf,
+            action,
+            client_ip: self.meta.client_ip.clone(),
+            method: self.meta.method.clone(),
+            uri: self.meta.uri.clone(),
+            reason: "ssrf: oversize host (>256 bytes), not resolvable - treated as suspicious".to_string(),
+        };
+        self.sink_log = Some(log_line(&rec));
+        action
+    }
+
     /// Record the self-test marker: always a Log event, NEVER a block. A
     /// Standard hit would block in `mode = block`, so clamp Block to Log. Off
     /// (global or per-rule) stays silent. Never masks an already-decided Block.
@@ -884,7 +907,8 @@ pub unsafe extern "C" fn howdah_sink_check_ssrf(
 /// SSRF parse seam: parse the target of an intercepted outbound call so the C
 /// shim never parses URLs itself. `scheme_required != 0` selects
 /// `HostForm::SchemeRequired` (URL-only sinks), else `BareHostOk` (fsockopen,
-/// curl). Returns 1 ("act") after writing the clean host (no userinfo/brackets/
+/// curl). Returns 2 when the host parsed but is longer than `out_host_cap`
+/// (suspicious: nothing is written; call `howdah_sink_ssrf_oversize`). Returns 1 ("act") after writing the clean host (no userinfo/brackets/
 /// port, lowercased) to `out_host`, its length to `*out_host_len` and the port
 /// (0 if none) to `*out_port`. Returns 0 ("skip") for a non-network target
 /// (local path, `unix://`, no scheme when required), a host that does not fit
@@ -912,7 +936,7 @@ pub unsafe extern "C" fn howdah_ssrf_prepare(
             return 0;
         };
         if h.name.len() > out_host_cap {
-            return 0;
+            return 2; // oversize: suspicious, see howdah_sink_ssrf_oversize
         }
         std::ptr::copy_nonoverlapping(h.name.as_ptr(), out_host, h.name.len());
         *out_host_len = h.name.len();
@@ -920,6 +944,21 @@ pub unsafe extern "C" fn howdah_ssrf_prepare(
         1
     }))
     .unwrap_or(0)
+}
+
+/// Verdict for an oversize (>cap) SSRF host, called when `howdah_ssrf_prepare`
+/// returned 2. 0 Allow (off) / 1 Log / 2 Block per the effective SSRF mode;
+/// stashes a log line with no host bytes. NULL ctx or panic is 0.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_sink_ssrf_oversize(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| code((*ctx).sink_ssrf_oversize())));
+    r.unwrap_or(HOWDAH_ALLOW)
 }
 
 /// Take the pending sink log line, or NULL if none. Same ownership contract as
@@ -1509,6 +1548,28 @@ mod tests {
     }
 
     #[test]
+    fn ssrf_oversize_follows_mode() {
+        let c = init("[sinks.ssrf]\nmode=\"block\"");
+        begin(c);
+        assert_eq!(unsafe { howdah_sink_ssrf_oversize(c) }, HOWDAH_BLOCK);
+        let l = unsafe { howdah_take_sink_log_line(c) };
+        assert!(!l.is_null());
+        let s = unsafe { std::ffi::CStr::from_ptr(l) }.to_string_lossy().into_owned();
+        assert!(s.contains("oversize host") && s.contains("ssrf"), "{s}");
+        unsafe { howdah_free_str(l) };
+        unsafe { howdah_free(c) };
+        let c = init("[sinks.ssrf]\nmode=\"detect\"");
+        begin(c);
+        assert_eq!(unsafe { howdah_sink_ssrf_oversize(c) }, 1);
+        unsafe { howdah_free(c) };
+        let c = init("");
+        begin(c);
+        assert_eq!(unsafe { howdah_sink_ssrf_oversize(c) }, HOWDAH_ALLOW);
+        unsafe { howdah_free(c) };
+        assert_eq!(unsafe { howdah_sink_ssrf_oversize(std::ptr::null_mut()) }, 0);
+    }
+
+    #[test]
     fn ssrf_prepare_skips() {
         let (mut buf, mut n, mut port) = ([0u8; 8], 0usize, 0u16);
         let mut run = |i: &[u8], f: i32| unsafe {
@@ -1517,7 +1578,7 @@ mod tests {
         assert_eq!(run(b"/etc/passwd", 1), 0); // local path
         assert_eq!(run(b"unix:///var/run/x.sock", 0), 0);
         assert_eq!(run(b"example.com", 1), 0); // no scheme when required
-        assert_eq!(run(b"http://averyveryverylonghost.example/", 1), 0); // oversize
+        assert_eq!(run(b"http://averyveryverylonghost.example/", 1), 2); // oversize, not skip
         let r = unsafe {
             howdah_ssrf_prepare(std::ptr::null(), 0, 1, std::ptr::null_mut(), 0, std::ptr::null_mut(), std::ptr::null_mut())
         };

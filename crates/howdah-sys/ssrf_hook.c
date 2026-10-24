@@ -55,6 +55,9 @@ extern int howdah_ssrf_prepare(const unsigned char *input, size_t input_len,
                                size_t out_host_cap, size_t *out_host_len,
                                uint16_t *out_port);
 
+/* Returns the action for an oversize (>cap) host: 0 allow / 1 log / 2 block. */
+extern int howdah_sink_ssrf_oversize(void *ctx);
+
 static howdah_ssrf_decide_t g_decide = NULL;
 static howdah_ssrf_armed_t g_armed = NULL;
 static void *g_ctx = NULL;
@@ -144,6 +147,7 @@ static int ssrf_should_block(const char *arg, size_t arglen, int scheme_required
     unsigned char local[HOWDAH_MAX_IPS * HOWDAH_REC];
     const unsigned char *ips = NULL;
     size_t hlen = 0, count = 0, i;
+    int prep;
     uint16_t port = 0;
     const char *scheme = "";
     size_t scheme_len = 0;
@@ -151,9 +155,11 @@ static int ssrf_should_block(const char *arg, size_t arglen, int scheme_required
 
     if (!g_decide || !g_armed) return 0;
     if (!g_armed(g_ctx)) return 0; /* SSRF off: zero overhead */
-    if (!howdah_ssrf_prepare((const unsigned char *)arg, arglen, scheme_required,
-                             hostbuf, HOWDAH_HOST_MAX, &hlen, &port))
-        return 0; /* not a network target */
+    prep = howdah_ssrf_prepare((const unsigned char *)arg, arglen, scheme_required,
+                               hostbuf, HOWDAH_HOST_MAX, &hlen, &port);
+    if (prep == 0) return 0; /* not a network target */
+    /* Oversize host (could hide a zero-padded numeric IP): Rust decides. */
+    if (prep == 2) return howdah_sink_ssrf_oversize(g_ctx) == HOWDAH_ACTION_BLOCK;
     if (hlen > HOWDAH_HOST_MAX) return 0;
     hostbuf[hlen] = '\0';
 
@@ -253,7 +259,8 @@ static void map_del(long key) {
 static void map_set(long key, const char *u, size_t len) {
     int i, free_i = -1;
     char *copy;
-    if (len > HOWDAH_URL_MAX) { map_del(key); return; }
+    map_del(key); /* clear first: an OOM or overflow must not leave a stale URL */
+    if (len > HOWDAH_URL_MAX) return;
     copy = (char *)malloc(len + 1);
     if (!copy) return;
     memcpy(copy, u, len);
@@ -365,10 +372,14 @@ static void howdah_hook_curl_reset(INTERNAL_FUNCTION_PARAMETERS) {
 }
 
 static void howdah_hook_curl_close(INTERNAL_FUNCTION_PARAMETERS) {
+#if PHP_VERSION_ID < 80000
     zval *h;
     long k;
     HOWDAH_ARG(1, h);
     if (handle_key(h, &k)) map_del(k);
+#endif
+    /* PHP 8.0+: curl_close is a no-op and the handle stays usable, so keep the
+     * entry (curl_init clears a reused handle key). */
     howdah_orig_curl_close(INTERNAL_FUNCTION_PARAM_PASSTHRU);
 }
 

@@ -47,6 +47,12 @@ extern "C" {
     pub fn howdah_ssrf_request_reset();
 }
 
+extern "C" {
+    /// Verdict for an oversize SSRF host (`howdah_ssrf_prepare` returned 2); used
+    /// by `ssrf_hook.c`. Implemented in howdah-core. 0 allow / 1 log / 2 block.
+    pub fn howdah_sink_ssrf_oversize(ctx: *mut ::std::ffi::c_void) -> ::std::ffi::c_int;
+}
+
 /// `howdah_sink_ssrf_armed`-shaped callback: 1 iff SSRF guarding is armed.
 pub type HowdahSsrfArmed = unsafe extern "C" fn(ctx: *mut ::std::ffi::c_void) -> ::std::ffi::c_int;
 

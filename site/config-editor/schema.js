@@ -75,7 +75,7 @@
   // The core accepts every rule name under [rules], but the extension reads
   // Layer 2 overrides only from [inspect.rule_modes] and sink modes only from
   // [sinks.<sink>] mode; a [rules] entry for those names has no effect.
-  var NOOP_NOTE = 'Accepted by the core but has no effect: the extension does not read [rules] for this name. Use the Layer 2 per-class override ([inspect.rule_modes]) the sink’s own mode ([sinks.<sink>] mode), or the Layer 4 [behavior] mode instead.';
+  var NOOP_NOTE = 'Accepted by the core but has no effect: the extension does not read [rules] for this name. Use the Layer 2 per-class override ([inspect.rule_modes]), the sink’s own mode ([sinks.<sink>] mode), or the Layer 4 [behavior] mode instead.';
 
   // The [rules] keys are built from the core's catalog at runtime so the form
   // can never offer a rule the core rejects, or miss one it accepts.

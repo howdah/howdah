@@ -73,9 +73,14 @@ fn facet_active(caller: &str, allowlist: &[String], cfg: &BehaviorConfig) -> boo
     cfg.observe || !allowlist.is_empty() || under_any(caller, &cfg.deny_exec_dirs).is_some()
 }
 
-/// `UnexpectedBinary`: active exec facet and `program` not allow-listed.
-/// Entries match the full `program` string or, for entries without a `/`,
-/// its basename.
+/// `UnexpectedBinary`: active exec facet and the program not allow-listed.
+///
+/// PHP's exec family passes the WHOLE command line (program + arguments) as
+/// one string, so matching and logging operate ONLY on the program TOKEN --
+/// the first whitespace-delimited field. An allowlist entry matches the full
+/// token (e.g. `/usr/bin/convert` or `convert`) or, for entries without a `/`,
+/// the token's basename. `detail` is the token basename ALONE (e.g. `convert`,
+/// `php`): argument values and paths beyond the first field are never logged.
 pub fn binary_hit(
     caller_realpath: &str,
     program: &str,
@@ -84,11 +89,12 @@ pub fn binary_hit(
     if !facet_active(caller_realpath, &cfg.allow_exec_binaries, cfg) {
         return None;
     }
-    let base = basename(program);
+    let token = program.split_whitespace().next().unwrap_or("");
+    let base = basename(token);
     let allowed = cfg
         .allow_exec_binaries
         .iter()
-        .any(|e| !e.is_empty() && (e == program || (!e.contains('/') && e == base)));
+        .any(|e| !e.is_empty() && (e == token || (!e.contains('/') && e == base)));
     if allowed {
         return None;
     }
@@ -190,6 +196,46 @@ mod tests {
         assert!(binary_hit("/var/www/app/i.php", "gs", &c).is_none());
         assert!(binary_hit("/var/www/app/i.php", "/usr/bin/convert", &c).is_none());
         assert!(binary_hit("/var/www/app/i.php", "/opt/convert", &c).is_some());
+    }
+
+    #[test]
+    fn binary_command_with_args_matches_by_name_and_leaks_nothing() {
+        let uploads = "/var/www/uploads/x.php";
+        let mut c = cfg();
+        c.allow_exec_binaries = v(&["convert"]);
+        // Allowed by name even though arg1 carries the whole command line.
+        assert!(binary_hit(uploads, "convert in.jpg /out/thumb.png", &c).is_none());
+        // Empty allowlist but active via observe: fires, detail is basename only.
+        let mut c2 = cfg();
+        c2.observe = true;
+        let h = binary_hit(uploads, "convert in.jpg /out/thumb.png", &c2).unwrap();
+        assert_eq!(h.detail, "convert");
+        assert!(!h.detail.contains("in.jpg"));
+        assert!(!h.detail.contains("thumb.png"));
+        assert!(!h.detail.contains("/out"));
+    }
+
+    #[test]
+    fn binary_absolute_token_with_args_no_path_leak() {
+        let uploads = "/var/www/uploads/x.php";
+        let mut c = cfg();
+        c.allow_exec_binaries = v(&["php"]);
+        assert!(binary_hit(
+            uploads,
+            "/usr/bin/php /var/www/secret/cron-token-ABC.php",
+            &c
+        )
+        .is_none());
+        let mut c2 = cfg();
+        c2.observe = true;
+        let h = binary_hit(
+            uploads,
+            "/usr/bin/php /var/www/secret/cron-token-ABC.php",
+            &c2,
+        )
+        .unwrap();
+        assert_eq!(h.detail, "php");
+        assert!(!h.detail.contains("cron-token-ABC"));
     }
 
     #[test]

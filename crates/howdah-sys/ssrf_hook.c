@@ -172,69 +172,80 @@ static int ssrf_should_block(const char *arg, size_t arglen, int scheme_required
     const char *scheme = "";
     size_t scheme_len = 0;
     howdah_cache_ent *ce;
+    int ssrf_on, egress_on;
+    int ssrf_block = 0, beh_block = 0;
 
-    if (!g_decide || !g_armed) return 0;
-    if (!g_armed(g_ctx)) return 0; /* SSRF off: zero overhead */
+    /* Two independent gates. `ssrf_on` is the L3 reserved-range signal (g_armed
+     * is now L3-only again): ONLY it may trigger the no-timeout resolve_host +
+     * g_decide path. `egress_on` is the L4 behavior-egress facet, gated by its
+     * own callback; it matches the host STRING and needs no resolution. */
+    ssrf_on = (g_decide && g_armed && g_armed(g_ctx));
+    egress_on = (howdah_g_behavior_egress && howdah_g_behavior_armed
+                 && howdah_g_behavior_armed(g_ctx, HOWDAH_BEHAVIOR_EGRESS));
+    if (!ssrf_on && !egress_on) return 0; /* both facets off: zero overhead */
+
     prep = howdah_ssrf_prepare((const unsigned char *)arg, arglen, scheme_required,
                                hostbuf, HOWDAH_HOST_MAX, &hlen, &port);
     if (prep == 0) return 0; /* not a network target */
-    /* Oversize host (could hide a zero-padded numeric IP): Rust decides. */
-    if (prep == 2) return howdah_ssrf_oversize_glue(g_ctx) == HOWDAH_ACTION_BLOCK;
+    /* Oversize host (could hide a zero-padded numeric IP): an SSRF-specific
+     * decision. With no usable host string, the egress string match cannot run,
+     * so this path is SSRF-only (fail-open for egress-only mode). */
+    if (prep == 2) return ssrf_on && howdah_ssrf_oversize_glue(g_ctx) == HOWDAH_ACTION_BLOCK;
     if (hlen > HOWDAH_HOST_MAX) return 0;
     hostbuf[hlen] = '\0';
 
-    /* Cosmetic scheme for the log: the short alnum run before "://". */
-    for (i = 0; i < arglen && i < 16; i++) {
-        unsigned char c = (unsigned char)arg[i];
-        if (c == ':') {
-            if (i > 0 && i + 2 < arglen && arg[i + 1] == '/' && arg[i + 2] == '/') {
-                scheme = arg;
-                scheme_len = i;
-            }
-            break;
-        }
-        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
-              || c == '+' || c == '-' || c == '.'))
-            break;
-    }
-
-    ce = cache_find((const char *)hostbuf, hlen);
-    if (ce) {
-        ips = ce->recs;
-        count = ce->count;
-    } else {
-        count = resolve_host((const char *)hostbuf, hlen, local);
-        ips = local;
-        for (i = 0; i < HOWDAH_CACHE_SLOTS; i++) {
-            if (!g_cache[i].used) {
-                g_cache[i].used = 1;
-                g_cache[i].host_len = hlen;
-                memcpy(g_cache[i].host, hostbuf, hlen);
-                g_cache[i].count = count;
-                memcpy(g_cache[i].recs, local, count * HOWDAH_REC);
+    if (ssrf_on) {
+        /* Cosmetic scheme for the log: the short alnum run before "://". */
+        for (i = 0; i < arglen && i < 16; i++) {
+            unsigned char c = (unsigned char)arg[i];
+            if (c == ':') {
+                if (i > 0 && i + 2 < arglen && arg[i + 1] == '/' && arg[i + 2] == '/') {
+                    scheme = arg;
+                    scheme_len = i;
+                }
                 break;
             }
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+                  || c == '+' || c == '-' || c == '.'))
+                break;
         }
-        /* cache full: just don't cache (bounded, drop on overflow) */
-    }
 
-    {
+        ce = cache_find((const char *)hostbuf, hlen);
+        if (ce) {
+            ips = ce->recs;
+            count = ce->count;
+        } else {
+            count = resolve_host((const char *)hostbuf, hlen, local);
+            ips = local;
+            for (i = 0; i < HOWDAH_CACHE_SLOTS; i++) {
+                if (!g_cache[i].used) {
+                    g_cache[i].used = 1;
+                    g_cache[i].host_len = hlen;
+                    memcpy(g_cache[i].host, hostbuf, hlen);
+                    g_cache[i].count = count;
+                    memcpy(g_cache[i].recs, local, count * HOWDAH_REC);
+                    break;
+                }
+            }
+            /* cache full: just don't cache (bounded, drop on overflow) */
+        }
+
         /* SSRF verdict: g_decide's signature is UNCHANGED (Ruling 4) — no origin
          * threaded into it. */
-        int ssrf_block = g_decide(g_ctx, scheme, scheme_len, (const char *)hostbuf,
-                                  hlen, port, count ? ips : NULL, count)
-                         == HOWDAH_ACTION_BLOCK;
-        /* Layer-4 egress (Ruling 4): a parallel behavior check on the same host,
-         * carrying the calling-script origin. Block iff EITHER verdict blocks.
-         * When behavior-egress is the only armed facet, Task 6's widened armed
-         * glue lets this path run (line 160 above was not short-circuited). */
-        int beh_block = 0;
-        if (howdah_g_behavior_egress) {
-            beh_block = howdah_g_behavior_egress(g_ctx, origin, origin_len,
-                            (const char *)hostbuf, hlen) == HOWDAH_ACTION_BLOCK;
-        }
-        return ssrf_block || beh_block;
+        ssrf_block = g_decide(g_ctx, scheme, scheme_len, (const char *)hostbuf,
+                              hlen, port, count ? ips : NULL, count)
+                     == HOWDAH_ACTION_BLOCK;
     }
+
+    if (egress_on) {
+        /* Layer-4 egress (Ruling 4): a parallel behavior check on the same host
+         * STRING, carrying the calling-script origin. No resolve_host needed; the
+         * callback is caller-scoped (non-upload callers get None). */
+        beh_block = howdah_g_behavior_egress(g_ctx, origin, origin_len,
+                        (const char *)hostbuf, hlen) == HOWDAH_ACTION_BLOCK;
+    }
+
+    return ssrf_block || beh_block; /* block iff EITHER facet blocks */
 }
 
 /* ---- URL-first-arg sinks ------------------------------------------------- */
@@ -566,7 +577,7 @@ void howdah_install_ssrf_hooks(howdah_ssrf_decide_t decide, howdah_ssrf_armed_t 
  * sinks file_put_contents / move_uploaded_file / rename. fopen is deliberately
  * NOT swapped here — howdah_install_ssrf_hooks already swapped it, and its
  * bespoke trampoline's php-write branch goes live as soon as these callbacks are
- * set. Call once at MINIT, after howdah_install_ssrf_hooks, so fopen's original
+ * set. Call once at first RINIT, after howdah_install_ssrf_hooks, so fopen's original
  * handler is this file's SSRF trampoline (not re-captured). A NULL callback
  * leaves that facet unguarded (fail-open). */
 void howdah_install_behavior_hooks(howdah_behavior_armed_t armed,

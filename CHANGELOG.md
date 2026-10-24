@@ -51,7 +51,7 @@ All notable changes to Howdah are documented here. The format follows
   it. The wasm is no longer committed; the Pages workflow builds it from the
   same commit it deploys, and the site build fails if it is missing.
 
-## [1.4.0]
+## [1.4.0] - 2026-10-24
 
 ### Added
 - Layer 4, "after a breach": a new `[behavior]` config section (no new php.ini

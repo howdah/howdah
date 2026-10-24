@@ -251,6 +251,15 @@ run_file 'mode="detect"\n[behavior]\nmode="block"\nallow_exec_binaries=["ls"]\n'
 out_has BIN_DONE || fail "2c: script did not continue after blocked exec"
 grep -q '"action":"block"' "$LOG" || fail "2c: no block under mode=block"
 ok "UnexpectedBinary (block): spawn neutralized, script continued, action=block"
+# 2d. exec a command WITH ARGUMENTS, binary allow-listed BY NAME: no finding,
+# and the argument text must NEVER reach the log (HARD rule: argument values are
+# never logged; the facet matches/logs only the program token's basename).
+PROG="true --version"; export PROG
+run_file 'mode="detect"\n[behavior]\nmode="detect"\nallow_exec_binaries=["true"]\n' "$APP/binary.php"
+out_has BIN_DONE || fail "2d: script did not continue"
+no_rule unexpected_binary || fail "2d: 'true --version' with 'true' allow-listed by name was flagged"
+if grep -q -- '--version' "$LOG"; then fail "2d: argument text (--version) leaked into the log"; fi
+ok "UnexpectedBinary: exec('true --version'), 'true' allow-listed by name -> no finding, and --version absent from the log (no arg leak)"
 unset PROG
 
 # ========================================================= 3. UnexpectedEgress

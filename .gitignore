@@ -17,6 +17,8 @@
 # Site build
 /site/dist
 /site/node_modules
+# Built from the checkout by `npm run wasm` / pages.yml; never committed
+/site/demo/howdah_wasm.wasm
 # Local-only: shaped-request generator and reproducers stay out of the public repo
 # until a release that blocks them is installable (design §9).
 /lab/spike/measure.sh

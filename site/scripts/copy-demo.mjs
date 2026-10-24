@@ -8,13 +8,23 @@
 //     `gpgkey`, and the install picker all fetch that URL, so it MUST exist
 //     before the package repos go live.
 // Both outputs are git-ignored; the sources of truth stay where they are.
-import { copyFileSync, mkdirSync } from 'node:fs';
+//
+// The wasm itself is NOT committed (it was, and went stale at 1.0 while the
+// core gained two config sections). It is built from this checkout by
+// `npm run wasm` (packaging/build-wasm.sh); pages.yml does that before the
+// site build. A missing wasm is a hard error here, never a silent fallback.
+import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const src = resolve(here, '../demo');
 const dst = resolve(here, '../public/demo');
+
+if (!existsSync(resolve(src, 'howdah_wasm.wasm'))) {
+  console.error('howdah_wasm.wasm missing: run `npm run wasm` (packaging/build-wasm.sh) before the site build');
+  process.exit(1);
+}
 mkdirSync(dst, { recursive: true });
 
 const files = ['howdah_wasm.wasm', 'howdah-wasm.js', 'samples.js'];

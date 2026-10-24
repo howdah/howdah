@@ -35,6 +35,10 @@ All notable changes to Howdah are documented here. The format follows
   mode = "block"` does not arm them; only an explicit per-sink mode does.
 
 ### Fixed
+- The browser demo ran a stale core: `site/demo/howdah_wasm.wasm` was a
+  committed binary last built at 1.0 and nothing in the site deploy rebuilt
+  it. The wasm is no longer committed; the Pages workflow builds it from the
+  same commit it deploys, and the site build fails if it is missing.
 - The aarch64 build of the PHP 5.4 extension. PHP 5.4's tarball ships a 2008
   `config.guess` that cannot identify an aarch64 host, so `./configure` failed
   with "cannot guess build type" and every release so far has had no 5.4 arm64

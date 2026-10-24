@@ -1,0 +1,59 @@
+name: False positive
+description: Howdah logged (or blocked) a request or call that was legitimate.
+labels: ["false-positive"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you, false positives are how the rules get better.
+        **Do not paste request bodies, cookies, Authorization headers, tokens or passwords.** The howdah log line does not contain them, and we do not need them.
+  - type: textarea
+    id: logline
+    attributes:
+      label: The howdah log line
+      description: Paste the line(s) from your howdah log exactly as written.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: php
+    attributes:
+      label: PHP version
+      placeholder: "5.6.40"
+    validations:
+      required: true
+  - type: input
+    id: sapi
+    attributes:
+      label: SAPI
+      placeholder: "php-fpm, mod_php, cgi-fcgi, cli-server"
+    validations:
+      required: true
+  - type: input
+    id: app
+    attributes:
+      label: Application
+      description: Name and version of the application or plugin that made the request.
+      placeholder: "WordPress 4.9 with plugin X"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Howdah version
+      placeholder: "1.3.0"
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant config section
+      description: The section for the rule or layer involved, for example [limits], [inspect] or [sinks.*], plus howdah.mode. Remove anything secret.
+      render: toml
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why was this legitimate?
+      description: In words, what the app was doing. Describe the shape of the input, not its content.

@@ -20,6 +20,12 @@ All notable changes to Howdah are documented here. The format follows
   JSON, or the error), `howdah_wasm_rule_catalog` and `howdah_wasm_version`.
 
 ### Fixed
+- Stale trust surfaces: `SECURITY.md` (supported versions, scope, response
+  times, key fingerprint), the site status banner (now names all three
+  layers), the config editor notes that said `include`/`eval` are PHP 7.0+
+  only (they are active on 5.x since 1.3), and the "not live yet" banners in
+  `docs/install-repos.md` and `packaging/repo/GO-LIVE.md`. Added issue and
+  pull request templates.
 - `docs/config.md` claimed `[log] path` in the TOML overrides `howdah.log`;
   the extension never reads it. The log path is set only by the ini directive.
 - The browser demo ran a stale core: `site/demo/howdah_wasm.wasm` was a

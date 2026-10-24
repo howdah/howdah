@@ -526,6 +526,21 @@ self_test = "off"
     }
 
     #[test]
+    fn global_block_does_not_arm_ssrf() {
+        use crate::sinks::SinkId;
+        let c = Config::from_toml("mode = \"block\"").unwrap();
+        assert_eq!(c.sinks.effective_mode(SinkId::Ssrf, Mode::Block), Mode::Off);
+    }
+
+    #[test]
+    fn section_block_arms_neither() {
+        use crate::sinks::SinkId;
+        let c = Config::from_toml("[sinks]\nmode=\"block\"").unwrap();
+        assert_eq!(c.sinks.effective_mode(SinkId::Phar, Mode::Block), Mode::Off);
+        assert_eq!(c.sinks.effective_mode(SinkId::Ssrf, Mode::Block), Mode::Off);
+    }
+
+    #[test]
     fn ssrf_allow_hosts_parse() {
         let c = Config::from_toml(
             "[sinks.ssrf]\nallow_hosts=[\"api.example.com\",\"10.0.0.0/8\",\"2001:db8::/32\",\"1.2.3.4\"]",

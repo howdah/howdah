@@ -298,14 +298,15 @@ that populate superglobals lazily. See caveats 5–7.
    front-proxy rule (or a patched php-cgi) to cover it.
 8. **Platforms: Linux x86_64 and aarch64, NTS builds only.** Release tarballs
    are built on a glibc-2.17 baseline for both architectures. x86_64 covers all
-   14 PHP minors (5.4 to 8.5). aarch64 is provided for the minors whose
-   from-source build succeeds on native arm64 CI runners (Remi has no aarch64
-   EL7 packages, so every arm64 minor builds from PHP source); **PHP 5.x on
-   aarch64 is best-effort** because the old \`./configure\` may not detect
-   aarch64. The release assets are the definitive per-arch list. The core is
-   arch-agnostic pure Rust, but arm64 is **build-verified only** (PHP 7.4 and
-   8.4 locally under QEMU; the rest in CI). Every matrix result in the tables
-   above was recorded on x86_64; the scenario matrix has not been run on arm64.
+   14 PHP minors (5.4 to 8.5). aarch64 builds every minor from PHP source on
+   native arm64 CI runners (Remi has no aarch64 EL7 packages); PHP 5.4's 2008
+   \`config.guess\` cannot identify an aarch64 host, so the build passes an
+   explicit \`--build\` triple (releases before 1.2.2 shipped no 5.4 arm64
+   tarball for that reason). The release assets are the definitive per-arch
+   list. The core is arch-agnostic pure Rust, but arm64 is **build-verified
+   only** (PHP 5.4, 7.4 and 8.4 locally under QEMU; the rest in CI). Every
+   matrix result in the tables above was recorded on x86_64; the scenario
+   matrix has not been run on arm64.
 
 ## Reproduce
 
@@ -317,6 +318,18 @@ node site/scripts/gen-coverage.mjs                       # regenerate this file
 
 Memory measurements and the reasoning behind the default limits are in
 [\`docs/coverage-data.md\`](coverage-data.md).
+
+## Layer 2 (input inspection)
+
+Layer 2 **detects and logs** SQLi, path-traversal and command-injection
+*shapes* in GET/POST/cookie/path values; it does **not** block by default and
+is best-effort, so it can be bypassed. Lab-verified end to end (GET and POST only) on PHP 8.3 and
+7.4 (cli-server); the scanners are version-independent, so matching should be the
+same on 5.4-8.5. Details: [coverage-data.md](coverage-data.md#howdah-10-layer-2-input-inspection-coverage-data-task-8). It is not part of the
+tables above.
 `;
+// The Layer 2 section above was first added to docs/coverage.md by hand (PR
+// #18) without this generator knowing about it; it lives here now so a
+// regeneration keeps it.
 writeFileSync(resolve(repo, 'docs/coverage.md'), md);
 console.log(`coverage: ${rows.length} rows, ${P} pass / ${F} fail / ${S} skip; not-run minors: ${notRunMinors.join(',')}`);

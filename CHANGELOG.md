@@ -3,6 +3,15 @@
 All notable changes to Howdah are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+- The aarch64 build of the PHP 5.4 extension. PHP 5.4's tarball ships a 2008
+  `config.guess` that cannot identify an aarch64 host, so `./configure` failed
+  with "cannot guess build type" and every release so far has had no 5.4 arm64
+  tarball. `build-one.sh` now passes an explicit `--build` triple when the
+  shipped guesser fails; the per-PR arm64 CI smoke now includes 5.4.
+
 ## [1.2.1] - 2026-10-23
 
 ### Security

@@ -3,7 +3,36 @@
 All notable changes to Howdah are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [1.3.0] - 2026-10-24
+
+### Added
+- Layer 3 `phar://` guard. The `phar` stream wrapper is re-registered with
+  proxied operations, so filesystem functions, `include` and class entry points
+  that open a `phar://` URL are checked. **Off by default** (opt in with
+  `[sinks.phar] mode`); `allow_paths` lists realpath prefixes that are always
+  allowed. On PHP 5.x and 7.x this covers phar metadata deserialization via the
+  wrapper; on PHP 8.x it is detection and denial of `phar://` use only, not a
+  deserialization claim. Direct Phar API use (`new Phar`, `PharData`,
+  `Phar::loadPhar`, `Phar::mapPhar`, `Phar::getMetadata`) is not covered.
+- Layer 3 SSRF egress guard for `file_get_contents`, `fopen`, `get_headers`,
+  `fsockopen`, `pfsockopen`, `stream_socket_client` and curl (via a handle-to-URL
+  map). **Off by default** (opt in with `[sinks.ssrf] mode`); `allow_hosts`
+  takes hostnames, IPs and CIDRs. Best-effort, resolve-at-check-time detection,
+  not a connection-time boundary: DNS rebinding, redirects, `curl_multi_*`,
+  `CURLOPT_RESOLVE`/`CONNECT_TO` and a non-string `CURLOPT_URL` bypass it, and
+  `copy`, `file`, `readfile`, `SoapClient`, `DOMDocument::load*` and
+  `simplexml_load_file` are not hooked. Enabling it adds a `getaddrinfo` per
+  distinct outbound host, with no timeout.
+- `include`/`require` and `eval` guards are now **active on PHP 5.x** (they
+  were PHP 7.0+ only). On 5.x they use a compile-pointer swap: `eval` is fully
+  covered, but an `include` served from a warm opcache is not re-inspected.
+- Verified on PHP 5.4, 5.6, 7.4, 8.3 and 8.5. Other minors build and are
+  expected to work but are not independently verified. A debug-build leak
+  review is still pending.
+
+### Notes
+- Both new sinks log first. A global `howdah.mode = block` or `[sinks]
+  mode = "block"` does not arm them; only an explicit per-sink mode does.
 
 ### Fixed
 - The aarch64 build of the PHP 5.4 extension. PHP 5.4's tarball ships a 2008

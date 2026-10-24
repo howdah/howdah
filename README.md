@@ -9,10 +9,12 @@ tool: it recognizes and blocks abusive input. It is not a hacking tool, and it
 is not a replacement for patching PHP. Upgrade when you can; use Howdah when you
 can't, or until you can.
 
-> **Status: 1.2.1 is released** — Layer 1 (request-parsing limits), Layer 2 (input
-> inspection, log-only) plus Layer 3 (sink hardening, log-first). Signed tarballs for PHP 5.4 to 8.5 are on the
-> [v1.2.1 release page](https://github.com/howdah/howdah/releases/tag/v1.2.1).
-> 1.2.1 is a security fix for every earlier release; see the [changelog](CHANGELOG.md).
+> **Status: 1.3.0 is released** — Layer 1 (request-parsing limits), Layer 2 (input
+> inspection, log-only) plus Layer 3 (sink hardening, log-first). 1.3 extends Layer 3
+> with phar://, SSRF, and PHP 5.x include/eval guards (the phar and SSRF sinks are off
+> by default). Signed tarballs for PHP 5.4 to 8.5 are on the
+> [v1.3.0 release page](https://github.com/howdah/howdah/releases/tag/v1.3.0).
+> See the [changelog](CHANGELOG.md).
 > Defaults may still change; Layer 4 is the roadmap.
 > Start in `detect` mode. Not every PHP version has been tested:
 > see [docs/coverage.md](docs/coverage.md). Install, verify and rollback steps
@@ -46,25 +48,33 @@ logs; it does not block by default**, and the matched value is never logged.
 Signature inspection is best-effort and can be bypassed. See the `[inspect]`
 section of [docs/config.md](docs/config.md) and the [CHANGELOG](CHANGELOG.md).
 
-## Layer 3: sink hardening (in 1.2)
+## Layer 3: sink hardening (1.2, extended in 1.3)
 
-Layer 3 ships in 1.2. It guards dangerous PHP functions ("sinks"). Version 1.2
-**actively guards four sinks**: `command_exec` (`system`, `exec`, `shell_exec`,
-`passthru`, `popen`, `proc_open`) and `unserialize` on every supported PHP
-(5.4-8.5), plus `include`/`require` and `eval` on PHP 7.0+ only. It is a flat allowlist
-policy in the Snuffleupagus style. It **detects and logs; it does not block by
-default.** It has its own `sinks.mode`, which defaults to `detect` and is
-independent of the global `howdah.mode`: `howdah.mode = block` does not arm
-sinks. `unserialize` is off by default, and the sink argument (the command line
-or the serialized payload) is never logged. This is not XSS or output
-inspection. It is best-effort virtual patching and can be bypassed; one known
-gap is that `proc_open` with an array command (PHP 7.4+) is not inspected.
+Layer 3 guards dangerous PHP functions ("sinks") with a flat allowlist policy in
+the Snuffleupagus style. It **detects and logs; it does not block by default.**
+It has its own `sinks.mode`, which defaults to `detect` and is independent of
+the global `howdah.mode`: `howdah.mode = block` does not arm sinks. The sink
+argument (the command line, the serialized payload, the URL) is never logged.
+This is not XSS or output inspection. It is best-effort virtual patching and can
+be bypassed; one known gap is that `proc_open` with an array command (PHP 7.4+)
+is not inspected.
 
-`include`/`require` and `eval` are **not available on PHP 5.x** (the opcode
-mechanism is not feasible on the 5.x VM); on PHP 7.0+ they detect and block, and
-blocking skips the opcode so the include/eval never runs. `include` is inert
-until `allow_paths` is set. `phar://` and SSRF coverage are roadmap, not shipped. See the
-`[sinks]` section of [docs/config.md](docs/config.md) and the
+- `command_exec`, `unserialize` (off by default), `include`/`require` (inert
+  until `allow_paths` is set) and `eval`. As of 1.3, include and eval are active
+  on PHP 5.x too. On 5.x an `include` served from a warm opcache is not
+  re-inspected (`eval` is unaffected).
+- **New in 1.3: `phar://` and SSRF guards, both off by default** and armed only
+  by an explicit per-sink mode. Phar covers metadata deserialization via the
+  wrapper on PHP 5.x/7.x; on 8.x it is detection and denial only. The direct Phar
+  API (`new Phar`, `PharData`, `Phar::getMetadata`...) is not covered. SSRF is
+  best-effort, resolve-at-check-time detection, not a connection-time boundary
+  (DNS rebinding, redirects, `curl_multi_*` and others bypass it), several
+  outbound primitives (`copy`, `file`, `readfile`, `SoapClient`...) are not
+  hooked, and it adds a DNS lookup with no timeout per distinct outbound host.
+- Verified on PHP 5.4, 5.6, 7.4, 8.3 and 8.5; other minors build and are
+  expected to work but are not independently verified.
+
+See the `[sinks]` section of [docs/config.md](docs/config.md) and the
 [CHANGELOG](CHANGELOG.md).
 
 ## PHP versions

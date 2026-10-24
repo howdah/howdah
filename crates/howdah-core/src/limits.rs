@@ -315,6 +315,8 @@ pub enum RuleId {
     Include,
     Eval,
     Unserialize,
+    Phar,
+    Ssrf,
 }
 
 impl RuleId {
@@ -334,7 +336,9 @@ impl RuleId {
             | RuleId::CommandExec
             | RuleId::Include
             | RuleId::Eval
-            | RuleId::Unserialize => Severity::Standard,
+            | RuleId::Unserialize
+            | RuleId::Phar
+            | RuleId::Ssrf => Severity::Standard,
             _ => Severity::Critical,
         }
     }
@@ -483,6 +487,14 @@ mod tests {
         let h = feed(&Limits::defaults(), body.as_bytes()).unwrap();
         assert_eq!((h.rule, h.severity), (RuleId::MaxParts, Severity::Critical));
         assert_eq!(feed(&Limits::defaults(), part("ok").as_bytes()), None);
+    }
+
+    #[test]
+    fn phar_ssrf_rules_standard_and_serde() {
+        assert_eq!(RuleId::Phar.severity(), Severity::Standard);
+        assert_eq!(RuleId::Ssrf.severity(), Severity::Standard);
+        assert_eq!(serde_json::from_str::<RuleId>("\"phar\"").unwrap(), RuleId::Phar);
+        assert_eq!(serde_json::from_str::<RuleId>("\"ssrf\"").unwrap(), RuleId::Ssrf);
     }
 
     #[test]

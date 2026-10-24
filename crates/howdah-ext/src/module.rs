@@ -7,6 +7,7 @@ use std::ffi::{c_char, c_int, c_uint, c_void, CStr, CString};
 use std::mem::size_of;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use howdah_core::ffi as core;
 use howdah_sys as sys;
@@ -103,7 +104,7 @@ pub unsafe extern "C" fn get_module() -> *mut sys::zend_module_entry {
         name: NAME.as_ptr() as *const c_char,
         module_startup_func: Some(minit),
         module_shutdown_func: Some(mshutdown),
-        request_startup_func: None,
+        request_startup_func: Some(rinit),
         request_shutdown_func: Some(rshutdown),
         info_func: Some(minfo),
         version: VERSION.as_ptr() as *const c_char,
@@ -201,6 +202,32 @@ unsafe extern "C" fn rshutdown(_type: c_int, _module_number: c_int) -> c_int {
     SUCCESS
 }
 
+/// First-RINIT, process-once install of the phar + ssrf hooks. Deferred past
+/// MINIT because on distro builds curl/phar are shared extensions that load
+/// AFTER howdah; by first RINIT every module has registered. Config is
+/// process-static, so a sink whose effective mode is Off installs nothing (true
+/// zero overhead; both default Off).
+///
+/// # Safety
+/// Called by PHP at request startup (NTS: single-threaded).
+unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
+    if !INSTALLED.swap(true, Ordering::Relaxed) && !CTX.is_null() {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            if core::howdah_sink_armed(CTX, core::HOWDAH_SINK_PHAR) != 0 {
+                sys::howdah_install_phar_hook(crate::sink_filter::decide);
+            }
+            if core::howdah_sink_armed(CTX, core::HOWDAH_SINK_SSRF) != 0 {
+                sys::howdah_install_ssrf_hooks(
+                    crate::ssrf_filter::decide,
+                    crate::ssrf_filter::armed,
+                );
+            }
+        }));
+    }
+    SUCCESS
+}
+
 /// Reset the per-request lifecycle flags for the next request. Runs at the end
 /// of RSHUTDOWN AND — via [`rfc1867::emit_and_bail`] — immediately before a
 /// bailout refusal. The second call site is load-bearing: `zend_bailout` is a
@@ -212,6 +239,10 @@ unsafe extern "C" fn rshutdown(_type: c_int, _module_number: c_int) -> c_int {
 /// emitting a stale 403 with no fresh log line. Resetting here makes a skipped
 /// RSHUTDOWN harmless; when RSHUTDOWN does run it simply resets again (idempotent).
 ///
+/// It also calls `howdah_ssrf_request_reset()`, so both the normal RSHUTDOWN
+/// path and the `emit_and_bail` path clear the per-request SSRF handle map and
+/// resolution cache.
+///
 /// # Safety
 /// Single-threaded (NTS) request teardown; the statics are request-local.
 pub(crate) unsafe fn clear_request_state() {
@@ -219,6 +250,10 @@ pub(crate) unsafe fn clear_request_state() {
     ENDED = false;
     MULTIPART = false;
     input_filter::INPUT_BLOCKED = false;
+    // Drop the C-owned SSRF curl handle map + resolution cache (FPM workers
+    // persist; a bailout can skip RSHUTDOWN). Idempotent; a no-op when the ssrf
+    // hooks were never installed.
+    sys::howdah_ssrf_request_reset();
 }
 
 /// Everything up to the first `?` (log the path, never the query string).

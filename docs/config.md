@@ -141,24 +141,30 @@ request; values past a budget are not scanned.
 
 **Sinks log by default; they do not block.** Layer 3 watches dangerous PHP
 functions ("sinks") and writes an event when one is called with something your
-allowlist does not cover. In 1.2 it **actively guards four sinks**:
+allowlist does not cover. It **actively guards six sinks** (four since 1.2;
+`phar` and `ssrf` were added in 1.3):
 
 - `command_exec` — `system`, `exec`, `shell_exec`, `passthru`, `popen` and
   `proc_open`.
-- `unserialize` — object unserialization.
-- `include` / `require` — **PHP 7.0+ only**. Inert until `allow_paths` is set.
-- `eval` — **PHP 7.0+ only**.
+- `unserialize` — object unserialization. Off by default.
+- `include` / `require` — inert until `allow_paths` is set. Active on every PHP
+  version since 1.3 (PHP 5.x via a compile-pointer swap; see below).
+- `eval` — active on every PHP version since 1.3.
+- `phar` — `phar://` use. **Off by default** (1.3).
+- `ssrf` — outbound requests to internal addresses. **Off by default** (1.3).
 
-| Sink | PHP 5.4–5.6 | PHP 7.0–8.5 |
-|------|-------------|-------------|
-| `command_exec` | detect + block | detect + block |
-| `unserialize` (off by default) | detect + block | detect + block |
-| `include` / `require` | not available | detect + block |
-| `eval` | not available | detect + block |
+| Sink | PHP 5.4–5.6 | PHP 7.0–7.4 | PHP 8.0–8.5 |
+|------|-------------|-------------|-------------|
+| `command_exec` | detect + block | detect + block | detect + block |
+| `unserialize` (off by default) | detect + block | detect + block | detect + block |
+| `include` / `require` | detect + block (opcache caveat) | detect + block | detect + block |
+| `eval` | detect + block | detect + block | detect + block |
+| `phar` (off by default) | detect + block, with deserialization | detect + block, with deserialization | detect + block, **no deserialization claim** |
+| `ssrf` (off by default) | detect + block | detect + block | detect + block |
 
-`command_exec` and `unserialize` work on every supported PHP version;
-`include`/`eval` require PHP 7.0+ (the opcode mechanism is not feasible on the
-5.x VM). phar:// and SSRF are roadmap, not shipped.
+Provenance: verified on PHP 5.4, 5.6, 7.4, 8.3 and 8.5. Other minors build and
+are expected to work but are not independently verified. A debug-build leak
+review is still pending.
 
 `sinks.mode` defaults to `detect` (log only) and is **independent of the global
 `howdah.mode`**: a global `howdah.mode = block` does **not** arm any sink. To
@@ -186,11 +192,19 @@ allow = []                # commands that are fine; anything else is logged (or 
 # mode = "detect"         # opt in (log only). "block" refuses non-allowlisted classes.
 allow_classes = []        # class names that may be unserialized
 
-# PHP 7.0+ ONLY. Not available on PHP 5.x (accepted there, but nothing is hooked).
 [sinks.include]           # include/require. Inert until allow_paths is set.
 # mode = "block"          # optional per-sink override; unset inherits sinks.mode
 allow_paths = []          # directories include/require may load from
 [sinks.eval]              # eval
+
+# New in 1.3. Both are OFF by default and are armed only by an explicit
+# per-sink mode (neither sinks.mode nor howdah.mode arms them).
+[sinks.phar]              # phar:// guard
+# mode = "detect"         # opt in (log only); "block" denies
+allow_paths = []          # realpath prefixes allowed even under block
+[sinks.ssrf]              # outbound requests to internal addresses
+# mode = "detect"         # opt in (log only); "block" denies
+allow_hosts = []          # hostname | IP | CIDR; no wildcards
 ```
 
 ### `command_exec`
@@ -209,14 +223,67 @@ unserialize calls that create objects of classes not listed in `allow_classes`.
 Set `mode = "block"` only after the log shows your application's legitimate
 classes are all in `allow_classes`.
 
-### `include` / `require` and `eval` (PHP 7.0+ only)
+### `include` / `require` and `eval`
 
-Active on PHP 7.0 and later, in detect and block modes. **Not available on
-PHP 5.x**: the opcode-operand mechanism is not feasible on the 5.x VM, so there
-these tables are accepted but nothing is hooked. `include`/`require` is **inert
-until `allow_paths` is set**. Blocking works by skipping the opcode: the
-include/eval never runs and the script continues. As always, the argument is
-never logged.
+Active in detect and block modes. `include`/`require` is **inert until
+`allow_paths` is set**. Blocking stops the included file or evaluated code from
+running and the script continues. As always, the argument is never logged.
+
+- **PHP 7.0+:** a runtime opcode handler, which is not affected by opcache.
+- **PHP 5.x (new in 1.3):** a compile-time check (`zend_compile_file` /
+  `zend_compile_string`). `eval` is never cached, so it is fully covered. An
+  `include` served from a **warm opcache** is not compiled again and is **not
+  re-inspected**, so already-cached application files are not checked.
+
+### `phar`
+
+**Off by default.** Enable with `[sinks.phar] mode = "detect"` (log) or
+`"block"` (deny). `[sinks] mode = "block"` and the global `howdah.mode` do
+**not** arm it; only an explicit `[sinks.phar] mode` does. `allow_paths` is a
+list of realpath prefixes that stay allowed even under `block` (for example your
+own vendored phars). Blocking makes the open fail the way a missing file does:
+PHP raises its normal "failed to open stream" warning and the script continues.
+
+- **PHP 5.x and 7.x:** covers phar metadata deserialization triggered through the
+  wrapper (filesystem functions and `include` on a `phar://` URL).
+- **PHP 8.x:** detection and denial of `phar://` use only. PHP 8.0 removed the
+  automatic deserialization, so there is **no deserialization claim** here.
+- **Not covered:** the direct Phar API (`new Phar`, `PharData`,
+  `Phar::loadPhar`, `Phar::mapPhar`, `Phar::getMetadata`) unserializes before
+  any wrapper operation. Calling `stream_wrapper_unregister('phar')` then
+  `stream_wrapper_restore('phar')` is untested and could drop the guard. If
+  another extension re-registers `phar` after Howdah, or phar is built
+  statically into PHP, the guard fails open.
+
+### `ssrf`
+
+**Off by default.** Enable with `[sinks.ssrf] mode = "detect"` or `"block"`.
+Like `phar`, it is armed only by an explicit per-sink mode, never by
+`[sinks] mode` or `howdah.mode`. `allow_hosts` takes exact hostnames, IP
+addresses and CIDRs; wildcards and malformed CIDRs are rejected when the config
+loads.
+
+Hooked: `file_get_contents`, `fopen`, `get_headers`, `fsockopen`, `pfsockopen`,
+`stream_socket_client`, and curl (`curl_exec`, tracked through
+`curl_init`/`curl_setopt`/`curl_setopt_array`). Every address a host resolves to
+is checked, and a hit on a reserved or internal range is a match.
+
+- **DNS cost:** enabling it adds one `getaddrinfo` per distinct outbound host
+  (cached for the request). There is **no timeout**: a stalled DNS server stalls
+  the call. This is why it is off by default.
+- **Best effort, not a connection-time boundary.** The check resolves the host
+  when the call is made. It is bypassed by DNS rebinding, redirects to a new
+  host, `curl_multi_*` (not hooked), `CURLOPT_RESOLVE` / `CURLOPT_CONNECT_TO`,
+  and a non-string or absent `CURLOPT_URL`.
+- **Not hooked:** `copy`, `file`, `readfile`, `SoapClient`, `DOMDocument::load*`
+  and `simplexml_load_file` can still make outbound requests unseen.
+- **Side effects of a block:** a blocked `fsockopen` / `stream_socket_client`
+  leaves `$errno` and `$errstr` unset; a blocked `curl_exec` returns false with
+  `curl_errno` 0 and an empty `curl_error`.
+- More than 32 resolved addresses for one host are capped; a host longer than
+  256 bytes is treated as suspicious. Literal-IP decoding mirrors glibc
+  `inet_aton`; libcurl and musl parse some encoded forms differently, so the
+  resolved addresses are the authority.
 
 ### Known limitations
 
@@ -226,7 +293,7 @@ never logged.
   unguarded. In practice real injection targets (request values, concatenated
   strings) are always strings and are guarded.
 - As with `[inspect]`, this is best-effort hardening, not a substitute for
-  fixing the application. phar:// and SSRF coverage are on the roadmap.
+  fixing the application. The `phar` and `ssrf` limits are listed in their sections above.
 
 ## Enforcement timing (honest caveat)
 

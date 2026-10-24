@@ -30,7 +30,8 @@ use crate::limits::{LimitHit, RuleId, Severity};
 use crate::log::{log_line, new_request_id, EventRecord};
 use crate::multipart::{Event, MultipartState};
 use crate::rules::{decide, Action};
-use crate::sinks::{command_allowed, include_allowed, unserialize_classes, SinkId};
+use crate::sinks::ssrf::{classify_ip, decode_literal_ip, host_allowed, parse_host, HostForm, IpRepr};
+use crate::sinks::{command_allowed, include_allowed, phar_allowed, unserialize_classes, SinkId};
 
 /// Action codes returned over the ABI. Pinned: Allow=0, Log=1, Block=2.
 pub const HOWDAH_ALLOW: i32 = 0;
@@ -52,6 +53,8 @@ pub const HOWDAH_SINK_COMMAND_EXEC: i32 = 0;
 pub const HOWDAH_SINK_INCLUDE: i32 = 1;
 pub const HOWDAH_SINK_EVAL: i32 = 2;
 pub const HOWDAH_SINK_UNSERIALIZE: i32 = 3;
+pub const HOWDAH_SINK_PHAR: i32 = 4;
+pub const HOWDAH_SINK_SSRF: i32 = 5;
 
 fn code(a: Action) -> i32 {
     match a {
@@ -131,6 +134,8 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::Include => "file include sink called with a disallowed path",
         RuleId::Eval => "eval sink invoked",
         RuleId::Unserialize => "unserialize sink invoked on untrusted data",
+        RuleId::Phar => "phar:// stream wrapper access outside the allowlist",
+        RuleId::Ssrf => "outbound request to a disallowed destination",
     }
 }
 
@@ -278,8 +283,8 @@ impl howdah_ctx {
 
     /// Layer-3 sink check. `arg` is scanned, never logged. Independent of
     /// `worst`/`log`: a hit goes only to `sink_log`. All sinks honor block;
-    /// include/eval block is enforced by the C opcode handler (PHP 7.0+), which
-    /// is not installed on PHP 5.x, so on 5.x this is never called for them.
+    /// include/eval block is enforced by the C opcode handler (PHP 7.0+); PHP
+    /// 5.x has no such handler and uses a compile-time swap instead.
     fn sink_check(&mut self, sink: SinkId, name: &[u8], arg: &[u8]) -> Action {
         #[cfg(test)]
         if tests::FORCE_PANIC.with(|f| f.get()) {
@@ -303,6 +308,14 @@ impl howdah_ctx {
                     .then(|| format!("include path outside allowlist via {n}")),
             ),
             SinkId::Eval => (RuleId::Eval, Some(format!("dynamic code evaluation via {n}"))),
+            // Never log the path: only the guarded function name.
+            SinkId::Phar => (
+                RuleId::Phar,
+                (!phar_allowed(arg, &sinks.phar.allow_paths))
+                    .then(|| format!("phar stream access outside allowlist via {n}")),
+            ),
+            // SSRF has its own entry point (howdah_sink_check_ssrf).
+            SinkId::Ssrf => (RuleId::Ssrf, None),
             SinkId::Unserialize => {
                 let scan = unserialize_classes(arg);
                 let allow = &sinks.unserialize.allow_classes;
@@ -331,6 +344,107 @@ impl howdah_ctx {
             method: self.meta.method.clone(),
             uri: self.meta.uri.clone(),
             reason,
+        };
+        self.sink_log = Some(log_line(&rec));
+        action
+    }
+
+    /// SSRF check; `recs` is a multiple of 17 bytes (see `howdah_sink_check_ssrf`).
+    fn sink_check_ssrf(&mut self, scheme: &[u8], host: &[u8], port: u16, recs: &[u8]) -> Action {
+        #[cfg(test)]
+        if tests::FORCE_PANIC.with(|f| f.get()) {
+            panic!("injected test panic");
+        }
+        let mode = self.config.sinks.effective_mode(SinkId::Ssrf, self.config.mode);
+        if mode == Mode::Off {
+            return Action::Allow;
+        }
+        let literal = decode_literal_ip(host);
+        let mut resolved: Vec<IpRepr> = Vec::new();
+        #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)] // as_chunks needs Rust 1.88+
+        for r in recs.chunks_exact(17) {
+            let Ok(r): Result<&[u8; 17], _> = r.try_into() else { continue };
+            match r[0] {
+                4 => resolved.push(IpRepr::V4([r[1], r[2], r[3], r[4]])),
+                6 => {
+                    let mut a = [0u8; 16];
+                    a.copy_from_slice(&r[1..17]);
+                    resolved.push(IpRepr::V6(a));
+                }
+                _ => {}
+            }
+        }
+        if host_allowed(host, &resolved, literal, &self.config.sinks.ssrf.allow_hosts) {
+            return Action::Allow;
+        }
+        let hit = literal
+            .into_iter()
+            .chain(resolved.iter().copied())
+            .find_map(|ip| classify_ip(ip).map(|c| (ip, c)));
+        let Some((ip, class)) = hit else {
+            return Action::Allow;
+        };
+        let ip_s = match ip {
+            IpRepr::V4(a) => std::net::Ipv4Addr::from(a).to_string(),
+            IpRepr::V6(a) => std::net::Ipv6Addr::from(a).to_string(),
+        };
+        let clip = |b: &[u8]| -> String {
+            String::from_utf8_lossy(&b[..b.len().min(255)])
+                .chars()
+                .filter(|c| !c.is_control())
+                .collect()
+        };
+        // Defense in depth: log only the bare host. Cut at the first
+        // /, ? or #, then drop userinfo.
+        let bare_host = {
+            let h = clip(host);
+            // Cut first (an '@' in path/query is not userinfo), then take the
+            // text after the LAST '@' of the authority (userinfo may hold '@').
+            let end = h.find(['/', '?', '#']).unwrap_or(h.len());
+            let auth = &h[..end];
+            auth.rsplit_once('@').map_or(auth, |(_, host)| host).to_string()
+        };
+        let reason = format!(
+            "ssrf via {}: host={} port={} ip={} class={}",
+            clip(scheme),
+            bare_host,
+            port,
+            ip_s,
+            class.as_str()
+        );
+        let action = if mode == Mode::Block { Action::Block } else { Action::Log };
+        let rec = EventRecord {
+            ts: now(),
+            request_id: self.request_id.clone(),
+            rule: RuleId::Ssrf,
+            action,
+            client_ip: self.meta.client_ip.clone(),
+            method: self.meta.method.clone(),
+            uri: self.meta.uri.clone(),
+            reason,
+        };
+        self.sink_log = Some(log_line(&rec));
+        action
+    }
+
+    /// A host too long to resolve (>256 bytes; DNS max is 253) is never
+    /// legitimate and can hide a zero-padded numeric IP, so it is treated as
+    /// suspicious per the effective mode. The host bytes are never logged.
+    fn sink_ssrf_oversize(&mut self) -> Action {
+        let mode = self.config.sinks.effective_mode(SinkId::Ssrf, self.config.mode);
+        if mode == Mode::Off {
+            return Action::Allow;
+        }
+        let action = if mode == Mode::Block { Action::Block } else { Action::Log };
+        let rec = EventRecord {
+            ts: now(),
+            request_id: self.request_id.clone(),
+            rule: RuleId::Ssrf,
+            action,
+            client_ip: self.meta.client_ip.clone(),
+            method: self.meta.method.clone(),
+            uri: self.meta.uri.clone(),
+            reason: "ssrf: oversize host (>256 bytes), not resolvable - treated as suspicious".to_string(),
         };
         self.sink_log = Some(log_line(&rec));
         action
@@ -792,6 +906,7 @@ pub unsafe extern "C" fn howdah_sink_check(
         HOWDAH_SINK_INCLUDE => SinkId::Include,
         HOWDAH_SINK_EVAL => SinkId::Eval,
         HOWDAH_SINK_UNSERIALIZE => SinkId::Unserialize,
+        HOWDAH_SINK_PHAR => SinkId::Phar,
         _ => return HOWDAH_ALLOW,
     };
     let r = catch_unwind(AssertUnwindSafe(|| {
@@ -811,6 +926,156 @@ pub unsafe extern "C" fn howdah_sink_check(
         report_panic(ctx);
         HOWDAH_ALLOW
     })
+}
+
+/// 1 iff SSRF guarding is armed (effective mode != off); NULL ctx or panic is
+/// 0. Never stashes a log line. Lets the shim skip DNS work when disarmed.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_sink_ssrf_armed(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = &*ctx;
+        i32::from(c.config.sinks.effective_mode(SinkId::Ssrf, c.config.mode) != Mode::Off)
+    }))
+    .unwrap_or(0)
+}
+
+/// 1 iff the given sink (`HOWDAH_SINK_*`) is armed (effective mode != off);
+/// NULL ctx, unknown sink or panic is 0. Never stashes a log line. Used by the
+/// glue to decide, once per process, whether to install the phar/ssrf hooks.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_sink_armed(ctx: *mut howdah_ctx, sink: i32) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    let id = match sink {
+        HOWDAH_SINK_COMMAND_EXEC => SinkId::CommandExec,
+        HOWDAH_SINK_INCLUDE => SinkId::Include,
+        HOWDAH_SINK_EVAL => SinkId::Eval,
+        HOWDAH_SINK_UNSERIALIZE => SinkId::Unserialize,
+        HOWDAH_SINK_PHAR => SinkId::Phar,
+        HOWDAH_SINK_SSRF => SinkId::Ssrf,
+        _ => return 0,
+    };
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = &*ctx;
+        i32::from(c.config.sinks.effective_mode(id, c.config.mode) != Mode::Off)
+    }))
+    .unwrap_or(0)
+}
+
+/// SSRF decision for one intercepted outbound call. `ips` points to
+/// `ips_count` fixed 17-byte records `[family (4|6)][16 address bytes]` (a v4
+/// uses the first 4). Returns 0 Allow / 1 Log / 2 Block; NULL ctx, malformed
+/// input or panic is 0 (fail-open). The log line carries scheme/host/port/
+/// matched-ip/class only (in `reason`), never userinfo/path/query.
+///
+/// # Safety
+/// `ctx` NULL or live; each pointer NULL or valid for its length (`ips`: 17 *
+/// `ips_count` bytes).
+#[no_mangle]
+pub unsafe extern "C" fn howdah_sink_check_ssrf(
+    ctx: *mut howdah_ctx,
+    scheme: *const c_char,
+    scheme_len: usize,
+    host: *const c_char,
+    host_len: usize,
+    port: u16,
+    ips: *const u8,
+    ips_count: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let sl = |p: *const c_char, n: usize| -> &[u8] {
+            if p.is_null() || n == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts(p as *const u8, n)
+            }
+        };
+        let recs: &[u8] = if ips.is_null() || ips_count == 0 {
+            &[]
+        } else {
+            match ips_count.checked_mul(17) {
+                Some(total) if total <= (1 << 24) => std::slice::from_raw_parts(ips, total),
+                _ => return HOWDAH_ALLOW,
+            }
+        };
+        code((*ctx).sink_check_ssrf(sl(scheme, scheme_len), sl(host, host_len), port, recs))
+    }));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// SSRF parse seam: parse the target of an intercepted outbound call so the C
+/// shim never parses URLs itself. `scheme_required != 0` selects
+/// `HostForm::SchemeRequired` (URL-only sinks), else `BareHostOk` (fsockopen,
+/// curl). Returns 2 when the host parsed but is longer than `out_host_cap`
+/// (suspicious: nothing is written; call `howdah_sink_ssrf_oversize`). Returns 1 ("act") after writing the clean host (no userinfo/brackets/
+/// port, lowercased) to `out_host`, its length to `*out_host_len` and the port
+/// (0 if none) to `*out_port`. Returns 0 ("skip") for a non-network target
+/// (local path, `unix://`, no scheme when required), any NULL argument, or a
+/// panic: fail-open, the call is chained. Return codes: 0 = skip (not a network
+/// target), 1 = host written, 2 = oversize (host longer than the buffer; the
+/// caller treats it as suspicious via `howdah_sink_ssrf_oversize`).
+///
+/// # Safety
+/// `input` NULL or valid for `input_len` bytes; `out_host` NULL or writable for
+/// `out_host_cap` bytes; `out_host_len` / `out_port` NULL or writable.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_ssrf_prepare(
+    input: *const u8,
+    input_len: usize,
+    scheme_required: i32,
+    out_host: *mut u8,
+    out_host_cap: usize,
+    out_host_len: *mut usize,
+    out_port: *mut u16,
+) -> i32 {
+    if input.is_null() || out_host.is_null() || out_host_len.is_null() || out_port.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let form = if scheme_required != 0 { HostForm::SchemeRequired } else { HostForm::BareHostOk };
+        let Some(h) = parse_host(std::slice::from_raw_parts(input, input_len), form) else {
+            return 0;
+        };
+        if h.name.len() > out_host_cap {
+            return 2; // oversize: suspicious, see howdah_sink_ssrf_oversize
+        }
+        std::ptr::copy_nonoverlapping(h.name.as_ptr(), out_host, h.name.len());
+        *out_host_len = h.name.len();
+        *out_port = h.port.unwrap_or(0);
+        1
+    }))
+    .unwrap_or(0)
+}
+
+/// Verdict for an oversize (>cap) SSRF host, called when `howdah_ssrf_prepare`
+/// returned 2. 0 Allow (off) / 1 Log / 2 Block per the effective SSRF mode;
+/// stashes a log line with no host bytes. NULL ctx or panic is 0.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_sink_ssrf_oversize(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| code((*ctx).sink_ssrf_oversize())));
+    r.unwrap_or(HOWDAH_ALLOW)
 }
 
 /// Take the pending sink log line, or NULL if none. Same ownership contract as
@@ -1389,6 +1654,236 @@ mod tests {
         assert_eq!(sink(c, 99, "x", b"id"), HOWDAH_ALLOW);
         assert_eq!(sink(c, -1, "x", b"id"), HOWDAH_ALLOW);
         assert_eq!(unsafe { howdah_sink_check(c, 0, std::ptr::null(), 0, std::ptr::null(), 0) }, HOWDAH_LOG);
+        unsafe { howdah_free(c) };
+    }
+
+    fn ssrf_armed(c: *mut howdah_ctx) -> i32 {
+        unsafe { howdah_sink_ssrf_armed(c) }
+    }
+    fn rec4(a: [u8; 4]) -> [u8; 17] {
+        let mut r = [0u8; 17];
+        r[0] = 4;
+        r[1..5].copy_from_slice(&a);
+        r
+    }
+    fn ssrf(c: *mut howdah_ctx, host: &str, ips: &[[u8; 17]]) -> i32 {
+        let flat: Vec<u8> = ips.iter().flatten().copied().collect();
+        let s = "http";
+        unsafe {
+            howdah_sink_check_ssrf(c, s.as_ptr() as _, s.len(), host.as_ptr() as _, host.len(), 80, flat.as_ptr(), ips.len())
+        }
+    }
+
+    #[test]
+    fn ssrf_prepare_act_writes_host_and_port() {
+        let u = b"http://user:pw@Example.COM:8080/p?q=1";
+        let (mut buf, mut n, mut port) = ([0u8; 64], 0usize, 0u16);
+        let r = unsafe { howdah_ssrf_prepare(u.as_ptr(), u.len(), 1, buf.as_mut_ptr(), 64, &mut n, &mut port) };
+        assert_eq!(r, 1);
+        assert_eq!(&buf[..n], b"example.com");
+        assert_eq!(port, 8080);
+        // bare host ok when scheme not required; no port -> 0
+        let b = b"10.0.0.5";
+        let r = unsafe { howdah_ssrf_prepare(b.as_ptr(), b.len(), 0, buf.as_mut_ptr(), 64, &mut n, &mut port) };
+        assert_eq!((r, &buf[..n], port), (1, &b"10.0.0.5"[..], 0));
+    }
+
+    #[test]
+    fn ssrf_oversize_follows_mode() {
+        let c = init("[sinks.ssrf]\nmode=\"block\"");
+        begin(c);
+        assert_eq!(unsafe { howdah_sink_ssrf_oversize(c) }, HOWDAH_BLOCK);
+        let l = unsafe { howdah_take_sink_log_line(c) };
+        assert!(!l.is_null());
+        let s = unsafe { std::ffi::CStr::from_ptr(l) }.to_string_lossy().into_owned();
+        assert!(s.contains("oversize host") && s.contains("ssrf"), "{s}");
+        unsafe { howdah_free_str(l) };
+        unsafe { howdah_free(c) };
+        let c = init("[sinks.ssrf]\nmode=\"detect\"");
+        begin(c);
+        assert_eq!(unsafe { howdah_sink_ssrf_oversize(c) }, 1);
+        unsafe { howdah_free(c) };
+        let c = init("");
+        begin(c);
+        assert_eq!(unsafe { howdah_sink_ssrf_oversize(c) }, HOWDAH_ALLOW);
+        unsafe { howdah_free(c) };
+        assert_eq!(unsafe { howdah_sink_ssrf_oversize(std::ptr::null_mut()) }, 0);
+    }
+
+    #[test]
+    fn ssrf_prepare_skips() {
+        let (mut buf, mut n, mut port) = ([0u8; 8], 0usize, 0u16);
+        let mut run = |i: &[u8], f: i32| unsafe {
+            howdah_ssrf_prepare(i.as_ptr(), i.len(), f, buf.as_mut_ptr(), 8, &mut n, &mut port)
+        };
+        assert_eq!(run(b"/etc/passwd", 1), 0); // local path
+        assert_eq!(run(b"unix:///var/run/x.sock", 0), 0);
+        assert_eq!(run(b"example.com", 1), 0); // no scheme when required
+        assert_eq!(run(b"http://averyveryverylonghost.example/", 1), 2); // oversize, not skip
+        let r = unsafe {
+            howdah_ssrf_prepare(std::ptr::null(), 0, 1, std::ptr::null_mut(), 0, std::ptr::null_mut(), std::ptr::null_mut())
+        };
+        assert_eq!(r, 0);
+    }
+
+    #[test]
+    fn phar_arm_block_no_path_in_log() {
+        let c = init("[sinks.phar]\nmode=\"block\"\nallow_paths=[\"/srv/app\"]");
+        begin(c);
+        assert_eq!(sink(c, HOWDAH_SINK_PHAR, "file_get_contents", b"phar:///tmp/secret/evil.phar/x"), HOWDAH_BLOCK);
+        let line = take_sink(c).expect("line");
+        assert!(line.contains("\"rule\":\"phar\""), "{line}");
+        assert!(line.contains("\"action\":\"block\""), "{line}");
+        assert!(!line.contains("secret") && !line.contains("evil"), "{line}");
+        assert_eq!(sink(c, HOWDAH_SINK_PHAR, "f", b"phar:///srv/app/a.phar"), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn phar_default_off_allows() {
+        let c = init("");
+        begin(c);
+        assert_eq!(sink(c, HOWDAH_SINK_PHAR, "f", b"phar:///tmp/x.phar"), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn ssrf_armed_reflects_mode() {
+        let c = init("");
+        assert_eq!(ssrf_armed(c), 0);
+        unsafe { howdah_free(c) };
+        let c = init("[sinks.ssrf]\nmode=\"detect\"");
+        assert_eq!(ssrf_armed(c), 1);
+        assert!(take_sink(c).is_none());
+        unsafe { howdah_free(c) };
+        let c = init("mode=\"off\"\n[sinks.ssrf]\nmode=\"block\"");
+        assert_eq!(ssrf_armed(c), 0);
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn sink_armed_per_sink() {
+        let c = init("");
+        unsafe {
+            assert_eq!(howdah_sink_armed(c, HOWDAH_SINK_PHAR), 0);
+            assert_eq!(howdah_sink_armed(c, HOWDAH_SINK_SSRF), 0);
+            howdah_free(c);
+        }
+        let c = init("[sinks.phar]\nmode=\"detect\"");
+        unsafe {
+            assert_eq!(howdah_sink_armed(c, HOWDAH_SINK_PHAR), 1);
+            assert_eq!(howdah_sink_armed(c, HOWDAH_SINK_SSRF), 0);
+            assert_eq!(howdah_sink_armed(c, 99), 0);
+            howdah_free(c);
+            assert_eq!(howdah_sink_armed(std::ptr::null_mut(), HOWDAH_SINK_PHAR), 0);
+        }
+    }
+
+    #[test]
+    fn ssrf_armed_null_ctx_zero() {
+        assert_eq!(ssrf_armed(std::ptr::null_mut()), 0);
+    }
+
+    #[test]
+    fn ssrf_loopback_blocks_when_block() {
+        let c = init("[sinks.ssrf]\nmode=\"block\"");
+        begin(c);
+        assert_eq!(ssrf(c, "evil.example", &[rec4([127, 0, 0, 1])]), HOWDAH_BLOCK);
+        assert!(take_sink(c).unwrap().contains("\"action\":\"block\""));
+        assert_eq!(ssrf(c, "ok.example", &[rec4([8, 8, 8, 8])]), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        let mut v6 = [0u8; 17];
+        v6[0] = 6;
+        v6[16] = 1;
+        assert_eq!(ssrf(c, "v6.example", &[v6]), HOWDAH_BLOCK);
+        assert!(take_sink(c).unwrap().contains("ip=::1"));
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn ssrf_literal_only_no_resolve() {
+        let c = init("[sinks.ssrf]\nmode=\"block\"");
+        begin(c);
+        assert_eq!(ssrf(c, "2130706433", &[]), HOWDAH_BLOCK);
+        assert!(take_sink(c).unwrap().contains("class=loopback"));
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn ssrf_allow_host_allows() {
+        let c = init("[sinks.ssrf]\nmode=\"block\"\nallow_hosts=[\"internal.example\",\"10.0.0.0/8\"]");
+        begin(c);
+        assert_eq!(ssrf(c, "internal.example", &[rec4([127, 0, 0, 1])]), HOWDAH_ALLOW);
+        assert_eq!(ssrf(c, "other.example", &[rec4([10, 1, 2, 3])]), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        assert_eq!(ssrf(c, "other.example", &[rec4([192, 168, 1, 1])]), HOWDAH_BLOCK);
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn ssrf_reason_has_class_not_url() {
+        let c = init("[sinks.ssrf]\nmode=\"detect\"");
+        begin(c);
+        assert_eq!(ssrf(c, "user:pw@127.0.0.1/admin?token=secret", &[rec4([127, 0, 0, 1])]), HOWDAH_LOG);
+        let line = take_sink(c).unwrap();
+        assert!(line.contains("\"rule\":\"ssrf\""), "{line}");
+        assert!(line.contains("class=loopback") && line.contains("host=127.0.0.1 port=80 ip=127.0.0.1"), "{line}");
+        for bad in ["@", "user", "pw", "/admin", "?", "secret"] {
+            assert!(!line.contains(bad), "leaked {bad:?}: {line}");
+        }
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn ssrf_log_host_cut_before_userinfo_strip() {
+        let c = init("[sinks.ssrf]\nmode=\"detect\"");
+        begin(c);
+        let cases = [
+            ("evilhost/path?x=a@b.com", "host=evilhost port=80"),
+            ("example.com/cb?email=a@b.com", "host=example.com port=80"),
+            ("u:p@ss@host", "host=host port=80"),
+            ("user:pw@127.0.0.1/admin?token=secret", "host=127.0.0.1 port=80"),
+            ("[::1]:80", "host=[::1]:80 port=80"),
+        ];
+        for (h, want) in cases {
+            assert_eq!(ssrf(c, h, &[rec4([127, 0, 0, 1])]), HOWDAH_LOG, "{h}");
+            let line = take_sink(c).unwrap();
+            assert!(line.contains(want), "{h}: {line}");
+            for bad in ["b.com", "@", "ss@", "u:p"] {
+                assert!(!line.contains(bad), "{h} leaked {bad:?}: {line}");
+            }
+        }
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn ssrf_resolve_failure_fails_open() {
+        let c = init("[sinks.ssrf]\nmode=\"block\"");
+        begin(c);
+        assert_eq!(ssrf(c, "nonexistent.example", &[]), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn panic_in_check_fails_open() {
+        let c = init("[sinks.ssrf]\nmode=\"block\"");
+        begin(c);
+        FORCE_PANIC.with(|f| f.set(true));
+        assert_eq!(ssrf(c, "2130706433", &[]), HOWDAH_ALLOW);
+        FORCE_PANIC.with(|f| f.set(false));
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn null_ctx_guarded() {
+        let n = std::ptr::null();
+        assert_eq!(unsafe { howdah_sink_check_ssrf(std::ptr::null_mut(), n, 0, n, 0, 0, std::ptr::null(), 0) }, HOWDAH_ALLOW);
+        let c = init("[sinks.ssrf]\nmode=\"block\"");
+        begin(c);
+        assert_eq!(unsafe { howdah_sink_check_ssrf(c, n, 0, n, 0, 0, std::ptr::null(), 5) }, HOWDAH_ALLOW);
         unsafe { howdah_free(c) };
     }
 

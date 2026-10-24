@@ -1,0 +1,64 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { REPO } from '../../lib/site';
+---
+<Layout
+  title="Howdah 1.3: phar, SSRF, and closing the PHP 5.x gap"
+  description="Howdah 1.3 adds opt-in phar:// and SSRF guards to Layer 3 and makes include/eval guarding active on PHP 5.x. Both new guards are off by default, log first, and have documented limits."
+  path="/blog/howdah-1-3/"
+>
+  <article class="post">
+    <div class="pagehead">
+      <div class="wrap">
+        <p class="crumbs"><a href="/">Home</a> / <a href="/blog/">Blog</a> / <span aria-current="page">Howdah 1.3</span></p>
+        <h1>Howdah 1.3: phar, SSRF, and closing the PHP 5.x gap</h1>
+        <p class="lede"><time datetime="2026-10-24">24 October 2026</time></p>
+      </div>
+    </div>
+
+    <div class="wrap prose">
+      <p>Howdah 1.3 is a fast follow to 1.2. Layer 3 learns to watch two more things PHP does on an attacker's behalf, <code>phar://</code> and outbound requests, and the <code>include</code> and <code>eval</code> guards, which 1.2 could only offer on PHP 7.0 and later, now work on PHP 5.x as well. As always, it logs first. Both new guards are <strong>off by default</strong>, and this post is as much about what they do not catch as what they do.</p>
+
+      <h2>What's new in 1.3</h2>
+      <ul class="facts">
+        <li><strong><code>phar://</code> guard.</strong> Howdah proxies PHP's <code>phar</code> stream wrapper, so filesystem functions, <code>include</code> and class entry points that open a <code>phar://</code> URL pass through one check. On PHP 5.x and 7.x that covers phar metadata deserialization through the wrapper. <code>[sinks.phar] allow_paths</code> lists realpath prefixes that stay allowed.</li>
+        <li><strong>SSRF egress guard.</strong> It checks <code>file_get_contents</code>, <code>fopen</code>, <code>get_headers</code>, <code>fsockopen</code>, <code>stream_socket_client</code> and curl against reserved and internal address ranges. <code>[sinks.ssrf] allow_hosts</code> takes hostnames, IPs and CIDRs for the internal services you do mean to call.</li>
+        <li><strong><code>include</code> and <code>eval</code> on PHP 5.x.</strong> The 1.2 mechanism needed the PHP 7 VM. On 5.x, 1.3 hooks the engine's compile step instead, the same route Suhosin took.</li>
+      </ul>
+
+      <h2>Off by default, log first</h2>
+      <p>Neither new guard does anything until you turn it on with an explicit per-sink mode: <code>[sinks.phar] mode = "detect"</code> or <code>[sinks.ssrf] mode = "detect"</code>. Setting <code>[sinks] mode = "block"</code> or the global <code>howdah.mode = block</code> does <strong>not</strong> arm them. SSRF is off for a practical reason too: turning it on adds a DNS lookup for each distinct outbound host, and that lookup has <strong>no timeout</strong>, so a stalled DNS server stalls the call. Read the log first, then decide whether to block. Events never contain the URL or path.</p>
+
+      <h2>What these guards do not catch</h2>
+      <p>The limits are the important part, so here they are plainly.</p>
+      <h3>phar</h3>
+      <ul class="facts">
+        <li><strong>PHP 8.x gets detection and denial only.</strong> PHP 8.0 stopped deserializing phar metadata automatically, so on 8.x the guard can log or refuse <code>phar://</code> use, but we make no deserialization claim there.</li>
+        <li><strong>The direct Phar API is a gap.</strong> <code>new Phar</code>, <code>PharData</code>, <code>Phar::loadPhar</code>, <code>Phar::mapPhar</code> and <code>Phar::getMetadata</code> unserialize before any wrapper operation, so the wrapper guard never sees them. Closing that needs another hook and is not in 1.3.</li>
+        <li>If another extension re-registers <code>phar</code> after Howdah, or phar is compiled statically into PHP, the guard fails open. Calling <code>stream_wrapper_unregister</code> and <code>stream_wrapper_restore</code> on <code>phar</code> is untested and could drop it.</li>
+      </ul>
+      <h3>SSRF</h3>
+      <ul class="facts">
+        <li><strong>It is best-effort detection, not a connection-time boundary.</strong> Howdah resolves the host when the call is made. DNS rebinding, redirects to a new host, <code>curl_multi_*</code>, <code>CURLOPT_RESOLVE</code> and <code>CURLOPT_CONNECT_TO</code>, and a non-string or absent <code>CURLOPT_URL</code> all get around it. If you need a real egress boundary, use a firewall or an egress proxy.</li>
+        <li><strong>Not every outbound primitive is hooked.</strong> <code>copy</code>, <code>file</code>, <code>readfile</code>, <code>SoapClient</code>, <code>DOMDocument::load*</code> and <code>simplexml_load_file</code> can still reach out unseen.</li>
+        <li>A blocked <code>fsockopen</code> or <code>stream_socket_client</code> leaves <code>$errno</code> and <code>$errstr</code> unset, and a blocked <code>curl_exec</code> returns false with <code>curl_errno</code> 0 and an empty <code>curl_error</code>. More than 32 resolved addresses for one host are capped, and a host longer than 256 bytes is treated as suspicious.</li>
+      </ul>
+      <h3>PHP 5.x include</h3>
+      <ul class="facts">
+        <li><strong>Compile-time only.</strong> On 5.x, an <code>include</code> served from a warm opcache is not compiled again, so it is not re-inspected: already-cached application files are not checked. <code>eval</code> is never cached and is fully covered. On PHP 7.0+ the guard is a runtime handler and opcache does not affect it.</li>
+      </ul>
+
+      <h2>How far it was verified</h2>
+      <p>The three features were tested end to end on real PHP 5.4, 5.6, 7.4, 8.3 and 8.5. Other minors build and are expected to work, but we have not independently verified them, and we do not claim they pass. A review of memory leaks on a PHP debug build is still pending, because the 5.x work was tested on release builds. Our reproducers recreate only the harmless shape of each attack, never a working exploit.</p>
+
+      <h2>Get it</h2>
+      <p>If you already run Howdah, <code>apt-get update &amp;&amp; apt-get upgrade</code> (or the yum equivalent) brings in 1.3, and nothing changes until you opt in. New here? Start at the <a href="/install/">install picker</a>, read the <a href="/docs/configuration/#layer-3-sinks">configuration reference</a> for <code>[sinks.phar]</code> and <code>[sinks.ssrf]</code>, and check the <a href="/coverage/">coverage page</a> for the per-version table. The source and this site are on <a href={REPO}>GitHub</a>.</p>
+    </div>
+  </article>
+</Layout>
+
+<style>
+  .prose { max-width: 46rem; padding-bottom: 1rem; }
+  .prose h2 { margin-top: 2rem; }
+  .prose h3 { margin-top: 1.5rem; }
+</style>

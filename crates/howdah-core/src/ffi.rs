@@ -136,6 +136,10 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::Unserialize => "unserialize sink invoked on untrusted data",
         RuleId::Phar => "phar:// stream wrapper access outside the allowlist",
         RuleId::Ssrf => "outbound request to a disallowed destination",
+        RuleId::UploadExec => "uploaded file is executable or server-side code",
+        RuleId::UnexpectedBinary => "unexpected binary executed after an upload",
+        RuleId::UnexpectedEgress => "unexpected outbound connection after a request",
+        RuleId::PhpWrite => "PHP file written to disk",
     }
 }
 

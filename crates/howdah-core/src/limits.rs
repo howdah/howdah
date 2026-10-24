@@ -317,6 +317,10 @@ pub enum RuleId {
     Unserialize,
     Phar,
     Ssrf,
+    UploadExec,
+    UnexpectedBinary,
+    UnexpectedEgress,
+    PhpWrite,
 }
 
 impl RuleId {
@@ -338,7 +342,11 @@ impl RuleId {
             | RuleId::Eval
             | RuleId::Unserialize
             | RuleId::Phar
-            | RuleId::Ssrf => Severity::Standard,
+            | RuleId::Ssrf
+            | RuleId::UploadExec
+            | RuleId::UnexpectedBinary
+            | RuleId::UnexpectedEgress
+            | RuleId::PhpWrite => Severity::Standard,
             _ => Severity::Critical,
         }
     }
@@ -350,7 +358,7 @@ impl RuleId {
 /// or miss one it accepts. `rule_catalog_covers_every_variant` fails to
 /// compile when a variant is added here but not to the list.
 pub fn rule_catalog() -> &'static [RuleId] {
-    const ALL: [RuleId; 24] = [
+    const ALL: [RuleId; 28] = [
         RuleId::MaxParts,
         RuleId::MaxFiles,
         RuleId::MaxPartHeaders,
@@ -375,6 +383,10 @@ pub fn rule_catalog() -> &'static [RuleId] {
         RuleId::Unserialize,
         RuleId::Phar,
         RuleId::Ssrf,
+        RuleId::UploadExec,
+        RuleId::UnexpectedBinary,
+        RuleId::UnexpectedEgress,
+        RuleId::PhpWrite,
     ];
     &ALL
 }
@@ -563,9 +575,14 @@ mod tests {
                 | RuleId::Eval
                 | RuleId::Unserialize
                 | RuleId::Phar
-                | RuleId::Ssrf => {}
+                | RuleId::Ssrf
+                | RuleId::UploadExec
+                | RuleId::UnexpectedBinary
+                | RuleId::UnexpectedEgress
+                | RuleId::PhpWrite => {}
             }
         }
+        assert_eq!(rule_catalog().len(), 28);
         let mut sorted = all.to_vec();
         sorted.sort();
         sorted.dedup();
@@ -585,6 +602,10 @@ mod tests {
         assert_eq!(RuleId::Include.severity(), Severity::Standard);
         assert_eq!(RuleId::Eval.severity(), Severity::Standard);
         assert_eq!(RuleId::Unserialize.severity(), Severity::Standard);
+        assert_eq!(RuleId::UploadExec.severity(), Severity::Standard);
+        assert_eq!(RuleId::UnexpectedBinary.severity(), Severity::Standard);
+        assert_eq!(RuleId::UnexpectedEgress.severity(), Severity::Standard);
+        assert_eq!(RuleId::PhpWrite.severity(), Severity::Standard);
         assert_eq!(RuleId::MaxParts.severity(), Severity::Critical);
         assert_eq!(RuleId::MaxFiles.severity(), Severity::Critical);
         assert_eq!(RuleId::MaxPartHeaders.severity(), Severity::Critical);

@@ -1,0 +1,37 @@
+# Benchmark config "l123": Layer 1 + Layer 2 + every Layer 3 sink in detect
+# mode, including the three that are off by default (unserialize, phar, ssrf).
+# The allowlists cover what lab/bench/app/sink.php does, as an operator would
+# set them, so benign benchmark traffic measures inspection, not log writes.
+# Layer 4 is off.
+mode = "detect"
+
+[inspect]
+enabled = true
+mode = "detect"
+
+[sinks]
+enabled = true
+mode = "detect"
+
+[sinks.command_exec]
+allow = ["true"]
+
+[sinks.unserialize]
+mode = "detect"
+allow_classes = []
+
+[sinks.include]
+allow_paths = ["/var/www/html"]
+
+[sinks.eval]
+
+[sinks.phar]
+mode = "detect"
+allow_paths = []
+
+[sinks.ssrf]
+mode = "detect"
+allow_hosts = []
+
+[behavior]
+enabled = false

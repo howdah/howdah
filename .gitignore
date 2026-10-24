@@ -11,6 +11,9 @@
 /lab/**/vendor
 /lab/integration/.matrix-out
 /lab/integration/.refusal-out
+# Benchmark runs (lab/bench/run.sh, corpus.sh, jit.sh); published runs are
+# copied into lab/bench/results/ by hand.
+/lab/bench/out
 /packaging/out
 # cargo-fuzz crash inputs and corpora
 /fuzz/artifacts
@@ -18,6 +21,7 @@
 # Site build
 /site/dist
 /site/node_modules
+/site/.test-build.lock
 # Built from the checkout by `npm run wasm` / pages.yml; never committed
 /site/demo/howdah_wasm.wasm
 # Local-only: shaped-request generator and reproducers stay out of the public repo

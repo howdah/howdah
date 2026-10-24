@@ -1,0 +1,32 @@
+{
+  "date_utc": "2026-10-24T21:58:49Z",
+  "started_utc": "20261024T203938Z",
+  "cpu_model": "AMD Ryzen 7 8845HS w/ Radeon 780M Graphics",
+  "nproc": 16,
+  "kernel": "6.12.111+deb13-amd64",
+  "os": "Debian GNU/Linux 13 (trixie)",
+  "mem_total_kb": 28524972,
+  "cpu_governor": "powersave",
+  "docker": "29.9.2",
+  "wrk": "wrk debian/4.1.0-3+b2",
+  "nginx": "nginx/1.22.1",
+  "howdah_version": "1.4.0",
+  "git_commit": "e0cde7114826",
+  "pinning": "php 2-5, nginx 6, wrk 1",
+  "loadavg_start": "2.24 1.85 0.97",
+  "loadavg_end": "1.01 1.12 1.59",
+  "params": {
+    "mode": "full",
+    "versions": "5.6 7.4 8.3",
+    "sapis": "fpm apache",
+    "configs": "noext l1 l12 l123",
+    "workloads": "get_nobody post_form_1k post_multipart_50k sink_exec_include",
+    "duration_s": 6,
+    "warmup_s": 2,
+    "rounds": 5,
+    "conns": 1,
+    "fpm_workers": 4,
+    "wrk_threads": 1
+  },
+  "git_commit_note": "Measured tree: origin/main e0cde7114826 (Howdah 1.4.0, before #42 and #44) plus this branch's lab/bench files. run.sh recorded the local commit 8a4d5f36ae95, which was squashed before the PR."
+}

@@ -26,6 +26,7 @@ import { REPO } from '../../lib/site';
         <li><a class="card" href="/coverage/"><h3>Coverage</h3><p>Exactly which PHP versions and server types have been tested, generated from the lab matrix.</p></a></li>
         <li><a class="card" href="/docs/compliance/"><h3>Compliance evidence</h3><p>PCI DSS 6.4.2 bullet by bullet, the log fields and retention setup to hand an assessor, a decision-record template, and how to answer end-of-life questions.</p></a></li>
         <li><a class="card" href="/docs/verify/"><h3>Verify a release</h3><p>The signed checksums, build provenance, the SBOM, and rebuilding a release yourself to check it matches byte for byte.</p></a></li>
+        <li><a class="card" href="/docs/performance/"><h3>Performance</h3><p>Measured latency with and without Howdah, the OPcache JIT result, and what Layer 2 flags of a standard attack corpus.</p></a></li>
       </ul>
 
       <h2 style="margin-top:2.5rem">Reference in the repository</h2>
@@ -36,6 +37,7 @@ import { REPO } from '../../lib/site';
         <li><a href={`${REPO}/tree/main/profiles`}>profiles/</a> — application profiles (WordPress, Drupal 7, Magento 1 and 2, Joomla, PrestaShop 1.6): starting points, never applied automatically</li>
         <li><a href={`${REPO}/blob/main/docs/coverage.md`}>docs/coverage.md</a> — coverage in prose</li>
         <li><a href={`${REPO}/blob/main/docs/coverage-data.md`}>docs/coverage-data.md</a> — the memory measurements behind the default limits</li>
+        <li><a href={`${REPO}/blob/main/docs/performance.md`}>docs/performance.md</a> — latency, OPcache JIT and Layer 2 detection measurements</li>
         <li><a href={`${REPO}/blob/main/docs/install-repos.md`}>docs/install-repos.md</a> — apt/yum repository install</li>
         <li><a href={`${REPO}/blob/main/docs/compliance.md`}>docs/compliance.md</a> — compliance evidence (PCI DSS 6.4.2, audit logs, decision record)</li>
         <li><a href={`${REPO}/blob/main/docs/packaging-layouts.md`}>docs/packaging-layouts.md</a> — which package fits cPanel, Plesk, CloudLinux, distribution and DirectAdmin PHP, with the vendor sources; LiteSpeed lsphp and Alpine (musl)</li>

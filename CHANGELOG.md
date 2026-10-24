@@ -276,6 +276,27 @@ All notable changes to Howdah are documented here. The format follows
   or low astro advisories; sharp (libvips, libheif, librsvg), zod and
   zod-to-ts high; esbuild low. All of them need the upgrade to astro 7, a
   breaking change and a separate item for the owner.
+- Measured numbers, published at https://howdah.org/docs/performance/ and in
+  `docs/performance.md`, from three new lab harnesses under `lab/bench/`:
+  `run.sh` (request latency with no extension, Layer 1, Layers 1+2 and
+  Layers 1+2+3, for a GET with no body, a 1 KB form, a 50 KB multipart body
+  and a `system()` + `include` script, on PHP 5.6, 7.4 and 8.3 under php-fpm
+  behind nginx and Apache mod_php, with the machine spec recorded; Layer 4 is
+  not measured), `corpus.sh`
+  (what Layer 2 flags of the GoTestWAF corpus, and its false positives on
+  GoTestWAF's benign set; framed as what a narrow log-only layer catches, not
+  a WAF score) and `jit.sh` (whether the OPcache JIT stays on with Howdah at
+  the shipped defaults and with `[sinks] hook = "opcode"`, plus the
+  integration suite with the JIT configured; jit_on is reported as measured).
+  The published JIT run predates #42 and shows the JIT off on PHP 8.1, 8.3
+  and 8.5 with Howdah loaded; it has not been re-run against #42 yet. The
+  latency and corpus runs also predate #42 and #44; the page names the commit
+  each one measured.
+- A `bench` CI job: a short latency run on PHP 8.3 that fails if Howdah adds
+  more than 50 µs to the median GET with no body, or if any cell regresses
+  more than 25% against `lab/bench/baseline-ci.json` (normalized to the same
+  run's no-extension cell). The limits are deliberately loose because
+  GitHub-hosted runners are noisy. No other job depends on it.
 
 ### Changed
 - `lab/integration/selftest_container.sh` takes `PREINSTALLED=1` to test a PHP

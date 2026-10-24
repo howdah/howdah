@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Howdah event line, schema 2",
+  "description": "One Howdah security event: one JSON object per line. Keys may appear in any order. New keys can be added without changing `schema`; removing, renaming or retyping a key increments it. See docs/log-schema.md.",
+  "type": "object",
+  "required": ["schema", "version", "ts", "request_id", "layer", "rule", "action", "client_ip", "method", "uri", "reason"],
+  "properties": {
+    "schema": {
+      "description": "Version of this line format. 2 since Howdah 1.4; 1.0 to 1.3 lines have no `schema` key (treat them as 1).",
+      "type": "integer",
+      "const": 2
+    },
+    "version": {
+      "description": "Version of the Howdah extension that wrote the line, for example \"1.3.0\".",
+      "type": "string",
+      "pattern": "^[0-9A-Za-z.+-]+$"
+    },
+    "ts": {
+      "description": "Time of the event: UTC Unix epoch milliseconds as a decimal string (a string since 1.0, kept for compatibility). \"0\" only in the browser demo, which has no clock.",
+      "type": "string",
+      "pattern": "^[0-9]+$"
+    },
+    "request_id": {
+      "description": "Per-request id, lowercase hex. The same id is printed in the block response body, so a user's report maps to its log line. Every event from one request shares it.",
+      "type": "string",
+      "pattern": "^[0-9a-f]+$",
+      "maxLength": 64
+    },
+    "layer": {
+      "description": "Protection layer of `rule`: 1 = request-shape limits (multipart, input shape, request headers, self-test), 2 = input inspection, 3 = sink hardening. A future layer adds the next integer.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "rule": {
+      "description": "Rule name, the same spelling as the [rules], [inspect.rule_modes] and [sinks.<sink>] config keys. The full list is in docs/log-schema.md.",
+      "type": "string",
+      "pattern": "^[a-z0-9_]+$"
+    },
+    "action": {
+      "description": "What Howdah did: \"log\" (recorded, request allowed) or \"block\" (request refused or call denied). \"allow\" is reserved and not written by 1.x.",
+      "type": "string",
+      "enum": ["allow", "log", "block"]
+    },
+    "client_ip": {
+      "description": "REMOTE_ADDR as the SAPI reports it (the proxy's address behind a reverse proxy). Empty when the SAPI has none, as on the command line.",
+      "type": "string"
+    },
+    "method": {
+      "description": "HTTP request method. Empty when the SAPI has none.",
+      "type": "string"
+    },
+    "uri": {
+      "description": "Request path. The query string is removed before logging, because it can carry secrets.",
+      "type": "string"
+    },
+    "reason": {
+      "description": "Human-readable explanation. It may name a variable, function, class, host or port; it never contains a request body, cookie, Authorization header, matched value or sink argument. Its wording is not part of the contract: match on `rule`, not `reason`.",
+      "type": "string"
+    }
+  }
+}

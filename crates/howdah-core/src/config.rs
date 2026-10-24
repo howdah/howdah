@@ -33,6 +33,170 @@ pub enum OnInvalidConfig {
 pub struct LogConfig {
     /// Log file path; `None` means the host default.
     pub path: Option<String>,
+    /// Where event lines go. `None` = `file` (the 1.x behaviour: the
+    /// `howdah.log` ini path, else `path`, else stderr).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination: Option<LogDestination>,
+    /// Syslog facility for `destination = "syslog"`; `None` = `local0`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub syslog_facility: Option<SyslogFacility>,
+    /// Syslog identifier (tag); `None` = `howdah`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub syslog_ident: Option<String>,
+    /// Absolute path of a program run once per event with the JSON line on
+    /// stdin. `None` (the default) = no hook.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exec: Option<String>,
+    /// Most hook spawns per second per PHP process; `None` = 10.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exec_rate_limit: Option<u32>,
+}
+
+/// `[log] destination`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogDestination {
+    /// Append to a file (the `howdah.log` ini path, else `[log] path`); stderr
+    /// when neither is set or the file cannot be written.
+    File,
+    /// Send each line to the local syslog socket (`/dev/log`).
+    Syslog,
+    /// Write each line to stderr, prefixed `howdah-event `.
+    Stderr,
+}
+
+/// `[log] syslog_facility`. Only the facilities a userland program may use
+/// (no `kern`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SyslogFacility {
+    User,
+    Mail,
+    Daemon,
+    Auth,
+    Syslog,
+    Lpr,
+    News,
+    Uucp,
+    Cron,
+    Authpriv,
+    Ftp,
+    Local0,
+    Local1,
+    Local2,
+    Local3,
+    Local4,
+    Local5,
+    Local6,
+    Local7,
+}
+
+impl SyslogFacility {
+    /// The facility number (RFC 5424 §6.2.1; glibc `LOG_*` >> 3).
+    pub fn code(self) -> u8 {
+        match self {
+            SyslogFacility::User => 1,
+            SyslogFacility::Mail => 2,
+            SyslogFacility::Daemon => 3,
+            SyslogFacility::Auth => 4,
+            SyslogFacility::Syslog => 5,
+            SyslogFacility::Lpr => 6,
+            SyslogFacility::News => 7,
+            SyslogFacility::Uucp => 8,
+            SyslogFacility::Cron => 9,
+            SyslogFacility::Authpriv => 10,
+            SyslogFacility::Ftp => 11,
+            SyslogFacility::Local0 => 16,
+            SyslogFacility::Local1 => 17,
+            SyslogFacility::Local2 => 18,
+            SyslogFacility::Local3 => 19,
+            SyslogFacility::Local4 => 20,
+            SyslogFacility::Local5 => 21,
+            SyslogFacility::Local6 => 22,
+            SyslogFacility::Local7 => 23,
+        }
+    }
+
+    /// The config spelling (`local0`, `daemon`, ...).
+    pub fn name(self) -> &'static str {
+        match self {
+            SyslogFacility::User => "user",
+            SyslogFacility::Mail => "mail",
+            SyslogFacility::Daemon => "daemon",
+            SyslogFacility::Auth => "auth",
+            SyslogFacility::Syslog => "syslog",
+            SyslogFacility::Lpr => "lpr",
+            SyslogFacility::News => "news",
+            SyslogFacility::Uucp => "uucp",
+            SyslogFacility::Cron => "cron",
+            SyslogFacility::Authpriv => "authpriv",
+            SyslogFacility::Ftp => "ftp",
+            SyslogFacility::Local0 => "local0",
+            SyslogFacility::Local1 => "local1",
+            SyslogFacility::Local2 => "local2",
+            SyslogFacility::Local3 => "local3",
+            SyslogFacility::Local4 => "local4",
+            SyslogFacility::Local5 => "local5",
+            SyslogFacility::Local6 => "local6",
+            SyslogFacility::Local7 => "local7",
+        }
+    }
+}
+
+/// Default `[log] exec_rate_limit` (hook spawns per second per process).
+pub const DEFAULT_EXEC_RATE_LIMIT: u32 = 10;
+/// Highest accepted `[log] exec_rate_limit`.
+pub const MAX_EXEC_RATE_LIMIT: u32 = 100;
+
+impl LogConfig {
+    /// Effective destination (`file` when unset).
+    pub fn destination(&self) -> LogDestination {
+        self.destination.unwrap_or(LogDestination::File)
+    }
+
+    /// Effective syslog facility (`local0` when unset).
+    pub fn facility(&self) -> SyslogFacility {
+        self.syslog_facility.unwrap_or(SyslogFacility::Local0)
+    }
+
+    /// Effective syslog identifier (`howdah` when unset).
+    pub fn ident(&self) -> &str {
+        self.syslog_ident.as_deref().unwrap_or("howdah")
+    }
+
+    /// Effective hook rate limit (10 per second when unset).
+    pub fn exec_rate_limit(&self) -> u32 {
+        self.exec_rate_limit.unwrap_or(DEFAULT_EXEC_RATE_LIMIT)
+    }
+
+    /// Reject values the log writer could not use safely. Errors name the key.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(id) = &self.syslog_ident {
+            let ok = !id.is_empty()
+                && id.len() <= 32
+                && id.bytes().all(|b| b.is_ascii_graphic() && !matches!(b, b':' | b'[' | b']'));
+            if !ok {
+                return Err(format!(
+                    "log.syslog_ident {id:?}: must be 1-32 printable ASCII characters with no spaces, ':', '[' or ']'"
+                ));
+            }
+        }
+        if let Some(p) = &self.exec {
+            if !p.starts_with('/') || p.len() > 4096 || p.chars().any(|c| c.is_control()) {
+                return Err(format!(
+                    "log.exec {p:?}: must be an absolute path (starting with '/') with no control characters"
+                ));
+            }
+        }
+        if let Some(n) = self.exec_rate_limit {
+            if n == 0 || n > MAX_EXEC_RATE_LIMIT {
+                return Err(format!(
+                    "log.exec_rate_limit {n}: must be between 1 and {MAX_EXEC_RATE_LIMIT} (spawns per second per PHP process); remove log.exec to turn the hook off"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Layer-2 input inspection settings. Its `mode` is independent of the global
@@ -308,6 +472,7 @@ impl Config {
         let raw: RawConfig = toml::from_str(s).map_err(|e| ConfigError(e.to_string()))?;
         raw.limits.validate().map_err(ConfigError)?;
         raw.inspect.limits.validate().map_err(ConfigError)?;
+        raw.log.validate().map_err(ConfigError)?;
         for p in &raw.sinks.command_exec.allow {
             if let Some(i) = p.find('*') {
                 if i != p.len() - 1 {
@@ -813,5 +978,91 @@ self_test = "off"
     fn sinks_phar_ssrf_unknown_key_rejected() {
         assert!(Config::from_toml("[sinks.phar]\nnope = 1").is_err());
         assert!(Config::from_toml("[sinks.ssrf]\nnope = 1").is_err());
+    }
+
+    // ---- [log] (schema 2 log contract) ------------------------------------
+
+    #[test]
+    fn log_defaults_preserve_file_then_stderr() {
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.log, LogConfig::default());
+        assert_eq!(c.log.destination(), LogDestination::File);
+        assert_eq!(c.log.facility(), SyslogFacility::Local0);
+        assert_eq!(c.log.ident(), "howdah");
+        assert_eq!(c.log.exec, None);
+        assert_eq!(c.log.exec_rate_limit(), 10);
+        // Unset keys do not appear when the config is serialized (the config
+        // editor's view of an empty file is unchanged).
+        let j = serde_json::to_value(&c).unwrap();
+        assert_eq!(j["log"], serde_json::json!({ "path": null }));
+    }
+
+    #[test]
+    fn log_table_parses_every_key() {
+        let c = Config::from_toml(
+            "[log]\npath = \"/var/log/howdah/events.log\"\ndestination = \"syslog\"\n\
+             syslog_facility = \"local3\"\nsyslog_ident = \"howdah-shop\"\n\
+             exec = \"/usr/local/bin/howdah-hook\"\nexec_rate_limit = 3",
+        )
+        .unwrap();
+        assert_eq!(c.log.path.as_deref(), Some("/var/log/howdah/events.log"));
+        assert_eq!(c.log.destination(), LogDestination::Syslog);
+        assert_eq!(c.log.facility(), SyslogFacility::Local3);
+        assert_eq!(c.log.ident(), "howdah-shop");
+        assert_eq!(c.log.exec.as_deref(), Some("/usr/local/bin/howdah-hook"));
+        assert_eq!(c.log.exec_rate_limit(), 3);
+        for (d, want) in [
+            ("file", LogDestination::File),
+            ("syslog", LogDestination::Syslog),
+            ("stderr", LogDestination::Stderr),
+        ] {
+            let c = Config::from_toml(&format!("[log]\ndestination = \"{d}\"")).unwrap();
+            assert_eq!(c.log.destination(), want);
+        }
+    }
+
+    #[test]
+    fn syslog_facility_codes() {
+        for (name, code) in [
+            ("user", 1),
+            ("daemon", 3),
+            ("auth", 4),
+            ("authpriv", 10),
+            ("local0", 16),
+            ("local7", 23),
+        ] {
+            let c = Config::from_toml(&format!("[log]\nsyslog_facility = \"{name}\"")).unwrap();
+            assert_eq!(c.log.facility().code(), code, "{name}");
+        }
+    }
+
+    #[test]
+    fn log_bad_values_rejected_with_the_key_named() {
+        for (toml, key) in [
+            ("[log]\ndestination = \"udp\"", "destination"),
+            ("[log]\nsyslog_facility = \"kern\"", "syslog_facility"),
+            ("[log]\nsyslog_facility = \"local8\"", "syslog_facility"),
+            ("[log]\nsyslog_ident = \"\"", "syslog_ident"),
+            ("[log]\nsyslog_ident = \"has space\"", "syslog_ident"),
+            ("[log]\nsyslog_ident = \"a:b\"", "syslog_ident"),
+            ("[log]\nsyslog_ident = \"a[1]\"", "syslog_ident"),
+            ("[log]\nsyslog_ident = \"0123456789012345678901234567890123\"", "syslog_ident"),
+            ("[log]\nexec = \"hook.sh\"", "exec"),
+            ("[log]\nexec = \"./hook.sh\"", "exec"),
+            ("[log]\nexec = \"\"", "exec"),
+            ("[log]\nexec = \"/bin/hook\\nx\"", "exec"),
+            ("[log]\nexec_rate_limit = 0", "exec_rate_limit"),
+            ("[log]\nexec_rate_limit = 101", "exec_rate_limit"),
+            ("[log]\nexec_rate_limit = -1", "exec_rate_limit"),
+        ] {
+            let e = Config::from_toml(toml).expect_err(toml);
+            assert!(e.to_string().contains(key), "{toml}: {e}");
+        }
+    }
+
+    #[test]
+    fn log_unknown_key_still_rejected() {
+        assert!(Config::from_toml("[log]\nexec_args = []").is_err());
+        assert!(Config::from_toml("[log]\nfacility = \"local0\"").is_err());
     }
 }

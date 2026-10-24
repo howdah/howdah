@@ -65,8 +65,9 @@ impl ModeChoice {
 
 /// Build a minimal core-config TOML from the resolved mode + log destination.
 /// `mode` is [`ModeChoice::toml_mode`]; `None` emits no `mode` line. The log
-/// destination is carried through so the core config is self-consistent (the
-/// glue still writes the log via its own `LOG_PATH`, set regardless).
+/// destination is carried through as `[log] path` so the core config is
+/// self-consistent (the glue resolves the effective destination with
+/// `logsink::Settings::resolve`, where the ini path wins anyway).
 pub fn synth_config(mode: Option<&str>, log: Option<&str>) -> String {
     let mut s = String::new();
     if let Some(m) = mode {

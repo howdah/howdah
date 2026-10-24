@@ -10,5 +10,5 @@ pub mod multipart;
 pub mod rules;
 pub mod sinks;
 
-pub use config::{Config, ConfigError, LoadOutcome, LogConfig, Mode, OnInvalidConfig};
+pub use config::{Config, ConfigError, LoadOutcome, LogConfig, LogDestination, Mode, OnInvalidConfig, SyslogFacility};
 pub use limits::{Limits, RuleId, Severity};

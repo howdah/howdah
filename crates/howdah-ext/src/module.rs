@@ -13,6 +13,7 @@ use howdah_core::ffi as core;
 use howdah_sys as sys;
 
 use crate::input_filter;
+use crate::logsink;
 use crate::response;
 use crate::rfc1867;
 
@@ -40,14 +41,16 @@ pub(crate) static mut ENDED: bool = false;
 /// mis-attribute a flood and diverge from 0.1). GET/COOKIE on a multipart
 /// request are still counted.
 pub(crate) static mut MULTIPART: bool = false;
-/// Log destination file; `None` => stderr fallback.
-pub(crate) static mut LOG_PATH: Option<CString> = None;
+/// Resolved log destination + `[log] exec` hook (set at MINIT; `None` before
+/// that, when `response::write_log_line` falls back to stderr).
+pub(crate) static mut LOG: Option<logsink::Settings> = None;
 static mut MODULE_NUMBER: c_int = 0;
-/// For the info table: (mode, config path, log path) as displayed.
+/// For the info table: (mode, config path, log destination, hook) as displayed.
 static mut DISP_MODE: Option<CString> = None;
 static mut DISP_CONFIG: Option<CString> = None;
 static mut DISP_LOG: Option<CString> = None;
 static mut DISP_CONFIG_STATUS: Option<CString> = None;
+static mut DISP_HOOK: Option<CString> = None;
 
 const SUCCESS: c_int = 0;
 
@@ -199,6 +202,13 @@ unsafe extern "C" fn rshutdown(_type: c_int, _module_number: c_int) -> c_int {
             let _ = catch_unwind(AssertUnwindSafe(|| response::emit_block(status, &request_id)));
         }
     }
+    // Collect finished `[log] exec` hook processes (non-blocking; a no-op
+    // without a hook) so none linger as zombies in a long-lived worker.
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if let Some(s) = (*ptr::addr_of_mut!(LOG)).as_mut() {
+            s.reap();
+        }
+    }));
     clear_request_state();
     SUCCESS
 }
@@ -516,9 +526,9 @@ unsafe extern "C" fn minit(_type: c_int, module_number: c_int) -> c_int {
     //  * With NO config file (the shipped path: howdah.mode set, howdah.config
     //    empty), synthesize the core config from the ini so howdah.mode actually
     //    takes effect — otherwise off/detect would silently become Block. The
-    //    howdah.log destination is carried into the synthesized config too, but
-    //    the glue's own log wiring (LOG_PATH below) is what actually writes, and
-    //    is set unconditionally regardless of this branch.
+    //    howdah.log destination is carried into the synthesized config too, as
+    //    [log] path; the glue's log wiring (LOG below) resolves the effective
+    //    destination either way, with the ini path winning over [log] path.
     // Fail-safe: genuinely broken/unreadable config still yields the core's safe
     // defaults (Block) — we fail toward protection, never toward Off.
     let mode_disp;
@@ -563,14 +573,23 @@ unsafe extern "C" fn minit(_type: c_int, module_number: c_int) -> c_int {
     };
     CTX = ctx;
 
-    // Log destination (glue-level: this is what actually writes the log line).
-    LOG_PATH = log.clone().map(|p| CString::new(p).unwrap_or_default());
+    // Log destination + hook (glue-level: this is what actually writes the
+    // log line). `[log] destination` picks file/syslog/stderr; for a file the
+    // howdah.log ini path wins over `[log] path`. Nothing is opened here: the
+    // file is opened per event and the syslog socket on first use, in the
+    // worker, after any fork.
+    let settings = catch_unwind(AssertUnwindSafe(|| {
+        logsink::Settings::resolve(log.as_deref(), &core::howdah_log_config(ctx))
+    }))
+    .unwrap_or_else(|_| logsink::Settings::resolve(log.as_deref(), &Default::default()));
+    DISP_LOG = Some(cstring(&settings.describe()));
+    DISP_HOOK = settings.describe_hook().map(|h| cstring(&h));
+    LOG = Some(settings);
 
     // Display strings for `php --ri howdah` / phpinfo(): reflect the EFFECTIVE
     // config source, so the Mode row never disagrees with real behavior.
     DISP_MODE = Some(cstring(&mode_disp));
     DISP_CONFIG = Some(cstring(cfg_path.as_deref().unwrap_or("(none; mode from howdah.mode ini)")));
-    DISP_LOG = Some(cstring(log.as_deref().unwrap_or("(stderr)")));
     DISP_CONFIG_STATUS = Some(cstring(&config_status));
 
     // Chain the multipart callback: save whatever is installed (e.g. session
@@ -634,8 +653,12 @@ unsafe extern "C" fn minfo(_module: *mut sys::zend_module_entry) {
         row(b"Config status\0", s.as_bytes_with_nul());
     }
     if let Some(l) = (*ptr::addr_of!(DISP_LOG)).as_ref() {
-        row(b"Log (howdah.log)\0", l.as_bytes_with_nul());
+        row(b"Log destination\0", l.as_bytes_with_nul());
     }
+    if let Some(h) = (*ptr::addr_of!(DISP_HOOK)).as_ref() {
+        row(b"Log hook ([log] exec)\0", h.as_bytes_with_nul());
+    }
+    row(b"Log schema\0", cstring(&howdah_core::log::SCHEMA_VERSION.to_string()).as_bytes_with_nul());
     row(
         b"Panic guard (catch_unwind active)\0",
         if crate::panic_unwinds() { b"yes\0" } else { b"NO - UNSAFE BUILD\0" },

@@ -17,12 +17,22 @@
 #     fails to compile (zend_module_entry has no field `name`, ...).
 #   - PHP headers from source for every minor (build-one.sh --from-source,
 #     pinned patch + sha256 in build-release.sh), as on aarch64.
+#   - the musl floor: Alpine 3.11's loader (musl 1.1.24, the oldest musl the
+#     musl build supports) at /opt/musl-floor, so build-one.sh can fail a
+#     build that needs a libc symbol that musl does not have
+#     (packaging/musl-floor-check.sh). The floor exists because the
+#     [log] exec hook's std::process::Command links
+#     posix_spawn_file_actions_addchdir_np, which musl added in 1.1.24.
 #
 #   docker build -f packaging/release.musl.Dockerfile -t howdah-release-musl .
 #
 # x86_64 only: no aarch64 musl build is made yet.
 
+FROM alpine:3.11@sha256:bcae378eacedab83da66079d9366c8f5df542d7ed9ab23bf487e3e1a8481375d AS muslfloor
+
 FROM alpine:3.21@sha256:ee16d92f96db08d9d2d07da48555a27f3a69d8f0759021dbc601195ed0d2b5bd
+
+COPY --from=muslfloor /lib/ld-musl-x86_64.so.1 /opt/musl-floor/ld-musl-x86_64.so.1
 
 RUN set -eu; \
     retry() { n=0; until "$@"; do n=$((n+1)); [ "$n" -ge 4 ] && return 1; echo "retry $n: $*" >&2; sleep 4; done; }; \

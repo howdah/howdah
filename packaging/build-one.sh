@@ -211,8 +211,15 @@ if [ "$LIBC" = musl ]; then
     esac
   done
   if grep -q 'GLIBC_' "$DYN"; then die "musl build references glibc symbol versions"; fi
+  # The musl floor: every libc symbol the module needs must exist in musl
+  # 1.1.24 (Alpine 3.11), or PHP on an older-or-equal claimed base refuses
+  # the whole module ("Error relocating ...: symbol not found").
+  FLOOR_LIBC="${HOWDAH_MUSL_FLOOR_LIBC:-/opt/musl-floor/ld-musl-$ARCH.so.1}"
+  [ -f "$FLOOR_LIBC" ] || die "musl floor libc $FLOOR_LIBC is missing (rebuild the release image without KEEP_IMAGE=1)"
+  sh /src/packaging/musl-floor-check.sh "$SO" "$FLOOR_LIBC" "/lib/ld-musl-$ARCH.so.1" >&2 \
+    || die "the musl build needs C library symbols older musl lacks (see above); it would not load on musl 1.1.24 (Alpine 3.11)"
   MAXREF=musl
-  note "musl OK: NEEDED $(printf '%s ' $NEEDED)"
+  note "musl OK: NEEDED $(printf '%s ' $NEEDED); all libc symbols present in musl 1.1.24"
 else
 note "objdump -T glibc symbol-version check (baseline 2.17, $ARCH)"
 REFS=$(grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' "$DYN" | sort -u -V)

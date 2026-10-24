@@ -390,13 +390,15 @@ impl howdah_ctx {
                 .filter(|c| !c.is_control())
                 .collect()
         };
-        // Defense in depth: log only the bare authority. Drop userinfo (up to
-        // and including the first '@'), then cut at the first '/', '?' or '#'.
+        // Defense in depth: log only the bare host. Cut at the first
+        // /, ? or #, then drop userinfo.
         let bare_host = {
             let h = clip(host);
-            let h = h.split_once('@').map_or(h.as_str(), |(_, rest)| rest);
+            // Cut first (an '@' in path/query is not userinfo), then take the
+            // text after the LAST '@' of the authority (userinfo may hold '@').
             let end = h.find(['/', '?', '#']).unwrap_or(h.len());
-            h[..end].to_string()
+            let auth = &h[..end];
+            auth.rsplit_once('@').map_or(auth, |(_, host)| host).to_string()
         };
         let reason = format!(
             "ssrf via {}: host={} port={} ip={} class={}",
@@ -1539,6 +1541,28 @@ mod tests {
         assert!(line.contains("class=loopback") && line.contains("host=127.0.0.1 port=80 ip=127.0.0.1"), "{line}");
         for bad in ["@", "user", "pw", "/admin", "?", "secret"] {
             assert!(!line.contains(bad), "leaked {bad:?}: {line}");
+        }
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn ssrf_log_host_cut_before_userinfo_strip() {
+        let c = init("[sinks.ssrf]\nmode=\"detect\"");
+        begin(c);
+        let cases = [
+            ("evilhost/path?x=a@b.com", "host=evilhost port=80"),
+            ("example.com/cb?email=a@b.com", "host=example.com port=80"),
+            ("u:p@ss@host", "host=host port=80"),
+            ("user:pw@127.0.0.1/admin?token=secret", "host=127.0.0.1 port=80"),
+            ("[::1]:80", "host=[::1]:80 port=80"),
+        ];
+        for (h, want) in cases {
+            assert_eq!(ssrf(c, h, &[rec4([127, 0, 0, 1])]), HOWDAH_LOG, "{h}");
+            let line = take_sink(c).unwrap();
+            assert!(line.contains(want), "{h}: {line}");
+            for bad in ["b.com", "@", "ss@", "u:p"] {
+                assert!(!line.contains(bad), "{h} leaked {bad:?}: {line}");
+            }
         }
         unsafe { howdah_free(c) };
     }

@@ -1,0 +1,16 @@
+# cfg.howdah.org: stateless config fetch service (see README.md).
+name = "howdah-cfg"
+main = "index.js"
+compatibility_date = "2026-10-01"
+workers_dev = false
+routes = [{ pattern = "cfg.howdah.org", custom_domain = true }]
+
+# The core wasm is imported as a module (index.js); built by packaging/build-wasm.sh.
+[[rules]]
+type = "CompiledWasm"
+globs = ["**/*.wasm"]
+fallthrough = true
+
+# No logs, no traces: the service must keep nothing about a request.
+[observability]
+enabled = false

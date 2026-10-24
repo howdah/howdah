@@ -280,9 +280,10 @@ jobs:
         with:
           node-version: 22
       # Reported, not gating (see above). scripts/audit-summary.mjs writes the
-      # counts by severity and every advisory to the job summary, emits one
-      # ::warning:: annotation, and exits 1 on findings (2 if npm audit gave no
-      # report), which marks this step, not the job, as failed.
+      # counts by severity and every advisory to the job summary and emits one
+      # ::warning:: annotation; it exits 0 on findings and 2 only when npm
+      # audit gave no report, and continue-on-error keeps even that from
+      # failing the job.
       - name: npm audit (site and worker, production dependencies; not gating)
         if: ${{ !cancelled() }}
         continue-on-error: true

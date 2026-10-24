@@ -5,8 +5,10 @@
 //     with the fix npm offers;
 //   - one ::warning:: annotation with the counts and the top advisory ids, so
 //     the findings show on the PR without turning the job red.
-// Exit 0 when there are no findings, 1 when there are, 2 when the input is not
-// an npm audit report (for example the registry could not be reached).
+// Exit 0 whether or not there are findings: the annotation and the summary
+// carry them, and a non-zero exit would add an error annotation to every PR.
+// Exit 2 when the input is not an npm audit report (for example the registry
+// could not be reached), which is a real error.
 //
 //   npm audit --omit=dev --json | node scripts/audit-summary.mjs
 import { appendFileSync, readFileSync } from 'node:fs';
@@ -75,4 +77,3 @@ else process.stdout.write(md);
 if (meta.total === 0) process.exit(0);
 const top = sorted.slice(0, 5).map((a) => a.id).join(', ');
 console.log(`::warning title=npm audit::${meta.total} vulnerable packages (${counts}) in the site's production dependencies. Most severe: ${top}. Details in the job summary.`);
-process.exit(1);

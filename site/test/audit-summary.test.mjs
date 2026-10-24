@@ -65,9 +65,12 @@ const clean = JSON.stringify({
   metadata: { vulnerabilities: { info: 0, low: 0, moderate: 0, high: 0, critical: 0, total: 0 } },
 });
 
-test('findings: exit 1, counts by severity in the summary', () => {
+// Findings exit 0: the ::warning:: annotation and the summary carry them. A
+// non-zero exit would add a "Process completed with exit code 1" error
+// annotation to every PR, which is the red-by-design noise this avoids.
+test('findings: exit 0, counts by severity in the summary', () => {
   const r = run(findings);
-  assert.equal(r.status, 1);
+  assert.equal(r.status, 0);
   assert.match(r.md, /4 vulnerable packages: 1 critical, 2 high, 1 low/);
 });
 

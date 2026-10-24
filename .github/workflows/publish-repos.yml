@@ -135,6 +135,10 @@ jobs:
     if: ${{ always() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     environment: pkg-publish
+    permissions:
+      contents: read
+      id-token: write       # OIDC token for the attestations' Sigstore certificate
+      attestations: write   # build provenance for the packages (publish runs only)
     steps:
       - uses: actions/checkout@v4
 
@@ -259,6 +263,22 @@ jobs:
           find "$r" -type f | sort | head -100
           rm -rf "$tmp"
 
+      # SLSA build provenance for the packages THIS run built (not the ones
+      # seeded from R2), as users download them: each .deb from the pool, each
+      # .rpm after rpmsign. Real publishes only; a dry run attests nothing.
+      # Verify: gh attestation verify <pkg> -R howdah/howdah  (docs/verify.md)
+      - name: List the new apt + yum packages (attestation subjects)
+        if: ${{ inputs.publish }}
+        run: |
+          packaging/repo/attest-subjects.sh packaging/out packaging/out/repo > packaging/out/attest-repo.sha256
+          cat packaging/out/attest-repo.sha256
+
+      - name: Attest build provenance (apt + yum packages)
+        if: ${{ inputs.publish }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: packaging/out/attest-repo.sha256
+
       # Owner-set repo secrets (NOT created by this change; see GO-LIVE.md):
       #   HOWDAH_R2_ACCESS_KEY_ID, HOWDAH_R2_SECRET_ACCESS_KEY,
       #   HOWDAH_R2_ENDPOINT (https://<acct>.r2.cloudflarestorage.com),
@@ -347,6 +367,22 @@ jobs:
           for f in $(find "$r" -path '*/yum/repodata/repomd.xml' | sort); do gpg --batch --verify "$f.asc" "$f"; done
           find "$r" -type f \( -name '*.rpm' -o -name '*.deb' \) | sort
           rm -rf "$tmp"
+
+      - name: List the new layout packages (attestation subjects)
+        if: ${{ inputs.publish && steps.layouts.outputs.has == 'true' }}
+        run: |
+          set -euo pipefail
+          sh packaging/repo/layout-prefixes.sh packaging/out/layouts | while read -r prefix kind; do
+            packaging/repo/attest-subjects.sh "packaging/out/layouts/$prefix/$kind" \
+              "packaging/out/layout-repo/$prefix" "$prefix/"
+          done > packaging/out/attest-layouts.sha256
+          cat packaging/out/attest-layouts.sha256
+
+      - name: Attest build provenance (layout packages)
+        if: ${{ inputs.publish && steps.layouts.outputs.has == 'true' }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: packaging/out/attest-layouts.sha256
 
       - name: Upload the layout repos to R2 (dependency order, own prefixes only)
         if: steps.layouts.outputs.has == 'true'

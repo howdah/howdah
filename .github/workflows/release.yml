@@ -5,6 +5,9 @@ name: release
 # subkey, and publishes a GitHub Release with the tarballs + SHA256SUMS +
 # detached signature + the public signing key. Pre-release tags (v1.2.3-rc1)
 # are published as DRAFT pre-releases, never full public releases.
+# Every asset also gets a SLSA build provenance attestation and the tarballs a
+# CycloneDX SBOM attestation (release job, after the GPG signing, which is
+# unchanged). The tarballs are reproducible: docs/verify.md.
 on:
   push:
     tags:
@@ -126,15 +129,40 @@ jobs:
           path: packaging/out/*.tar.gz
           if-no-files-found: error
 
+  # ---- CycloneDX SBOM of howdah.so, one per target --------------------------
+  # Its own read-only job, so the SBOM tool never runs where the signing key
+  # and the OIDC token are. The release job attests the result.
+  sbom:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate the SBOMs (pinned cargo-cyclonedx, Cargo.lock at this tag)
+        run: |
+          packaging/sbom.sh sbom/howdah-sbom-x86_64.cdx.json x86_64-unknown-linux-gnu
+          packaging/sbom.sh sbom/howdah-sbom-aarch64.cdx.json aarch64-unknown-linux-gnu
+          packaging/sbom.sh sbom/howdah-sbom-x86_64-musl.cdx.json x86_64-unknown-linux-musl
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: howdah-sbom
+          path: sbom/*.cdx.json
+          if-no-files-found: error
+
   # ---- hash, sign, and publish the whole set -------------------------------
   # Publishes whenever the gating x86_64 build is green, even if some (or all)
   # best-effort aarch64 or musl cells failed; whatever tarballs uploaded ship.
+  # The SBOM job must be green too: no release ships without its attestations.
   release:
-    needs: [build, build-aarch64, build-musl]
-    if: ${{ always() && needs.build.result == 'success' }}
+    needs: [build, build-aarch64, build-musl, sbom]
+    if: ${{ always() && needs.build.result == 'success' && needs.sbom.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # only this job creates the release + uploads assets
+      contents: write       # only this job creates the release + uploads assets
+      id-token: write       # OIDC token for the attestations' Sigstore certificate
+      attestations: write   # store the provenance and SBOM attestations
     steps:
       - uses: actions/checkout@v4
 
@@ -186,6 +214,63 @@ jobs:
       - name: Ship the public key alongside the signature
         run: cp packaging/howdah-release-signing.asc packaging/out/
 
+      # ---- attestations: in addition to the GPG signature, not instead ------
+      # A SLSA v1 build provenance statement per asset, signed through
+      # Sigstore with this workflow run's OIDC identity (public-good instance,
+      # recorded in its transparency log) and stored on the repository. It
+      # names the repo, workflow, tag and commit that built the file. Verify:
+      #   gh attestation verify <file> -R howdah/howdah     (docs/verify.md)
+      - name: Attest build provenance (tarballs, howdah-check, SHA256SUMS)
+        id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            packaging/out/*.tar.gz
+            packaging/out/howdah-check
+            packaging/out/SHA256SUMS
+
+      # The SBOM (sbom job, merged into dl/ above) bound to the tarballs of its
+      # arch. actions/attest with sbom-path is the successor of attest-sbom.
+      - name: Attest the SBOM (x86_64 tarballs)
+        id: sbom-x86_64
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: packaging/out/*-linux-x86_64.tar.gz
+          sbom-path: dl/howdah-sbom-x86_64.cdx.json
+
+      - name: Attest the SBOM (aarch64 tarballs, if any were built)
+        id: sbom-aarch64
+        if: ${{ hashFiles('packaging/out/*-linux-aarch64.tar.gz') != '' }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: packaging/out/*-linux-aarch64.tar.gz
+          sbom-path: dl/howdah-sbom-aarch64.cdx.json
+
+      - name: Attest the SBOM (x86_64 musl tarballs, if any were built)
+        id: sbom-musl
+        if: ${{ hashFiles('packaging/out/*-linux-x86_64-musl.tar.gz') != '' }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: packaging/out/*-linux-x86_64-musl.tar.gz
+          sbom-path: dl/howdah-sbom-x86_64-musl.cdx.json
+
+      # The Sigstore bundles go out with the release, so anyone can verify
+      # offline (cosign, or gh --bundle) without the GitHub API or an account.
+      # They are self-authenticating, so SHA256SUMS does not need to cover them.
+      - name: Stage the attestation bundles as release assets
+        env:
+          PROV: ${{ steps.provenance.outputs.bundle-path }}
+          SBOM_X86: ${{ steps.sbom-x86_64.outputs.bundle-path }}
+          SBOM_ARM: ${{ steps.sbom-aarch64.outputs.bundle-path }}
+          SBOM_MUSL: ${{ steps.sbom-musl.outputs.bundle-path }}
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          cp "$PROV" "packaging/out/howdah-$v.provenance.sigstore.json"
+          cp "$SBOM_X86" "packaging/out/howdah-$v-x86_64.sbom.sigstore.json"
+          if [ -n "$SBOM_ARM" ]; then cp "$SBOM_ARM" "packaging/out/howdah-$v-aarch64.sbom.sigstore.json"; fi
+          if [ -n "$SBOM_MUSL" ]; then cp "$SBOM_MUSL" "packaging/out/howdah-$v-x86_64-musl.sbom.sigstore.json"; fi
+          ls -l packaging/out/*.sigstore.json
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -196,13 +281,16 @@ jobs:
           case "$GITHUB_REF_NAME" in
             *-*) extra="--draft --prerelease"; echo "pre-release tag -> draft pre-release" ;;
           esac
+          # $extra is deliberately unquoted: it is zero or two flags.
+          # shellcheck disable=SC2086
           gh release create "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "Howdah ${GITHUB_REF_NAME}" \
-            --notes "Signed release. Verify: \`gpg --import howdah-release-signing.asc && gpg --verify SHA256SUMS.asc SHA256SUMS && sha256sum -c SHA256SUMS\`" \
+            --notes "Signed release. Verify: \`gpg --import howdah-release-signing.asc && gpg --verify SHA256SUMS.asc SHA256SUMS && sha256sum -c SHA256SUMS\`. Build provenance: \`gh attestation verify <file> -R howdah/howdah\`. Reproducible: packaging/verify-reproducible.sh ${GITHUB_REF_NAME} <minor>. Details: docs/verify.md" \
             $extra \
             packaging/out/*.tar.gz \
             packaging/out/howdah-check \
             packaging/out/SHA256SUMS \
             packaging/out/SHA256SUMS.asc \
-            packaging/out/howdah-release-signing.asc
+            packaging/out/howdah-release-signing.asc \
+            packaging/out/*.sigstore.json

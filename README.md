@@ -10,9 +10,11 @@ is not a replacement for patching PHP. Upgrade when you can; use Howdah when you
 can't, or until you can.
 
 > **Status: 1.3.0 is released** — Layer 1 (request-parsing limits), Layer 2 (input
-> inspection, log-only) plus Layer 3 (sink hardening, log-first). Signed tarballs for PHP 5.4 to 8.5 are on the
-> [v1.2.1 release page](https://github.com/howdah/howdah/releases/tag/v1.2.1).
-> 1.2.1 is a security fix for every earlier release; see the [changelog](CHANGELOG.md).
+> inspection, log-only) plus Layer 3 (sink hardening, log-first). 1.3 extends Layer 3
+> with phar://, SSRF, and PHP 5.x include/eval guards (the phar and SSRF sinks are off
+> by default). Signed tarballs for PHP 5.4 to 8.5 are on the
+> [v1.3.0 release page](https://github.com/howdah/howdah/releases/tag/v1.3.0).
+> See the [changelog](CHANGELOG.md).
 > Defaults may still change; Layer 4 is the roadmap.
 > Start in `detect` mode. Not every PHP version has been tested:
 > see [docs/coverage.md](docs/coverage.md). Install, verify and rollback steps

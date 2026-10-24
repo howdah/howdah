@@ -217,15 +217,109 @@ unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
             if core::howdah_sink_armed(CTX, core::HOWDAH_SINK_PHAR) != 0 {
                 sys::howdah_install_phar_hook(crate::sink_filter::decide);
             }
-            if core::howdah_sink_armed(CTX, core::HOWDAH_SINK_SSRF) != 0 {
+            // SSRF trampolines: install when the L3 SSRF sink is armed OR the L4
+            // behavior egress facet is armed. Egress-only operation (SSRF off)
+            // needs these trampolines in place, and `ssrf_filter::armed` is
+            // widened to keep the C `g_armed` short-circuit open for it. The
+            // SSRF install is also what swaps `fopen`, so it must run before the
+            // behavior install below (whose fopen php-write branch rides on it).
+            if core::howdah_sink_armed(CTX, core::HOWDAH_SINK_SSRF) != 0
+                || core::howdah_behavior_egress_active(CTX) != 0
+            {
                 sys::howdah_install_ssrf_hooks(
                     crate::ssrf_filter::decide,
                     crate::ssrf_filter::armed,
                 );
             }
+            // Layer-4 behavior glue: install once if ANY facet is armed. This
+            // sets the five callbacks and swaps the php-write sinks
+            // (file_put_contents/move_uploaded_file/rename); the exec-dir and
+            // binary in-hook checks live in the command-exec / compile-file /
+            // opcode-handler hooks already installed at MINIT.
+            if core::howdah_behavior_armed(CTX, core::HOWDAH_BEHAVIOR_EXEC_DIR) != 0
+                || core::howdah_behavior_armed(CTX, core::HOWDAH_BEHAVIOR_BINARY) != 0
+                || core::howdah_behavior_armed(CTX, core::HOWDAH_BEHAVIOR_EGRESS) != 0
+                || core::howdah_behavior_armed(CTX, core::HOWDAH_BEHAVIOR_PHP_WRITE) != 0
+            {
+                sys::howdah_install_behavior_hooks(
+                    crate::behavior_filter::armed,
+                    crate::behavior_filter::exec_dir,
+                    crate::behavior_filter::binary,
+                    crate::behavior_filter::egress,
+                    crate::behavior_filter::php_write,
+                );
+            }
         }));
     }
+    // Layer-4 main-script exec-dir check: the primary, opcache-independent
+    // control. Runs every request, BEFORE the script executes, and bails with a
+    // 403 if the main script resolves under a denied exec dir.
+    main_script_exec_dir_check();
     SUCCESS
+}
+
+/// Layer-4 RINIT main-script exec-dir check. When the EXEC_DIR facet is armed,
+/// read the main script path from the SAPI (`request_info.path_translated`,
+/// NUL-terminated; NULL on e.g. the CLI) and ask the core whether it falls under
+/// a denied exec dir. On BLOCK, emit the block response + `zend_bailout` before
+/// the script runs. The decision is computed inside a panic guard and the bail
+/// is performed OUTSIDE it (mirrors `rfc1867::callback`), so no Rust-owned heap
+/// value is live across the longjmp. Fully fail-open (panic -> no action).
+///
+/// # Safety
+/// Called from `rinit` during request startup; `CTX` is live when set.
+unsafe fn main_script_exec_dir_check() {
+    let decision =
+        catch_unwind(AssertUnwindSafe(|| exec_dir_decision())).unwrap_or(None);
+    if let Some((status, request_id)) = decision {
+        // Bail outside the catch_unwind frame: emit + longjmp; drops nothing.
+        rfc1867::emit_and_bail(status, request_id);
+    }
+}
+
+/// Compute the main-script exec-dir verdict. Returns `Some((status, request_id))`
+/// when the request must be refused, else `None`. All heap-owned values are
+/// dropped before returning, so the caller's `emit_and_bail` longjmp is clean.
+unsafe fn exec_dir_decision() -> Option<(c_int, String)> {
+    if CTX.is_null() || core::howdah_behavior_armed(CTX, core::HOWDAH_BEHAVIOR_EXEC_DIR) == 0 {
+        return None;
+    }
+    let ri = (*ptr::addr_of!(sys::sapi_globals)).request_info;
+    let pt = ri.path_translated;
+    if pt.is_null() {
+        return None; // no main script path (CLI, some SAPIs)
+    }
+    let plen = CStr::from_ptr(pt).to_bytes().len();
+    if plen == 0 {
+        return None;
+    }
+    maybe_begin();
+    let action = core::howdah_behavior_check_exec_dir(CTX, pt as *const c_char, plen);
+    // Take + write the stashed log line (behavior reuses the core's sink_log).
+    let line = {
+        let p = core::howdah_take_sink_log_line(CTX);
+        if p.is_null() {
+            None
+        } else {
+            let s = CStr::from_ptr(p).to_string_lossy().into_owned();
+            core::howdah_free_str(p);
+            Some(s)
+        }
+    };
+    if let Some(l) = line.as_deref() {
+        response::write_log_line(l);
+    }
+    if action != core::HOWDAH_BLOCK {
+        return None;
+    }
+    let (rule, request_id) = line.as_deref().map(rfc1867::parse_line).unwrap_or_default();
+    let status = if rule.is_empty() {
+        403
+    } else {
+        response::status_for_rule(&rule)
+    };
+    // rule + line drop here, before the tuple (carrying only request_id) returns.
+    Some((status, request_id))
 }
 
 /// Reset the per-request lifecycle flags for the next request. Runs at the end

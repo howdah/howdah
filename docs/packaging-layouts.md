@@ -1,8 +1,8 @@
 # Package layouts: which Howdah package fits which PHP
 
 Howdah builds one `howdah.so` per PHP minor (5.4 to 8.5, NTS, glibc 2.17
-floor), plus, from the release after 1.4.0, a musl build of each minor for
-Alpine (x86_64 only; see "Alpine (musl)" below). The same glibc file goes
+floor), plus, from 1.5.0, a musl build of each minor for
+Alpine (x86_64 only, musl 1.1.24 or newer; see "Alpine (musl)" below). The same glibc file goes
 into every package for that minor. What differs
 between packages is where the vendor's PHP keeps its extensions and ini
 drop-ins, the package name, and the package the Howdah package depends on.
@@ -35,8 +35,8 @@ Zend module API number (`20190902` for 7.4).
 | `cloudlinux` | `/opt/alt/phpXY/usr/bin/php` | `/opt/alt/phpXY/usr/lib64/php/modules` | `/opt/alt/phpXY/etc/php.d.all/howdah.ini` and `/opt/alt/phpXY/etc/php.d.std/howdah.ini` | `alt-phpXY-howdah` | `alt-phpXY` | `https://pkg.howdah.org/cloudlinux/yum` | x86_64 |
 | `stock-rhel` | `/usr/bin/php` | `/usr/lib64/php/modules` (Amazon Linux 2023: `/usr/lib64/phpX.Y/modules`) | `/etc/php.d/40-howdah.ini`, loading the `.so` by absolute path | `php-howdah` (release `N.phpXY`) | `php(zend-abi) = API-64` | `https://pkg.howdah.org/el/phpX.Y/yum` (one repository per minor) | x86_64, aarch64 |
 | `directadmin` | `/usr/local/phpXY/bin/php` | `/usr/local/phpXY/lib/php/extensions/no-debug-non-zts-API` | `/usr/local/phpXY/lib/php.conf.d/` | none: tarball | | | |
-| `docker` | `/usr/local/bin/php` (official `php:X.Y-*` images, Debian and Alpine) | `/usr/local/lib/php/extensions/no-debug-non-zts-API` | `/usr/local/etc/php/conf.d/docker-php-ext-howdah.ini` | image `ghcr.io/howdah/howdah:<version>-phpX.Y[-alpine]`, or `COPY --from` of its `/howdah/` tree ([install-docker.md](install-docker.md)) | | GHCR | amd64, arm64 (Alpine: amd64) |
-| `alpine` | `/usr/bin/phpXY` (`apk add php83`) | `/usr/lib/phpXY/modules` | `/etc/phpXY/conf.d/40_howdah.ini` | none: the `-musl` tarball, plus `apk add libgcc` | | | x86_64 |
+| `docker` | `/usr/local/bin/php` (official `php:X.Y-*` images, Debian and Alpine) | `/usr/local/lib/php/extensions/no-debug-non-zts-API` | `/usr/local/etc/php/conf.d/docker-php-ext-howdah.ini` | image `ghcr.io/howdah/howdah:<version>-phpX.Y[-alpine]` (`-alpine`: PHP 7.2+), or `COPY --from` of its `/howdah/` tree ([install-docker.md](install-docker.md)) | | GHCR | amd64, arm64 (Alpine: amd64) |
+| `alpine` | `/usr/bin/phpXY` (`apk add php83`) | `/usr/lib/phpXY/modules` | `/etc/phpXY/conf.d/40_howdah.ini` | none: the `-musl` tarball, plus `apk add libgcc` (musl 1.1.24+, Alpine 3.11+) | | | x86_64 |
 | `litespeed` | `/usr/local/lsws/lsphpXY/bin/php` (CLI) and `bin/lsphp` (LSAPI) | `/usr/local/lsws/lsphpXY/lib/php/API` (LiteSpeed's deb packages) | `/usr/local/lsws/lsphpXY/etc/php/X.Y/mods-available/40-howdah.ini` (lsphp scans `mods-available` itself) | none: tarball | | | |
 | `unknown` | anything else | | | none: tarball | | | |
 
@@ -122,7 +122,7 @@ repository at the new minor and install it again.
 ## Alpine (musl)
 
 A `howdah.so` linked against glibc does not load on Alpine, which uses musl.
-From the release after 1.4.0 each minor also has
+From 1.5.0 each minor also has
 `howdah-<version>-phpX.Y-API-linux-x86_64-musl.tar.gz`, with the same three
 files as the glibc tarball, signed in the same `SHA256SUMS`. It is built by
 `HOWDAH_LIBC=musl packaging/build-release.sh` on Alpine 3.21
@@ -132,12 +132,28 @@ build fails unless the module links only `libc.musl-x86_64.so.1` and
 Alpine images before 3.21 do not have it, so `apk add libgcc` first.
 
 There is no apk package: the tarball is the install. `howdah-check detect`
-on a musl host prints `host libc: musl` and names the `-musl` tarball.
+on a musl host prints `host libc: musl <version>` and names the `-musl`
+tarball, or says the musl is too old (below).
 
-The musl build of the 1.4.0 source loaded on musl 1.1.18 (Alpine 3.7) through
-1.2.6 (Alpine 3.24): in the official `php:X.Y-fpm-alpine` images for 5.6 and
-7.0 to 8.5 (the Docker smoke test passed on all 12) and in Alpine 3.21's own
-`php83` and `php-fpm83`. No aarch64 musl build exists.
+**The floor is musl 1.1.24 (Alpine 3.11).** From 1.5.0 the `[log] exec` hook
+uses Rust's `std::process::Command`, which links
+`posix_spawn_file_actions_addchdir_np`; musl added that function in 1.1.24.
+musl binds every symbol when a module is loaded, so on an older musl PHP
+refuses the whole extension (`Error relocating .../howdah.so:
+posix_spawn_file_actions_addchdir_np: symbol not found`, seen in docker run
+40140181320 on `php:7.1-fpm-alpine`, Alpine 3.10, musl 1.1.22). The release
+build keeps Alpine 3.11's loader in the build image and fails if the module
+needs any C library symbol it lacks, listing them
+(`packaging/musl-floor-check.sh`, tested by `packaging/musl-floor.test.sh`
+against the real 1.5.0 build: passes on 1.1.24, fails on 1.1.22 naming that
+one symbol). So the `-alpine` Docker images are for PHP 7.2 to 8.5 only; the
+official 5.6, 7.0 and 7.1 Alpine bases (Alpine 3.8, 3.7, 3.10) are below the
+floor, and those minors use the Debian images.
+
+The musl build of the 1.4.0 source, which had no `[log] exec` hook, loaded
+on musl 1.1.18 (Alpine 3.7) through 1.2.6 (Alpine 3.24). Measured on 1.5.0:
+it loads on musl 1.1.24 (`php:7.2-fpm-alpine`) and later, and in Alpine
+3.21's own `php83` and `php-fpm83`. No aarch64 musl build exists.
 
 ## Example: `howdah-check detect`
 

@@ -5,6 +5,29 @@ All notable changes to Howdah are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- The 1.5.0 Docker images were not published: the `docker.yml` run after the
+  release (run 40140181320) failed every image. Two causes:
+  - `docker/smoke.sh` still expected 1.4.0's php-fpm refusal (a worker exit
+    with code 70) and failed when 1.5.0 refused cleanly (#44). It now reads
+    the Howdah version in the image and expects a worker exit below 1.5.0
+    and a 403 with the Howdah body from 1.5.0 (`FPM_BLOCK` can still force
+    either).
+  - The 1.5.0 musl build does not load on musl older than 1.1.24: the
+    `[log] exec` hook uses Rust's `std::process::Command`, which links
+    `posix_spawn_file_actions_addchdir_np` (added to musl in 1.1.24), and
+    musl refuses a module with an unresolved symbol ("Error relocating
+    howdah.so: posix_spawn_file_actions_addchdir_np: symbol not found" on
+    `php:5.6/7.0/7.1-fpm-alpine`, Alpine 3.8/3.7/3.10). `-alpine` images are
+    now built for PHP 7.2 to 8.5 only; 5.6, 7.0 and 7.1 use the Debian
+    images. The musl release build fails if the module needs a C library
+    symbol that musl 1.1.24 (Alpine 3.11) lacks, and lists them
+    (`packaging/musl-floor-check.sh`).
+- `howdah-check detect` prints the musl version (`host libc: musl 1.1.22`)
+  and, on a musl older than 1.1.24, offers no tarball or `-alpine` image,
+  since neither would load (it names the Debian image for an official
+  Alpine php base).
+
 ## [1.5.0] - 2026-10-24
 
 ### Added

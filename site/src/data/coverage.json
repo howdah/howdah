@@ -671,6 +671,75 @@
       "script": "docs/zts.md",
       "result": "FAIL",
       "detail": "one request at a time: marker flagged, over-limit blocked; 8+8 concurrent clients: 1 normal request refused 403, 16 over-limit requests served 200, then FrankenPHP aborted (malloc(): unaligned tcache chunk detected)"
+    },
+    {
+      "date": "2026-10-24",
+      "runtime": "Docker image (docker/Dockerfile) on php:X.Y-fpm, release 1.5.0, php-fpm behind nginx 1.27",
+      "sapi": "fpm",
+      "php": [
+        "5.6.40",
+        "7.0.33",
+        "7.1.33",
+        "7.2.34",
+        "7.3.33",
+        "7.4.33",
+        "8.0.30",
+        "8.1.34",
+        "8.2.35",
+        "8.3.36",
+        "8.4.27",
+        "8.5.12"
+      ],
+      "arch": "x86_64",
+      "script": "docker/smoke.sh",
+      "result": "PASS",
+      "detail": "released 1.5.0 .so; lab self-test on the CLI server in detect and block mode; howdah-check web through nginx: marker flagged 200, over-limit refused 403 with the Howdah body, no php-fpm worker exit (#44)"
+    },
+    {
+      "date": "2026-10-24",
+      "runtime": "Docker image (docker/Dockerfile) on php:X.Y-fpm, release 1.5.0, php-fpm behind nginx 1.27",
+      "sapi": "fpm",
+      "php": [
+        "8.3.36"
+      ],
+      "arch": "aarch64 (QEMU)",
+      "script": "docker/smoke.sh",
+      "result": "PASS",
+      "detail": "released 1.5.0 aarch64 .so, emulated; the same checks as the x86_64 rows"
+    },
+    {
+      "date": "2026-10-24",
+      "runtime": "Docker image on php:X.Y-fpm-alpine, release 1.5.0 musl build",
+      "sapi": "fpm",
+      "php": [
+        "7.2.34",
+        "7.3.33",
+        "7.4.33",
+        "8.0.30",
+        "8.1.34",
+        "8.2.35",
+        "8.3.36",
+        "8.4.27",
+        "8.5.12"
+      ],
+      "arch": "x86_64 musl",
+      "script": "docker/smoke.sh",
+      "result": "PASS",
+      "detail": "released 1.5.0 -musl .so on musl 1.1.24 (Alpine 3.12) to 1.2.6; the same checks as the 1.5.0 Debian rows"
+    },
+    {
+      "date": "2026-10-24",
+      "runtime": "Docker image on php:X.Y-fpm-alpine, release 1.5.0 musl build",
+      "sapi": "fpm",
+      "php": [
+        "5.6.40",
+        "7.0.33",
+        "7.1.33"
+      ],
+      "arch": "x86_64 musl",
+      "script": "docker.yml run 40140181320",
+      "result": "FAIL",
+      "detail": "the module does not load: Error relocating howdah.so: posix_spawn_file_actions_addchdir_np: symbol not found (Alpine 3.8/3.7/3.10, musl below 1.1.24); no -alpine image for these minors"
     }
   ]
 }

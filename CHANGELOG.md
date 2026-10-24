@@ -99,9 +99,56 @@ All notable changes to Howdah are documented here. The format follows
 - `lab/integration/log_contract.sh`: `[log] path`, the three destinations and
   the hook against the real extension, under `php -S`, php-fpm and Apache
   mod_php prefork.
-
+- Docker images: `ghcr.io/howdah/howdah:<version>-php<minor>` is the official
+  `php:<minor>-fpm` image (5.6, 7.0 to 7.4, 8.0 to 8.5; amd64 and arm64) with
+  the release's signed `howdah.so` installed in detect mode
+  (`docker/Dockerfile`). The build verifies `SHA256SUMS` against the committed
+  key and the tarball against `SHA256SUMS`, and keeps both in the image so it
+  can be re-verified. Every image also carries its files under `/howdah/`, so
+  `COPY --from=ghcr.io/howdah/howdah:<version>-php<minor> /howdah/ /` adds
+  Howdah to any official image of that minor in one line.
+  `.github/workflows/docker.yml` publishes them after the release workflow for
+  a tag (and on demand, and weekly for the newest release), and pushes only
+  after `docker/smoke.sh` passes: the lab self-test on the CLI server and
+  `howdah-check web` through nginx to php-fpm. Nothing is published yet; see
+  `docs/install-docker.md`, which also lists the end-of-life bases.
+- Alpine (musl) builds: `HOWDAH_LIBC=musl packaging/build-release.sh` builds
+  `howdah-<version>-php<minor>-<api>-linux-x86_64-musl.tar.gz` on Alpine 3.21
+  (`packaging/release.musl.Dockerfile`); the release workflow builds one per
+  minor (best effort, like aarch64), and `docker.yml` turns them into
+  `-alpine` images. Loaded on musl 1.1.18 to 1.2.6; needs `apk add libgcc` on
+  Alpine before 3.21. x86_64 only.
+- `howdah-check detect` prints `host libc`, names the `-musl` tarball on
+  Alpine, and recognises three more layouts: `docker` (official php images;
+  it names the image and the `COPY --from` line), `alpine` (apk PHP) and
+  `litespeed` (LiteSpeed's lsphp; tarball). The install picker has a Docker
+  choice.
+- `lab/integration/lsapi.sh`: the self-test under OpenLiteSpeed with
+  LiteSpeed's lsphp 8.3, using the released tarball. It passed; recorded in
+  `docs/coverage.md` with the other runs outside the matrix (new Table 5, from
+  `lab/integration/runtime-results.tsv`; also on the site's coverage page).
+- CI: non-blocking `lab-aarch64` jobs (the lab's block-shaped and self-test
+  scripts for PHP 7.4 and 8.3 on native arm64 runners), a non-blocking musl
+  build smoke, and a Docker image job that builds the 1.4.0 PHP 8.3 image and
+  runs `docker/smoke.sh`.
+- `docs/zts.md`: why there is no ZTS build (FrankenPHP, threaded Apache). A
+  test build compiles with three small changes but crashed FrankenPHP under
+  concurrent requests; the page lists every process-global (file:line) that
+  has to move into per-thread module globals first.
+- Drafts, not sent, of inclusion requests to Remi's repository and to
+  deb.sury.org, with what a distribution `.spec` and `debian/` would need
+  (`docs/distro-requests/`).
 
 ### Changed
+- `lab/integration/selftest_container.sh` takes `PREINSTALLED=1` to test a PHP
+  that already loads howdah from its own ini (the Docker images) instead of
+  building the extension.
+- Known behaviour, now documented (`docs/install-docker.md`): under php-fpm
+  a refused multipart request ends the worker (`exited with code 70`), and
+  behind nginx the 403 usually arrives without the Howdah body because the
+  unread request body resets the connection. The event is logged either way.
+  The fix is PR #44; the request ids that repeat across forked workers in
+  1.4.0 are fixed by PR #39.
 - `docs/install-repos.md` no longer says the apt index lists only the latest
   publish (it keeps every version), and says the Debian/Ubuntu package also
   fits the distribution's own PHP, which provides the same `phpapi-<N>`

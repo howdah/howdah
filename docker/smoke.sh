@@ -118,8 +118,8 @@ grep '"rule":"max_parts"' "$W/fpm.log" | grep -q '"action":"block"' \
 # while reading upstream" and, depending on whether it read the response
 # before the reset, sends the 403 with an empty body (no request id) or with
 # the Howdah body. Both happened in the 1.4.0 runs, so only the 403 and the
-# worker exit are asserted here; which body arrived is printed. The fix is its
-# own gap-analysis item (FPM refusal path). When it lands, run with
+# worker exit are asserted here; which body arrived is printed. The fix is
+# PR #44 (fix/refusal-path-fpm). When it lands in a release, run with
 # FPM_BLOCK=clean (and make that the default): the 403 must then carry the
 # Howdah body every time and no worker may exit.
 case "${FPM_BLOCK:-bailout}" in

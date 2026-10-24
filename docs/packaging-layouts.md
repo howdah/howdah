@@ -1,7 +1,9 @@
 # Package layouts: which Howdah package fits which PHP
 
 Howdah builds one `howdah.so` per PHP minor (5.4 to 8.5, NTS, glibc 2.17
-floor). The same file goes into every package for that minor. What differs
+floor), plus, from the release after 1.4.0, a musl build of each minor for
+Alpine (x86_64 only; see "Alpine (musl)" below). The same glibc file goes
+into every package for that minor. What differs
 between packages is where the vendor's PHP keeps its extensions and ini
 drop-ins, the package name, and the package the Howdah package depends on.
 
@@ -33,6 +35,9 @@ Zend module API number (`20190902` for 7.4).
 | `cloudlinux` | `/opt/alt/phpXY/usr/bin/php` | `/opt/alt/phpXY/usr/lib64/php/modules` | `/opt/alt/phpXY/etc/php.d.all/howdah.ini` and `/opt/alt/phpXY/etc/php.d.std/howdah.ini` | `alt-phpXY-howdah` | `alt-phpXY` | `https://pkg.howdah.org/cloudlinux/yum` | x86_64 |
 | `stock-rhel` | `/usr/bin/php` | `/usr/lib64/php/modules` (Amazon Linux 2023: `/usr/lib64/phpX.Y/modules`) | `/etc/php.d/40-howdah.ini`, loading the `.so` by absolute path | `php-howdah` (release `N.phpXY`) | `php(zend-abi) = API-64` | `https://pkg.howdah.org/el/phpX.Y/yum` (one repository per minor) | x86_64, aarch64 |
 | `directadmin` | `/usr/local/phpXY/bin/php` | `/usr/local/phpXY/lib/php/extensions/no-debug-non-zts-API` | `/usr/local/phpXY/lib/php.conf.d/` | none: tarball | | | |
+| `docker` | `/usr/local/bin/php` (official `php:X.Y-*` images, Debian and Alpine) | `/usr/local/lib/php/extensions/no-debug-non-zts-API` | `/usr/local/etc/php/conf.d/docker-php-ext-howdah.ini` | image `ghcr.io/howdah/howdah:<version>-phpX.Y[-alpine]`, or `COPY --from` of its `/howdah/` tree ([install-docker.md](install-docker.md)) | | GHCR | amd64, arm64 (Alpine: amd64) |
+| `alpine` | `/usr/bin/phpXY` (`apk add php83`) | `/usr/lib/phpXY/modules` | `/etc/phpXY/conf.d/40_howdah.ini` | none: the `-musl` tarball, plus `apk add libgcc` | | | x86_64 |
+| `litespeed` | `/usr/local/lsws/lsphpXY/bin/php` (CLI) and `bin/lsphp` (LSAPI) | `/usr/local/lsws/lsphpXY/lib/php/API` (LiteSpeed's deb packages) | `/usr/local/lsws/lsphpXY/etc/php/X.Y/mods-available/40-howdah.ini` (lsphp scans `mods-available` itself) | none: tarball | | | |
 | `unknown` | anything else | | | none: tarball | | | |
 
 Every package depends on the vendor package that is named after the PHP
@@ -98,6 +103,41 @@ repository at the new minor and install it again.
   rebuild of the same minor keeps the same directory; run
   `howdah-check detect` after a CustomBuild rebuild and copy the file again if
   it is gone.
+- **Docker (official `php` images).** Use the runtime image or copy its
+  `/howdah/` tree onto your own image of the same minor:
+  `COPY --from=ghcr.io/howdah/howdah:<version>-php8.3 /howdah/ /`. Details,
+  tags and how to verify an image: [install-docker.md](install-docker.md).
+- **LiteSpeed lsphp.** No package. LiteSpeed's lsphp deb packages put PHP in
+  `/usr/local/lsws/lsphpXY` and the LSAPI binary scans
+  `etc/php/X.Y/mods-available/` directly (there is no separate enable step):
+  `cp howdah.so "$(/usr/local/lsws/lsphp83/bin/php -r 'echo ini_get("extension_dir");')/"`
+  and `cp howdah.ini /usr/local/lsws/lsphp83/etc/php/8.3/mods-available/40-howdah.ini`,
+  then `/usr/local/lsws/bin/lswsctrl restart` so the lsphp processes restart.
+  The rpm builds (`lib64/php/modules`, `etc/php.d`) are recognised by
+  `howdah-check detect` but were not checked against a real install.
+- **Alpine (apk PHP).** Use the `-musl` tarball: `apk add libgcc`, copy
+  `howdah.so` into `/usr/lib/php83/modules/` and `howdah.ini` to
+  `/etc/php83/conf.d/40_howdah.ini`, restart `php-fpm83`.
+
+## Alpine (musl)
+
+A `howdah.so` linked against glibc does not load on Alpine, which uses musl.
+From the release after 1.4.0 each minor also has
+`howdah-<version>-phpX.Y-API-linux-x86_64-musl.tar.gz`, with the same three
+files as the glibc tarball, signed in the same `SHA256SUMS`. It is built by
+`HOWDAH_LIBC=musl packaging/build-release.sh` on Alpine 3.21
+(`packaging/release.musl.Dockerfile`) with PHP headers from source, and the
+build fails unless the module links only `libc.musl-x86_64.so.1` and
+`libgcc_s.so.1`. `libgcc_s` is Rust's unwinder, which the panic guard needs;
+Alpine images before 3.21 do not have it, so `apk add libgcc` first.
+
+There is no apk package: the tarball is the install. `howdah-check detect`
+on a musl host prints `host libc: musl` and names the `-musl` tarball.
+
+The musl build of the 1.4.0 source loaded on musl 1.1.18 (Alpine 3.7) through
+1.2.6 (Alpine 3.24): in the official `php:X.Y-fpm-alpine` images for 5.6 and
+7.0 to 8.5 (the Docker smoke test passed on all 12) and in Alpine 3.21's own
+`php83` and `php-fpm83`. No aarch64 musl build exists.
 
 ## Example: `howdah-check detect`
 
@@ -263,5 +303,9 @@ Not validated:
   installed separately. cPanel's Ubuntu PHP packages need `libxml2`,
   `libedit2` and `libargon2-1`, which a cPanel server already has, but which
   they do not declare; the validation container installs them.
-- ZTS PHP (for example CloudLinux `alt-php72-zts`), LiteSpeed `lsphp` and
-  DirectAdmin get no package.
+- ZTS PHP (for example CloudLinux `alt-php72-zts`), LiteSpeed `lsphp`,
+  Alpine and DirectAdmin get no package. ZTS gets no build at all
+  ([zts.md](zts.md)). LiteSpeed lsphp 8.3.36 under OpenLiteSpeed 1.9.3 ran the
+  self-test with the released 1.4.0 tarball (`lab/integration/lsapi.sh`, see
+  [coverage.md](coverage.md), Table 5); no other lsphp minor and no rpm lsphp
+  was run.

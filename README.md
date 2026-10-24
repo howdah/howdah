@@ -119,9 +119,17 @@ mod_php). Release tarballs ship for **x86_64 and aarch64** on a glibc-2.17
 baseline. x86_64 covers all 14 minors. aarch64 builds every minor from PHP
 source in CI on native arm64 runners (Remi has no aarch64 EL7 packages); the
 release assets are the definitive per-arch list. The core is arch-agnostic
-pure Rust, but arm64 is build-verified only: the full scenario matrix has run
-on x86_64 alone. Not every minor is tested yet. [docs/coverage.md](docs/coverage.md)
-is the source of truth for which versions and SAPIs have been exercised.
+pure Rust. The full scenario matrix has run on x86_64 alone; on arm64 only the
+self-test and block-shaped scripts have run. Not every minor is tested yet.
+[docs/coverage.md](docs/coverage.md) is the source of truth for which versions,
+SAPIs and runtimes have been exercised (LiteSpeed LSAPI and the Docker images
+are in its Table 5).
+
+Also: Docker images on the official `php` images
+([docs/install-docker.md](docs/install-docker.md)), musl builds for Alpine
+from the release after 1.4.0 (x86_64), and LiteSpeed lsphp through the
+tarball. There is no ZTS build, so no FrankenPHP or threaded Apache
+([docs/zts.md](docs/zts.md)).
 
 ## Quickstart
 

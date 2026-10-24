@@ -37,13 +37,8 @@ extern "C" {
     /// `decide` is the Rust verdict. Call once at MINIT.
     pub fn howdah_install_ssrf_hooks(decide: HowdahSsrfDecide, armed: HowdahSsrfArmed);
 
-    /// Set the opaque `ctx` the trampolines pass to the callbacks (the live
-    /// per-request `howdah_ctx`). Call at RINIT; NULL until set (callbacks then
-    /// fail open). Cleared by `howdah_ssrf_request_reset`.
-    pub fn howdah_ssrf_set_ctx(ctx: *mut ::std::ffi::c_void);
-
     /// Clear the C-owned per-request curl handle->URL map and resolution cache.
-    /// Call at RSHUTDOWN (FPM workers persist).
+    /// Called from the ext's `clear_request_state` (RSHUTDOWN and bailout paths).
     pub fn howdah_ssrf_request_reset();
 }
 

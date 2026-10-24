@@ -210,9 +210,6 @@ unsafe extern "C" fn rshutdown(_type: c_int, _module_number: c_int) -> c_int {
         }
     }
     clear_request_state();
-    // FPM workers persist: drop the C-owned curl handle map + resolution cache.
-    // Harmless (empty clear) when the ssrf hooks were never installed.
-    sys::howdah_ssrf_request_reset();
     SUCCESS
 }
 
@@ -260,6 +257,10 @@ pub(crate) unsafe fn clear_request_state() {
     ENDED = false;
     MULTIPART = false;
     input_filter::INPUT_BLOCKED = false;
+    // Drop the C-owned SSRF curl handle map + resolution cache (FPM workers
+    // persist; a bailout can skip RSHUTDOWN). Idempotent; a no-op when the ssrf
+    // hooks were never installed.
+    sys::howdah_ssrf_request_reset();
 }
 
 /// Everything up to the first `?` (log the path, never the query string).

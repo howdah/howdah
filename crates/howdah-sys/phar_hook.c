@@ -122,7 +122,7 @@ static int howdah_phar_rmdir(php_stream_wrapper *w, HOWDAH_CP url, int options,
 }
 
 /* Proxy the phar wrapper. Returns 1 if phar was found and proxied, 0 if phar is
- * not registered (honest no-op). Call once at MINIT, after phar has registered. */
+ * not registered (honest no-op). Call once at first RINIT, after phar has registered. */
 int howdah_install_phar_hook(howdah_sink_decide_t cb) {
     php_stream_wrapper *pw = NULL;
     HashTable *h = php_stream_get_url_stream_wrappers_hash_global();

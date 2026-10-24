@@ -43,7 +43,7 @@
 
 #include "howdah_sink.h"
 
-/* Callbacks (see src/lib.rs). `ctx` is whatever howdah_ssrf_set_ctx supplied. */
+/* Callbacks (see src/lib.rs). `ctx` is always NULL (the ext uses module::CTX). */
 typedef int (*howdah_ssrf_armed_t)(void *ctx);
 typedef int (*howdah_ssrf_decide_t)(void *ctx, const char *scheme, size_t scheme_len,
                                     const char *host, size_t host_len, uint16_t port,
@@ -161,7 +161,7 @@ static int ssrf_should_block(const char *arg, size_t arglen, int scheme_required
                                hostbuf, HOWDAH_HOST_MAX, &hlen, &port);
     if (prep == 0) return 0; /* not a network target */
     /* Oversize host (could hide a zero-padded numeric IP): Rust decides. */
-    if (prep == 2) return howdah_ssrf_oversize_glue(g_ctx) ==HOWDAH_ACTION_BLOCK;
+    if (prep == 2) return howdah_ssrf_oversize_glue(g_ctx) == HOWDAH_ACTION_BLOCK;
     if (hlen > HOWDAH_HOST_MAX) return 0;
     hostbuf[hlen] = '\0';
 
@@ -443,11 +443,6 @@ void howdah_install_ssrf_hooks(howdah_ssrf_decide_t decide, howdah_ssrf_armed_t 
     HOWDAH_SSRF_SWAP(curl_reset, "curl_reset");
     HOWDAH_SSRF_SWAP(curl_close, "curl_close");
     HOWDAH_SSRF_SWAP(curl_exec, "curl_exec");
-}
-
-/* Set the opaque ctx handed to the callbacks (the live per-request context). */
-void howdah_ssrf_set_ctx(void *ctx) {
-    g_ctx = ctx;
 }
 
 /* Clear all per-request state: the curl handle->URL map, the resolution cache

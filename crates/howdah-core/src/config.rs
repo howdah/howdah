@@ -190,6 +190,48 @@ impl SinkConfig {
     }
 }
 
+/// Layer-4 post-breach behavior settings. Its `mode` is independent of the
+/// global mode: a global `block` never arms behavior enforcement.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BehaviorConfig {
+    pub enabled: bool,
+    pub mode: Mode,
+    pub observe: bool,
+    /// Absolute directories in which executing files is denied.
+    pub deny_exec_dirs: Vec<String>,
+    pub allow_exec_binaries: Vec<String>,
+    /// Exact hostnames, literal IPs, or CIDRs.
+    pub allow_egress_hosts: Vec<String>,
+    pub deny_php_writes: bool,
+}
+
+impl Default for BehaviorConfig {
+    fn default() -> Self {
+        BehaviorConfig {
+            enabled: true,
+            mode: Mode::Detect,
+            observe: false,
+            deny_exec_dirs: Vec::new(),
+            allow_exec_binaries: Vec::new(),
+            allow_egress_hosts: Vec::new(),
+            deny_php_writes: false,
+        }
+    }
+}
+
+impl BehaviorConfig {
+    /// Off if the global mode is off or behavior is disabled; otherwise the
+    /// section's own mode (the global `block` is deliberately ignored).
+    pub fn effective_mode(&self, global: Mode) -> Mode {
+        if global == Mode::Off || !self.enabled {
+            Mode::Off
+        } else {
+            self.mode
+        }
+    }
+}
+
 /// Parsed Howdah configuration.
 ///
 /// Serializes to the same shape as the TOML file (`rule_modes` as `rules`),
@@ -204,6 +246,7 @@ pub struct Config {
     pub rule_modes: BTreeMap<RuleId, Mode>,
     pub inspect: InspectConfig,
     pub sinks: SinkConfig,
+    pub behavior: BehaviorConfig,
 }
 
 #[derive(Deserialize)]
@@ -215,6 +258,7 @@ struct RawConfig {
     rules: BTreeMap<RuleId, Mode>,
     inspect: InspectConfig,
     sinks: SinkConfig,
+    behavior: BehaviorConfig,
 }
 
 impl Default for RawConfig {
@@ -227,6 +271,7 @@ impl Default for RawConfig {
             rules: c.rule_modes,
             inspect: c.inspect,
             sinks: c.sinks,
+            behavior: c.behavior,
         }
     }
 }
@@ -265,6 +310,27 @@ impl Config {
                 )));
             }
         }
+        for d in &raw.behavior.deny_exec_dirs {
+            if d.trim().is_empty() || !d.starts_with('/') {
+                return Err(ConfigError(format!(
+                    "behavior.deny_exec_dirs entry {d:?}: must be a non-blank absolute path"
+                )));
+            }
+        }
+        for b in &raw.behavior.allow_exec_binaries {
+            if b.trim().is_empty() || b.chars().any(char::is_whitespace) {
+                return Err(ConfigError(format!(
+                    "behavior.allow_exec_binaries entry {b:?}: must be non-blank with no whitespace"
+                )));
+            }
+        }
+        for h in &raw.behavior.allow_egress_hosts {
+            if !crate::sinks::ssrf::valid_allow_entry(h) {
+                return Err(ConfigError(format!(
+                    "behavior.allow_egress_hosts entry {h:?}: must be an exact hostname, an IP address, or a CIDR with an in-range prefix length (no wildcards or whitespace)"
+                )));
+            }
+        }
         Ok(Config {
             mode: raw.mode,
             limits: raw.limits,
@@ -272,6 +338,7 @@ impl Config {
             rule_modes: raw.rules,
             inspect: raw.inspect,
             sinks: raw.sinks,
+            behavior: raw.behavior,
         })
     }
 
@@ -284,6 +351,7 @@ impl Config {
             rule_modes: BTreeMap::new(),
             inspect: InspectConfig::default(),
             sinks: SinkConfig::default(),
+            behavior: BehaviorConfig::default(),
         }
     }
 }
@@ -306,6 +374,39 @@ path = "/var/log/howdah.log"
 [rules]
 self_test = "off"
 "#;
+
+    #[test]
+    fn behavior_defaults_off_safe() {
+        let c = Config::from_toml("mode=\"detect\"").unwrap();
+        assert!(c.behavior.enabled);
+        assert_eq!(c.behavior.mode, Mode::Detect);
+        assert!(!c.behavior.observe);
+        assert!(c.behavior.deny_exec_dirs.is_empty());
+        assert!(!c.behavior.deny_php_writes);
+    }
+
+    #[test]
+    fn behavior_effective_mode_independent_of_global_block() {
+        let c = Config::from_toml("mode=\"detect\"\n[behavior]\nmode=\"detect\"").unwrap();
+        assert_eq!(c.behavior.effective_mode(Mode::Block), Mode::Detect);
+        assert_eq!(c.behavior.effective_mode(Mode::Off), Mode::Off);
+    }
+
+    #[test]
+    fn behavior_disabled_is_off() {
+        let c = Config::from_toml("[behavior]\nenabled=false\nmode=\"block\"").unwrap();
+        assert_eq!(c.behavior.effective_mode(Mode::Block), Mode::Off);
+    }
+
+    #[test]
+    fn behavior_rejects_relative_exec_dir() {
+        assert!(Config::from_toml("[behavior]\ndeny_exec_dirs=[\"relative/path\"]").is_err());
+    }
+
+    #[test]
+    fn behavior_rejects_blank_binary() {
+        assert!(Config::from_toml("[behavior]\nallow_exec_binaries=[\"  \"]").is_err());
+    }
 
     #[test]
     fn parses_sample() {

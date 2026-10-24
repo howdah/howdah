@@ -87,7 +87,7 @@ const compare = [
   <section id="enforces">
     <div class="wrap">
       <h2>Layer 1 — what Howdah enforces</h2>
-      <p>These are the Layer-1 default limits. A request that crosses a limit has the offending data dropped and is logged; in block mode (or for a Critical rule in any mode) it is also refused with HTTP 403/413 and a request ID that matches the log line. Every limit is configurable in a TOML file. Numbers below are the shipped defaults.</p>
+      <p>These are the Layer-1 default limits. A request that crosses a limit has the offending data dropped and is logged; in block mode (or for a Critical rule in any mode) it is also refused with HTTP 403/413 and a request ID that matches the log line. Every limit is configurable in a TOML file; the <a href="/config/">config editor</a> builds and validates one in the browser. Numbers below are the shipped defaults.</p>
       <div class="cols two" style="margin-top:1.5rem">
         <div>
           <h3>Multipart upload limits</h3>
@@ -310,8 +310,8 @@ curl -fsSL https://howdah.org/key.asc | sudo tee /etc/apt/keyrings/howdah.asc &g
 echo "deb [signed-by=/etc/apt/keyrings/howdah.asc] {PKG}/apt stable main" \
   | sudo tee /etc/apt/sources.list.d/howdah.list
 sudo apt-get update &amp;&amp; sudo apt-get install php8.1-howdah</code></pre>
-      <p>On RHEL/CentOS/Alma (Remi layout) the package is <code>php81-howdah</code> via <code>yum</code>, with both package and metadata signatures enforced. Both package names, the exact <code>.repo</code> file, the signed-tarball path for other setups, and the verify/rollback steps are in the picker:</p>
-      <p><a class="btn primary" href="/install/">Open the install picker</a> <a class="btn ghost" href="/coverage/">Check your PHP version first</a></p>
+      <p>On RHEL/CentOS/Alma (Remi layout) the package is <code>php81-howdah</code> via <code>yum</code>, with both package and metadata signatures enforced. Both package names, the exact <code>.repo</code> file, the signed-tarball path for other setups, and the verify/rollback steps are in the picker. Once it is installed, the config editor writes your <code>howdah.ini</code> and <code>howdah.toml</code> from a form and checks the TOML with the extension's own parser.</p>
+      <p><a class="btn primary" href="/install/">Open the install picker</a> <a class="btn ghost" href="/config/">Build your config file</a> <a class="btn ghost" href="/coverage/">Check your PHP version first</a></p>
     </div>
   </section>
 </Layout>

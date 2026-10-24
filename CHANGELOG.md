@@ -47,6 +47,62 @@ All notable changes to Howdah are documented here. The format follows
   and re-emits them, offers a plain exceptions table (rule, script,
   param, uri_prefix, client_cidr, reason) validated by the wasm core, and a
   "start from an application profile" selector.
+- Seven legacy-era Layer-3 sinks, each with its own `[sinks.<name>]` table
+  whose `mode` inherits `sinks.mode` (log-only by default, armed to block only
+  by an explicit mode; a global `howdah.mode = block` arms none of them), its
+  own rule id (Standard, Layer 3), and the argument never logged. They are
+  cheap checks on functions or behaviours that mostly matter on the PHP 5.x/7.x
+  third of the web, no-ops where the function no longer exists:
+  - `mail` (`mail_injection`): a 5th argument (`additional_parameters`)
+    carrying any sendmail option other than `-f<address>` / `-r<address>` with
+    a sane address (so `-oi`, `-t`, `-O...` are expected detect noise), or a
+    4th-argument header string with a line break not followed by a header (the
+    PHPMailer CVE-2016-10033 class; Suhosin `mail.protect`). Block refuses the
+    call and returns false, so nothing reaches sendmail. All versions.
+  - `preg_eval` (`preg_eval`): a `preg_replace`/`preg_filter` pattern with the
+    `/e` modifier (Suhosin `disable_emodifier`). PHP 5.x only; the modifier was
+    removed in 7.0, so the sink installs nothing there. Block returns null.
+  - `create_function` (`create_function`): routed through the eval policy. PHP
+    5.x and 7.x; removed in 8.0. Block returns false.
+  - string `assert()` (`assert_string`): a string argument, which PHP 5.x/7.x
+    evaluate as code. 8.0 stopped evaluating strings, so the sink is inert
+    there. Block returns false.
+  - string callbacks (`dangerous_callback`): `call_user_func`,
+    `call_user_func_array`, `array_map`, `array_filter`, `array_walk`,
+    `usort`/`uasort`/`uksort`, `preg_replace_callback`,
+    `register_shutdown_function` and `ob_start` given a string callback that
+    names `system`, `exec`, `passthru`, `shell_exec`, `popen`, `proc_open`,
+    `pcntl_exec`, `assert` or `create_function`. Only the callback name is
+    logged (never the data). This is how ThinkPHP-style RCE reaches `system`.
+    Block refuses the call. All versions, with one honest gap: on PHP 7.0+
+    the compiler turns a literal, unqualified `call_user_func(...)` /
+    `call_user_func_array(...)` in the global namespace into
+    `ZEND_INIT_USER_CALL` and never calls the function, so that one shape is
+    not seen there (namespaced and dynamic calls, and the other hooked
+    functions, are); PHP 5.x sees every form. Pinned per version in the lab.
+  - XML external entities (`xxe`): a document passed to
+    `simplexml_load_string` or `DOMDocument::loadXML` that declares an
+    external entity (`<!ENTITY ... SYSTEM|PUBLIC>`, refused in block) or that
+    merely references an external DTD (the XHTML/SVG doctypes: detect only,
+    never blocked, so SVG sanitizers keep working) (Snuffleupagus
+    `xxe_protection`). The prolog scan skips comments and processing
+    instructions and squeezes the NULs out of a UTF-16 document first. Plus a
+    `[sinks.xml] external_entities = "deny"` toggle that turns libxml's
+    external entity loader off for every request through ext/libxml's C
+    setter (`php_libxml_disable_entity_loader`, resolved at run time; the
+    deprecated userland function is only a fallback), off by default; PHP 8
+    already defaults to not substituting external entities.
+  - curl TLS verification (`tls_verify`): `curl_setopt`/`curl_setopt_array`
+    turning `CURLOPT_SSL_VERIFYPEER` off or `CURLOPT_SSL_VERIFYHOST` to 0
+    (Snuffleupagus bundled rule). Detect-only this release (no block mode);
+    only the option name is logged, never the URL.
+  `php --ri howdah` gains a `Layer-3 legacy sinks` row naming what installed on
+  this PHP and what is `absent or disabled` (PHP 8 deletes `disable_functions`
+  entries, so the two look alike). Lab: `lab/integration/legacy_sinks.sh` on
+  PHP 5.4, 5.6, 7.4 and 8.3, proving detect logs and block refuses for each
+  sink that exists on that version, that the argument is never logged, and
+  that `preg_eval`/`create_function`/`assert` fire nothing on 8.x.
+
 - A malformed `howdah.config` is no longer silent. The extension writes one
   line to the SAPI error log at startup (file and parse error, once per
   process) and `phpinfo()` / `php --ri howdah` shows

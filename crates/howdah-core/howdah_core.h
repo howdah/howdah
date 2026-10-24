@@ -64,6 +64,20 @@
 
 #define HOWDAH_SINK_SSRF 5
 
+#define HOWDAH_SINK_MAIL 6
+
+#define HOWDAH_SINK_PREG_EVAL 7
+
+#define HOWDAH_SINK_CREATE_FUNCTION 8
+
+#define HOWDAH_SINK_ASSERT 9
+
+#define HOWDAH_SINK_CALLBACK 10
+
+#define HOWDAH_SINK_XML 11
+
+#define HOWDAH_SINK_TLS 12
+
 #define HOWDAH_BEHAVIOR_EXEC_DIR 0
 
 #define HOWDAH_BEHAVIOR_BINARY 1
@@ -109,6 +123,20 @@
  * Maximum bytes of a single reported class name.
  */
 #define MAX_CLASS_NAME 256
+
+/**
+ * Longest prefix of an XML document the external-entity scan looks at. The
+ * DOCTYPE (where entity declarations live) must precede the root element, so
+ * nothing past the first element start is ever read; this cap bounds a
+ * document that never opens one.
+ */
+#define XML_SCAN_MAX (64 * 1024)
+
+/**
+ * Longest name in `DANGEROUS_CALLBACKS` plus a leading backslash; a cheap
+ * prefilter for callers that want to skip longer strings.
+ */
+#define MAX_DANGEROUS_CALLBACK_LEN 16
 
 /**
  * Opaque context: config plus per-request state.
@@ -602,5 +630,30 @@ int32_t howdah_behavior_check_php_write_at(struct howdah_ctx *ctx,
  * `ctx` NULL or live.
  */
 int32_t howdah_sink_hook_plan(struct howdah_ctx *ctx);
+
+/**
+ * `mail()` sink check. `headers` is the 4th argument when it is a string
+ * (NULL/0 otherwise), `params` the 5th. Both are scanned, never logged.
+ * Returns 0 Allow / 1 Log / 2 Block; NULL ctx or panic is 0 (fail-open). A
+ * hit is retrievable with `howdah_take_sink_log_line`.
+ *
+ * # Safety
+ * `ctx` NULL or live; `headers`/`params` NULL or valid for their lengths.
+ */
+int32_t howdah_sink_check_mail(struct howdah_ctx *ctx,
+                               const char *headers,
+                               size_t headers_len,
+                               const char *params,
+                               size_t params_len);
+
+/**
+ * 1 iff `[sinks.xml] external_entities = "deny"` is in force (set, global
+ * mode not off, sinks enabled); the glue then turns libxml's external
+ * entity loader off at every request start. NULL ctx or panic is 0.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_sink_xml_deny_external_entities(struct howdah_ctx *ctx);
 
 #endif  /* HOWDAH_CORE_H */

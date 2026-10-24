@@ -65,7 +65,10 @@
     sql_injection: 'inspect', path_traversal: 'inspect', command_injection: 'inspect',
     command_exec: 'sinks', include: 'sinks', eval: 'sinks', unserialize: 'sinks',
     phar: 'sinks', ssrf: 'sinks',
-    upload_exec: 'behavior', unexpected_binary: 'behavior', unexpected_egress: 'behavior', php_write: 'behavior'
+    upload_exec: 'behavior', unexpected_binary: 'behavior', unexpected_egress: 'behavior', php_write: 'behavior',
+    // 1.5 legacy-era sinks: modes come from [sinks.<sink>] mode, as for the others.
+    mail_injection: 'sinks', preg_eval: 'sinks', create_function: 'sinks', assert_string: 'sinks',
+    dangerous_callback: 'sinks', xxe: 'sinks', tls_verify: 'sinks'
   };
 
   var RULE_NOTES = {
@@ -133,7 +136,24 @@
     { key: 'ssrf.mode', type: 'enum', values: MODES, default: 'off',
       note: 'Outbound requests to hosts not in allow_hosts (1.3). Off by default; a global or [sinks] block does not arm it.' },
     { key: 'ssrf.allow_hosts', type: 'list', default: [],
-      note: 'One per line: a hostname (exact, case-insensitive; no wildcards), a literal IP, or a CIDR such as 10.0.0.0/8 or fd00::/8 (full address required, so 10/8 is rejected). The core rejects wildcards and out-of-range prefixes.' }
+      note: 'One per line: a hostname (exact, case-insensitive; no wildcards), a literal IP, or a CIDR such as 10.0.0.0/8 or fd00::/8 (full address required, so 10/8 is rejected). The core rejects wildcards and out-of-range prefixes.' },
+    // 1.5 legacy-era sinks. Each mode inherits sinks.mode (detect = log only).
+    { key: 'mail.mode', type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
+      note: 'mail(): a 5th argument carrying any sendmail option other than -f<address> / -r<address> (so -oi, -t and -O… are expected detect noise), or a 4th-argument header string with a line break not followed by a header (body injection). block refuses the call (returns false). Rule name: mail_injection. All PHP versions.' },
+    { key: 'preg_eval.mode', type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
+      note: 'preg_replace / preg_filter with the /e modifier (the replacement is evaluated as code). PHP 5.x only; 7.0 removed the modifier, so nothing is installed on 7.0+. block returns null.' },
+    { key: 'create_function.mode', type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
+      note: 'create_function() (PHP 5.x and 7.x; removed in 8.0, where nothing is installed). Every call is a hit, like eval. block returns false.' },
+    { key: 'assert.mode', type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
+      note: 'assert() with a string argument, which PHP 5.x/7.x evaluate as code (needs assert.active / zend.assertions on). 8.0 stopped evaluating strings, so nothing is installed there. Rule name: assert_string. block returns false.' },
+    { key: 'callback.mode', type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
+      note: 'A string callback naming system, exec, passthru, shell_exec, popen, proc_open, pcntl_exec, assert or create_function, passed to call_user_func(_array), array_map, array_filter, array_walk, usort/uasort/uksort, preg_replace_callback, register_shutdown_function or ob_start. Only the callback name is logged. Rule name: dangerous_callback. block returns false. Honest gap: on PHP 7.0+ a literal call_user_func(...) in the global namespace is compiled to its own opcode and is not seen (namespaced or dynamic calls are); PHP 5.x sees every form.' },
+    { key: 'xml.mode', type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
+      note: 'An XML string passed to simplexml_load_string or DOMDocument::loadXML that declares an external entity (refused in block) or references an external DTD (the XHTML/SVG doctypes: detect only, never blocked, so an SVG sanitizer on DOMDocument::loadXML keeps working but logs xxe lines). The attempt shape; whether PHP fetches anything depends on LIBXML_NOENT / DTDLOAD. Not simplexml_load_file, DOMDocument::load, new SimpleXMLElement, XMLReader or ext/xml. Rule name: xxe.' },
+    { key: 'xml.external_entities', type: 'enum', values: ['allow', 'deny'], default: 'allow',
+      note: 'deny turns libxml’s external entity loader off for every request (ext/libxml’s php_libxml_disable_entity_loader, resolved at run time). Side effect on every PHP version: loading a document BY PATH through libxml (DOMDocument::load, simplexml_load_file, XMLReader::open) also fails; load the file yourself and parse the string. PHP 8 already needs LIBXML_NOENT to substitute external entities. No event is written for this toggle.' },
+    { key: 'tls.mode', type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
+      note: 'curl_setopt / curl_setopt_array turning CURLOPT_SSL_VERIFYPEER off or setting CURLOPT_SSL_VERIFYHOST to 0. Detect-only: block is logged as log and the call always proceeds. Only the option name is logged, never the URL. Rule name: tls_verify.' }
   ];
 
   // Top-level keys of the TOML file (before any [table]), besides `mode`.

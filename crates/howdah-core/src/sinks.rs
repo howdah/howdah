@@ -4,9 +4,14 @@
 //! rest of the core). Each function answers only "is this sink use benign /
 //! allowlisted?"; the caller resolves the outcome against the configured mode.
 
+pub mod legacy;
 pub mod ssrf;
 
-/// Dangerous PHP sinks guarded by Layer 3.
+/// Dangerous PHP sinks guarded by Layer 3. The variants after `Ssrf` are the
+/// legacy-era sinks (see `legacy.rs`): cheap checks on functions or
+/// behaviours PHP removed in 7.0/8.0 (`preg_eval`, `create_function`,
+/// string `assert`) or kept (`mail`, string callbacks, XML external
+/// entities, curl TLS verification).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SinkId {
     CommandExec,
@@ -15,6 +20,13 @@ pub enum SinkId {
     Unserialize,
     Phar,
     Ssrf,
+    Mail,
+    PregEval,
+    CreateFunction,
+    Assert,
+    Callback,
+    Xml,
+    Tls,
 }
 
 /// Policy outcome before mode resolution. `Allow` = allowlisted / benign;

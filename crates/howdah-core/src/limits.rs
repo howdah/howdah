@@ -321,6 +321,13 @@ pub enum RuleId {
     UnexpectedBinary,
     UnexpectedEgress,
     PhpWrite,
+    MailInjection,
+    PregEval,
+    CreateFunction,
+    AssertString,
+    DangerousCallback,
+    Xxe,
+    TlsVerify,
 }
 
 impl RuleId {
@@ -346,7 +353,14 @@ impl RuleId {
             | RuleId::UploadExec
             | RuleId::UnexpectedBinary
             | RuleId::UnexpectedEgress
-            | RuleId::PhpWrite => Severity::Standard,
+            | RuleId::PhpWrite
+            | RuleId::MailInjection
+            | RuleId::PregEval
+            | RuleId::CreateFunction
+            | RuleId::AssertString
+            | RuleId::DangerousCallback
+            | RuleId::Xxe
+            | RuleId::TlsVerify => Severity::Standard,
             _ => Severity::Critical,
         }
     }
@@ -358,7 +372,7 @@ impl RuleId {
 /// or miss one it accepts. `rule_catalog_covers_every_variant` fails to
 /// compile when a variant is added here but not to the list.
 pub fn rule_catalog() -> &'static [RuleId] {
-    const ALL: [RuleId; 28] = [
+    const ALL: [RuleId; 35] = [
         RuleId::MaxParts,
         RuleId::MaxFiles,
         RuleId::MaxPartHeaders,
@@ -387,6 +401,13 @@ pub fn rule_catalog() -> &'static [RuleId] {
         RuleId::UnexpectedBinary,
         RuleId::UnexpectedEgress,
         RuleId::PhpWrite,
+        RuleId::MailInjection,
+        RuleId::PregEval,
+        RuleId::CreateFunction,
+        RuleId::AssertString,
+        RuleId::DangerousCallback,
+        RuleId::Xxe,
+        RuleId::TlsVerify,
     ];
     &ALL
 }
@@ -579,10 +600,17 @@ mod tests {
                 | RuleId::UploadExec
                 | RuleId::UnexpectedBinary
                 | RuleId::UnexpectedEgress
-                | RuleId::PhpWrite => {}
+                | RuleId::PhpWrite
+                | RuleId::MailInjection
+                | RuleId::PregEval
+                | RuleId::CreateFunction
+                | RuleId::AssertString
+                | RuleId::DangerousCallback
+                | RuleId::Xxe
+                | RuleId::TlsVerify => {}
             }
         }
-        assert_eq!(rule_catalog().len(), 28);
+        assert_eq!(rule_catalog().len(), 35);
         let mut sorted = all.to_vec();
         sorted.sort();
         sorted.dedup();
@@ -606,6 +634,18 @@ mod tests {
         assert_eq!(RuleId::UnexpectedBinary.severity(), Severity::Standard);
         assert_eq!(RuleId::UnexpectedEgress.severity(), Severity::Standard);
         assert_eq!(RuleId::PhpWrite.severity(), Severity::Standard);
+        for r in [
+            RuleId::MailInjection,
+            RuleId::PregEval,
+            RuleId::CreateFunction,
+            RuleId::AssertString,
+            RuleId::DangerousCallback,
+            RuleId::Xxe,
+            RuleId::TlsVerify,
+        ] {
+            assert_eq!(r.severity(), Severity::Standard, "{r:?}");
+        }
+        assert_eq!(serde_json::to_string(&RuleId::DangerousCallback).unwrap(), "\"dangerous_callback\"");
         assert_eq!(RuleId::MaxParts.severity(), Severity::Critical);
         assert_eq!(RuleId::MaxFiles.severity(), Severity::Critical);
         assert_eq!(RuleId::MaxPartHeaders.severity(), Severity::Critical);

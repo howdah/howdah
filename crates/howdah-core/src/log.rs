@@ -49,7 +49,14 @@ pub fn rule_layer(r: RuleId) -> u8 {
         | RuleId::Eval
         | RuleId::Unserialize
         | RuleId::Phar
-        | RuleId::Ssrf => 3,
+        | RuleId::Ssrf
+        | RuleId::MailInjection
+        | RuleId::PregEval
+        | RuleId::CreateFunction
+        | RuleId::AssertString
+        | RuleId::DangerousCallback
+        | RuleId::Xxe
+        | RuleId::TlsVerify => 3,
         RuleId::UploadExec | RuleId::UnexpectedBinary | RuleId::UnexpectedEgress | RuleId::PhpWrite => 4,
     }
 }
@@ -101,6 +108,13 @@ fn rule_name(r: RuleId) -> &'static str {
         RuleId::UnexpectedBinary => "unexpected_binary",
         RuleId::UnexpectedEgress => "unexpected_egress",
         RuleId::PhpWrite => "php_write",
+        RuleId::MailInjection => "mail_injection",
+        RuleId::PregEval => "preg_eval",
+        RuleId::CreateFunction => "create_function",
+        RuleId::AssertString => "assert_string",
+        RuleId::DangerousCallback => "dangerous_callback",
+        RuleId::Xxe => "xxe",
+        RuleId::TlsVerify => "tls_verify",
     }
 }
 
@@ -269,8 +283,15 @@ mod tests {
             (RuleId::UnexpectedBinary, 4),
             (RuleId::UnexpectedEgress, 4),
             (RuleId::PhpWrite, 4),
+            (RuleId::MailInjection, 3),
+            (RuleId::PregEval, 3),
+            (RuleId::CreateFunction, 3),
+            (RuleId::AssertString, 3),
+            (RuleId::DangerousCallback, 3),
+            (RuleId::Xxe, 3),
+            (RuleId::TlsVerify, 3),
         ];
-        assert_eq!(rule_catalog().len(), 28);
+        assert_eq!(rule_catalog().len(), 35);
         assert_eq!(want.len(), rule_catalog().len(), "layer table and rule_catalog differ");
         for r in rule_catalog() {
             let w = want.iter().find(|(x, _)| x == r).unwrap_or_else(|| panic!("{r:?} has no layer in this table")).1;

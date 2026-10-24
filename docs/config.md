@@ -411,6 +411,124 @@ is checked, and a hit on a reserved or internal range is a match.
   `inet_aton`; libcurl and musl parse some encoded forms differently, so the
   resolved addresses are the authority.
 
+### Legacy-era sinks
+
+Seven more sinks guard functions and behaviours that mostly matter on the PHP
+5.x/7.x third of the web; each is a no-op where the function no longer exists.
+Each has its own `[sinks.<name>]` table whose `mode` inherits `sinks.mode`
+(so they log by default and block only when you set a mode to `"block"`; a
+global `howdah.mode = block` arms none of them), and, as everywhere in Layer
+3, the argument is never logged. `php --ri howdah` shows a `Layer-3 legacy
+sinks` row naming which ones installed on your PHP.
+
+```toml
+[sinks.mail]              # mail() header / additional_parameters injection
+# mode = "block"          # block refuses the call (returns false); nothing reaches sendmail
+[sinks.preg_eval]         # preg_replace/preg_filter with the /e modifier (PHP 5.x only)
+[sinks.create_function]   # create_function() (PHP 5.x/7.x)
+[sinks.assert]            # assert("string") evaluated as code (PHP 5.x/7.x)
+[sinks.callback]          # a string callback naming a command/code-exec function
+[sinks.xml]               # XML external-entity declarations
+# external_entities = "deny"   # also turn libxml's external entity loader off (off by default)
+[sinks.tls]               # curl TLS verification turned off (detect-only this release)
+```
+
+| Sink (rule) | PHP 5.x | PHP 7.x | PHP 8.x | What it flags |
+|---|---|---|---|---|
+| `mail` (`mail_injection`) | detect + block | detect + block | detect + block | `mail()` 5th arg with a sendmail option other than `-f<addr>`, or a 4th-arg header string with a line break not followed by a header |
+| `preg_eval` (`preg_eval`) | detect + block | not covered | not covered | `preg_replace`/`preg_filter` pattern with the `/e` modifier (removed in PHP 7.0) |
+| `create_function` (`create_function`) | detect + block | detect + block | not covered | any `create_function()` call (removed in PHP 8.0) |
+| `assert` (`assert_string`) | detect + block | detect + block | not covered | a string passed to `assert()` (needs `assert.active`/`zend.assertions`; PHP 8.0 stopped evaluating strings) |
+| `callback` (`dangerous_callback`) | detect + block | detect + block | detect + block | a string callback naming a command/code-exec function, passed to a callback-taking function |
+| `xml` (`xxe`) | detect + block | detect + block | detect + block | an XML string (`simplexml_load_string`, `DOMDocument::loadXML`) declaring an external entity / DTD |
+| `tls` (`tls_verify`) | detect | detect | detect | `curl_setopt`(`_array`) turning `CURLOPT_SSL_VERIFYPEER` off or `CURLOPT_SSL_VERIFYHOST` to 0 |
+
+- **`mail`.** The 5th argument is split on whitespace; anything that is not
+  `-f<address>`/`-f <address>` (or Postfix's alias `-r<address>`) with a sane
+  address (one `@`, address characters only) is flagged. That includes the
+  benign-looking `-oi`, `-t` and `-O...` options some applications pass: under
+  the default detect mode they are **expected noise** in the log until you set
+  `[sinks.mail] mode = "off"` or move those options into `sendmail_path`.
+  The 4th argument is flagged when a CR or LF is followed by an empty line
+  (body injection) or a line that is not `name:` (folded continuations are
+  allowed). An array of headers (PHP 7.2+) is left to PHP. `Bcc:`-style extra
+  headers that look like headers are **not** flagged. Block refuses the call
+  and returns false. `mail` has its own check entry point and does not consult
+  `[[exceptions]]` in this release.
+- **`callback`.** The dangerous names are `system`, `exec`, `passthru`,
+  `shell_exec`, `popen`, `proc_open`, `pcntl_exec`, `assert` and
+  `create_function`. Only a **string** callback is matched (a leading `\` and
+  case are ignored); a `Class::method` string, a closure or an array callback
+  is not matched, and `eval` is a language construct, not a callback. Only the
+  callback name reaches the log. Hooked functions: `call_user_func`,
+  `call_user_func_array`, `array_map`, `array_filter`, `array_walk`,
+  `usort`, `uasort`, `uksort`, `preg_replace_callback`,
+  `register_shutdown_function`, `ob_start`.
+  **`call_user_func` / `call_user_func_array` on PHP 7.0+:** the compiler
+  turns a literal, unqualified call in the **global namespace**
+  (`call_user_func('system', ...)` at the top of a file) into its own opcode
+  (`ZEND_INIT_USER_CALL`) and never calls the internal function, so the hook
+  does not see the classic webshell shape there. A call inside a `namespace`,
+  a fully dynamic call (`$f = 'call_user_func'; $f(...)`) or any of the other
+  hooked functions is seen. On PHP 5.x every form goes through the function
+  and is seen. `lab/integration/legacy_sinks.sh` pins this per version.
+- **`xml`.** Only `simplexml_load_string` and `DOMDocument::loadXML` are
+  hooked (the string entry points). `simplexml_load_file`,
+  `DOMDocument::load`, `XMLReader::open` and other document-by-path readers are
+  not. The scan reads the prolog only (the first 64 KiB, up to the root
+  element), skipping comments and processing instructions, and squeezes the
+  NULs out of a UTF-16 document (BOM or NUL-interleaved `<?`) before looking.
+  Two shapes: an external **entity** declaration (`<!ENTITY ... SYSTEM|PUBLIC>`,
+  general or parameter) logs in detect and is refused in block; a **bare
+  external DTD** reference in the DOCTYPE (`SYSTEM`/`PUBLIC` with no external
+  entity), which every standard XHTML and SVG document carries, is **detect
+  only** and never blocked, so an SVG sanitizer built on
+  `DOMDocument::loadXML` will see `xxe` detect lines but keep working. It
+  flags the *attempt shape*; whether libxml would actually fetch anything
+  depends on the parser options (`LIBXML_NOENT`, `LIBXML_DTDLOAD`) and the
+  libxml version.
+- **`[sinks.xml] external_entities = "deny"`** is a separate libxml-level
+  toggle (off by default). When set, Howdah calls ext/libxml's C setter
+  (`php_libxml_disable_entity_loader(1)`, found at run time) at every request
+  start, which turns off **all** external entity loading for that request —
+  including, as a side effect on every PHP version, loading a document *by
+  path* through libxml (`DOMDocument::load`, `simplexml_load_file`,
+  `XMLReader::open`): read the file yourself and parse the string instead. On a
+  PHP whose libxml does not export that setter, Howdah falls back to the
+  userland `libxml_disable_entity_loader(true)` with the deprecation silenced
+  (on PHP 8 that fallback still sets `error_get_last()` for the request). PHP
+  8 already defaults to not substituting external entities (you need
+  `LIBXML_NOENT` to opt in), so the toggle mainly matters on 5.x/7.x. It
+  writes no event of its own.
+- **`tls` is detect-only in this release.** A `block` mode (inherited or
+  explicit) is logged, not enforced: the call always proceeds. Only the option
+  name (`verifypeer`/`verifyhost`) is logged, never the URL or the handle.
+
+### Not covered (legacy sinks)
+
+- `preg_eval`, `create_function` and `assert` fire nothing on the PHP versions
+  where the function or modifier no longer exists (7.0+ for `/e`, 8.0+ for
+  `create_function` and string `assert`), nor when `disable_functions` has
+  removed the function (PHP 8 deletes the entry); the `Layer-3 legacy sinks`
+  phpinfo row says which installed and lists the rest as `absent or disabled`.
+- The `callback` sink matches a **string** callback name only; an array
+  `[$obj, 'method']`, a closure, a first-class callable or a variable function
+  is not matched, and a callback reached through a function Howdah does not
+  hook is not seen. A literal global-namespace `call_user_func` /
+  `call_user_func_array` on PHP 7.0+ is compiled to its own opcode and is not
+  seen (above).
+- The `xml` sink sees only `simplexml_load_string` / `DOMDocument::loadXML`.
+  Not hooked: `new SimpleXMLElement($xml)`, `simplexml_import_dom`,
+  `XMLReader::XML()` / `XMLReader::open`, `xml_parse()` /
+  `xml_parser_create` (ext/xml), `DOMDocument::loadHTML` / `loadHTMLFile`,
+  `DOMDocument::load`, `simplexml_load_file`. Only the first 64 KiB of the
+  document is scanned; a DOCTYPE past that is not seen. A bare external DTD is
+  never blocked. It does not prove the entity was fetched.
+- `tls` cannot block in this release and does not see verification disabled
+  through a `CURLOPT_*` constant passed as a variable the shim cannot read, nor
+  through a stream context.
+- `mail` events cannot be excepted with `[[exceptions]]` in this release.
+
 ### Known limitations
 
 - **Only a string first argument is inspected.** A guarded call whose first
@@ -419,7 +537,8 @@ is checked, and a hit on a reserved or internal range is a match.
   unguarded. In practice real injection targets (request values, concatenated
   strings) are always strings and are guarded.
 - As with `[inspect]`, this is best-effort hardening, not a substitute for
-  fixing the application. The `phar` and `ssrf` limits are listed in their sections above.
+  fixing the application. The `phar`, `ssrf` and legacy-sink limits are listed
+  in their sections above.
 
 ## `[behavior]` — Layer 4 after-breach behaviour (log-only by default)
 

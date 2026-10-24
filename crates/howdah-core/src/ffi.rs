@@ -32,7 +32,7 @@ use crate::log::{log_line, new_request_id, EventRecord};
 use crate::multipart::{Event, MultipartState};
 use crate::rules::{decide, Action};
 use crate::sinks::ssrf::{classify_ip, decode_literal_ip, host_allowed, parse_host, HostForm, IpRepr};
-use crate::sinks::{command_allowed, include_allowed, phar_allowed, unserialize_classes, SinkId};
+use crate::sinks::{command_allowed, include_allowed, legacy, phar_allowed, unserialize_classes, SinkId};
 
 /// Action codes returned over the ABI. Pinned: Allow=0, Log=1, Block=2.
 pub const HOWDAH_ALLOW: i32 = 0;
@@ -56,6 +56,14 @@ pub const HOWDAH_SINK_EVAL: i32 = 2;
 pub const HOWDAH_SINK_UNSERIALIZE: i32 = 3;
 pub const HOWDAH_SINK_PHAR: i32 = 4;
 pub const HOWDAH_SINK_SSRF: i32 = 5;
+// Legacy-era sinks (1.5). Mirrored in howdah_sink.h.
+pub const HOWDAH_SINK_MAIL: i32 = 6;
+pub const HOWDAH_SINK_PREG_EVAL: i32 = 7;
+pub const HOWDAH_SINK_CREATE_FUNCTION: i32 = 8;
+pub const HOWDAH_SINK_ASSERT: i32 = 9;
+pub const HOWDAH_SINK_CALLBACK: i32 = 10;
+pub const HOWDAH_SINK_XML: i32 = 11;
+pub const HOWDAH_SINK_TLS: i32 = 12;
 
 // Layer-4 behavior facets (howdah_behavior_armed).
 pub const HOWDAH_BEHAVIOR_EXEC_DIR: i32 = 0;
@@ -178,6 +186,13 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::UnexpectedBinary => "unexpected binary executed following an upload",
         RuleId::UnexpectedEgress => "possible unexpected outbound connection",
         RuleId::PhpWrite => "PHP file written to disk",
+        RuleId::MailInjection => "mail() called with an unsafe sendmail option or header injection",
+        RuleId::PregEval => "preg pattern with the /e modifier",
+        RuleId::CreateFunction => "create_function invoked",
+        RuleId::AssertString => "assert() evaluating a string as code",
+        RuleId::DangerousCallback => "string callback naming a command or code execution function",
+        RuleId::Xxe => "XML document declaring an external entity",
+        RuleId::TlsVerify => "curl TLS certificate verification disabled",
     }
 }
 
@@ -422,6 +437,9 @@ impl howdah_ctx {
         }
         let sinks = &self.config.sinks;
         let n = String::from_utf8_lossy(&name[..name.len().min(64)]).into_owned();
+        // xml: scanned once; a bare external DTD (XHTML/SVG doctypes) is a
+        // detect-only hit, an external entity declaration may block.
+        let xml_hit = if sink == SinkId::Xml { legacy::xml_external_entity_hit(arg) } else { None };
         let (rule, matched): (RuleId, Option<String>) = match sink {
             SinkId::CommandExec => (
                 RuleId::CommandExec,
@@ -442,6 +460,28 @@ impl howdah_ctx {
             ),
             // SSRF has its own entry point (howdah_sink_check_ssrf).
             SinkId::Ssrf => (RuleId::Ssrf, None),
+            // mail has its own entry point (howdah_sink_check_mail).
+            SinkId::Mail => (RuleId::MailInjection, None),
+            SinkId::PregEval => (
+                RuleId::PregEval,
+                legacy::preg_pattern_has_e(arg).then(|| format!("{} via {n}", legacy::REASON_PREG_EVAL)),
+            ),
+            SinkId::CreateFunction => {
+                (RuleId::CreateFunction, Some(format!("dynamic code evaluation via {n}")))
+            }
+            SinkId::Assert => {
+                (RuleId::AssertString, Some(format!("string assertion evaluated as code via {n}")))
+            }
+            // The callback NAME is a function identifier from a fixed list,
+            // never the data the callback would receive.
+            SinkId::Callback => (
+                RuleId::DangerousCallback,
+                legacy::dangerous_callback(arg).map(|cb| format!("dangerous callback '{cb}' via {n}")),
+            ),
+            SinkId::Xml => (RuleId::Xxe, xml_hit.map(|h| format!("{} via {n}", h.reason))),
+            // `arg` is the option token the shim passes ("verifypeer" /
+            // "verifyhost"), not user data.
+            SinkId::Tls => (RuleId::TlsVerify, legacy::tls_reason(arg).map(|r| format!("{r} via {n}"))),
             SinkId::Unserialize => {
                 let scan = unserialize_classes(arg);
                 let allow = &sinks.unserialize.allow_classes;
@@ -463,11 +503,47 @@ impl howdah_ctx {
             self.note_excepted_sink(rule, &m);
             return Action::Allow;
         }
+        // tls is detect-only in this release, and so is a bare external DTD
+        // under the xml sink: a block mode is logged as log for those.
+        let detect_only = sink == SinkId::Tls || xml_hit.is_some_and(|h| !h.external_entity);
+        let action = match mode {
+            Mode::Block if !detect_only => Action::Block,
+            _ => Action::Log,
+        };
+        self.sink_log = Some(self.record(rule, action, reason));
+        action
+    }
+
+    /// `mail()` check: the 4th (headers) and 5th (additional_parameters)
+    /// arguments, each possibly absent. Scanned, never logged.
+    fn sink_check_mail(&mut self, headers: &[u8], params: &[u8]) -> Action {
+        #[cfg(test)]
+        if tests::FORCE_PANIC.with(|f| f.get()) {
+            panic!("injected test panic");
+        }
+        let mode = self.config.sinks.effective_mode(SinkId::Mail, self.config.mode);
+        if mode == Mode::Off {
+            return Action::Allow;
+        }
+        let reason = match (legacy::mail_params_hit(params), legacy::mail_headers_hit(headers)) {
+            (Some(r), _) | (None, Some(r)) => r,
+            (None, None) => return Action::Allow,
+        };
         let action = match mode {
             Mode::Block => Action::Block,
             _ => Action::Log,
         };
-        self.sink_log = Some(self.record(rule, action, reason));
+        let rec = EventRecord {
+            ts: now(),
+            request_id: self.request_id.clone(),
+            rule: RuleId::MailInjection,
+            action,
+            client_ip: self.meta.client_ip.clone(),
+            method: self.meta.method.clone(),
+            uri: self.meta.uri.clone(),
+            reason: reason.to_string(),
+        };
+        self.sink_log = Some(log_line(&rec));
         action
     }
 
@@ -1074,6 +1150,12 @@ pub unsafe extern "C" fn howdah_sink_check(
         HOWDAH_SINK_EVAL => SinkId::Eval,
         HOWDAH_SINK_UNSERIALIZE => SinkId::Unserialize,
         HOWDAH_SINK_PHAR => SinkId::Phar,
+        HOWDAH_SINK_PREG_EVAL => SinkId::PregEval,
+        HOWDAH_SINK_CREATE_FUNCTION => SinkId::CreateFunction,
+        HOWDAH_SINK_ASSERT => SinkId::Assert,
+        HOWDAH_SINK_CALLBACK => SinkId::Callback,
+        HOWDAH_SINK_XML => SinkId::Xml,
+        HOWDAH_SINK_TLS => SinkId::Tls,
         _ => return HOWDAH_ALLOW,
     };
     let r = catch_unwind(AssertUnwindSafe(|| {
@@ -1270,6 +1352,13 @@ pub unsafe extern "C" fn howdah_sink_armed(ctx: *mut howdah_ctx, sink: i32) -> i
         HOWDAH_SINK_UNSERIALIZE => SinkId::Unserialize,
         HOWDAH_SINK_PHAR => SinkId::Phar,
         HOWDAH_SINK_SSRF => SinkId::Ssrf,
+        HOWDAH_SINK_MAIL => SinkId::Mail,
+        HOWDAH_SINK_PREG_EVAL => SinkId::PregEval,
+        HOWDAH_SINK_CREATE_FUNCTION => SinkId::CreateFunction,
+        HOWDAH_SINK_ASSERT => SinkId::Assert,
+        HOWDAH_SINK_CALLBACK => SinkId::Callback,
+        HOWDAH_SINK_XML => SinkId::Xml,
+        HOWDAH_SINK_TLS => SinkId::Tls,
         _ => return 0,
     };
     catch_unwind(AssertUnwindSafe(|| {
@@ -1594,6 +1683,14 @@ pub unsafe extern "C" fn howdah_sink_check_at(
         HOWDAH_SINK_EVAL => SinkId::Eval,
         HOWDAH_SINK_UNSERIALIZE => SinkId::Unserialize,
         HOWDAH_SINK_PHAR => SinkId::Phar,
+        // Legacy-era sinks (1.5) route through here too (the glue calls the
+        // `_at` variant for every one-argument sink).
+        HOWDAH_SINK_PREG_EVAL => SinkId::PregEval,
+        HOWDAH_SINK_CREATE_FUNCTION => SinkId::CreateFunction,
+        HOWDAH_SINK_ASSERT => SinkId::Assert,
+        HOWDAH_SINK_CALLBACK => SinkId::Callback,
+        HOWDAH_SINK_XML => SinkId::Xml,
+        HOWDAH_SINK_TLS => SinkId::Tls,
         _ => return HOWDAH_ALLOW,
     };
     let r = catch_unwind(AssertUnwindSafe(|| {
@@ -1878,6 +1975,60 @@ pub unsafe extern "C" fn howdah_sink_hook_plan(ctx: *mut howdah_ctx) -> i32 {
         }
     }))
     .unwrap_or(HOWDAH_HOOK_PLAN_NONE)
+}
+
+// ---- legacy-era sinks (1.5) -----------------------------------------------
+
+/// `mail()` sink check. `headers` is the 4th argument when it is a string
+/// (NULL/0 otherwise), `params` the 5th. Both are scanned, never logged.
+/// Returns 0 Allow / 1 Log / 2 Block; NULL ctx or panic is 0 (fail-open). A
+/// hit is retrievable with `howdah_take_sink_log_line`.
+///
+/// # Safety
+/// `ctx` NULL or live; `headers`/`params` NULL or valid for their lengths.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_sink_check_mail(
+    ctx: *mut howdah_ctx,
+    headers: *const c_char,
+    headers_len: usize,
+    params: *const c_char,
+    params_len: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let sl = |p: *const c_char, n: usize| -> &[u8] {
+            if p.is_null() || n == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts(p as *const u8, n)
+            }
+        };
+        code((*ctx).sink_check_mail(sl(headers, headers_len), sl(params, params_len)))
+    }));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// 1 iff `[sinks.xml] external_entities = "deny"` is in force (set, global
+/// mode not off, sinks enabled); the glue then turns libxml's external
+/// entity loader off at every request start. NULL ctx or panic is 0.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_sink_xml_deny_external_entities(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = &*ctx;
+        i32::from(c.config.sinks.xml_deny_external_entities(c.config.mode))
+    }))
+    .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -2758,6 +2909,147 @@ mod tests {
             assert_eq!(unsafe { howdah_sink_hook_plan(c) }, HOWDAH_HOOK_PLAN_NONE, "{toml}");
             unsafe { howdah_free(c) };
         }
+    }
+
+    fn mail(c: *mut howdah_ctx, headers: &[u8], params: &[u8]) -> i32 {
+        unsafe {
+            howdah_sink_check_mail(
+                c,
+                headers.as_ptr() as _,
+                headers.len(),
+                params.as_ptr() as _,
+                params.len(),
+            )
+        }
+    }
+
+    #[test]
+    fn legacy_sinks_log_by_default_block_when_armed_and_never_log_the_argument() {
+        // Shipped defaults: every legacy sink inherits detect.
+        let c = init("");
+        begin(c);
+        assert_eq!(mail(c, b"From: a@b.c", b"-fa@b.c"), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        assert_eq!(mail(c, b"From: a@b.c", b"-Oqueue=/tmp/SECRETDIR"), HOWDAH_LOG);
+        let l = take_sink(c).unwrap();
+        assert!(l.contains("\"rule\":\"mail_injection\"") && l.contains("\"layer\":3"), "{l}");
+        assert!(!l.contains("SECRETDIR") && !l.contains("-O"), "{l}");
+        assert_eq!(mail(c, b"X: 1\r\n\r\nSECRETBODY", b""), HOWDAH_LOG);
+        assert!(!take_sink(c).unwrap().contains("SECRETBODY"));
+        assert_eq!(sink(c, HOWDAH_SINK_PREG_EVAL, "preg_replace", b"/SECRETPAT/e"), HOWDAH_LOG);
+        let l = take_sink(c).unwrap();
+        assert!(l.contains("\"rule\":\"preg_eval\"") && !l.contains("SECRETPAT"), "{l}");
+        assert_eq!(sink(c, HOWDAH_SINK_PREG_EVAL, "preg_replace", b"/x/i"), HOWDAH_ALLOW);
+        assert_eq!(sink(c, HOWDAH_SINK_CREATE_FUNCTION, "create_function", b"return SECRETCODE;"), HOWDAH_LOG);
+        let l = take_sink(c).unwrap();
+        assert!(l.contains("\"rule\":\"create_function\"") && !l.contains("SECRETCODE"), "{l}");
+        assert_eq!(sink(c, HOWDAH_SINK_ASSERT, "assert", b"SECRETEXPR"), HOWDAH_LOG);
+        assert!(take_sink(c).unwrap().contains("\"rule\":\"assert_string\""));
+        assert_eq!(sink(c, HOWDAH_SINK_CALLBACK, "array_map", b"system"), HOWDAH_LOG);
+        let l = take_sink(c).unwrap();
+        assert!(l.contains("\"rule\":\"dangerous_callback\"") && l.contains("'system' via array_map"), "{l}");
+        assert_eq!(sink(c, HOWDAH_SINK_CALLBACK, "array_map", b"trim"), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        assert_eq!(
+            sink(c, HOWDAH_SINK_XML, "simplexml_load_string", b"<!DOCTYPE r [<!ENTITY x SYSTEM \"file:///SECRETPATH\">]><r/>"),
+            HOWDAH_LOG
+        );
+        let l = take_sink(c).unwrap();
+        assert!(l.contains("\"rule\":\"xxe\"") && !l.contains("SECRETPATH"), "{l}");
+        assert_eq!(sink(c, HOWDAH_SINK_XML, "simplexml_load_string", b"<r/>"), HOWDAH_ALLOW);
+        assert_eq!(sink(c, HOWDAH_SINK_TLS, "curl_setopt", b"verifypeer"), HOWDAH_LOG);
+        let l = take_sink(c).unwrap();
+        assert!(l.contains("\"rule\":\"tls_verify\"") && l.contains("VERIFYPEER"), "{l}");
+        assert_eq!(sink(c, HOWDAH_SINK_TLS, "curl_setopt", b"other"), HOWDAH_ALLOW);
+        unsafe { howdah_free(c) };
+
+        // Armed: block, except tls which is detect-only (clamped to log).
+        let c = init("[sinks]\nmode=\"block\"");
+        begin(c);
+        assert_eq!(mail(c, b"", b"-X/tmp/f"), HOWDAH_BLOCK);
+        assert!(take_sink(c).unwrap().contains("\"action\":\"block\""));
+        assert_eq!(sink(c, HOWDAH_SINK_PREG_EVAL, "preg_replace", b"/a/e"), HOWDAH_BLOCK);
+        assert_eq!(sink(c, HOWDAH_SINK_CREATE_FUNCTION, "create_function", b"1;"), HOWDAH_BLOCK);
+        assert_eq!(sink(c, HOWDAH_SINK_ASSERT, "assert", b"1"), HOWDAH_BLOCK);
+        assert_eq!(sink(c, HOWDAH_SINK_CALLBACK, "call_user_func", b"\\exec"), HOWDAH_BLOCK);
+        // An external ENTITY blocks; a bare external DTD (XHTML/SVG) only logs.
+        assert_eq!(sink(c, HOWDAH_SINK_XML, "DOMDocument::loadXML", b"<!DOCTYPE r [<!ENTITY x SYSTEM \"f\">]><r/>"), HOWDAH_BLOCK);
+        assert!(take_sink(c).unwrap().contains("\"action\":\"block\""));
+        assert_eq!(sink(c, HOWDAH_SINK_XML, "DOMDocument::loadXML", b"<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"svg11.dtd\"><svg/>"), HOWDAH_LOG);
+        let l = take_sink(c).unwrap();
+        assert!(l.contains("\"action\":\"log\"") && l.contains("external DTD"), "{l}");
+        assert_eq!(sink(c, HOWDAH_SINK_TLS, "curl_setopt_array", b"verifyhost"), HOWDAH_LOG);
+        let l = take_sink(c).unwrap();
+        assert!(l.contains("\"action\":\"log\"") && l.contains("VERIFYHOST"), "{l}");
+        unsafe { howdah_free(c) };
+
+        // Per-sink off and global off: silent; armed flags follow.
+        let c = init("[sinks.callback]\nmode=\"off\"");
+        begin(c);
+        assert_eq!(sink(c, HOWDAH_SINK_CALLBACK, "array_map", b"system"), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        unsafe {
+            assert_eq!(howdah_sink_armed(c, HOWDAH_SINK_CALLBACK), 0);
+            assert_eq!(howdah_sink_armed(c, HOWDAH_SINK_MAIL), 1);
+            assert_eq!(howdah_sink_armed(c, HOWDAH_SINK_TLS), 1);
+            assert_eq!(howdah_sink_xml_deny_external_entities(c), 0);
+            howdah_free(c);
+        }
+        let c = init("mode=\"off\"\n[sinks.xml]\nexternal_entities=\"deny\"");
+        begin(c);
+        assert_eq!(mail(c, b"", b"-X/tmp/f"), HOWDAH_ALLOW);
+        unsafe {
+            assert_eq!(howdah_sink_xml_deny_external_entities(c), 0);
+            howdah_free(c);
+        }
+        let c = init("[sinks.xml]\nexternal_entities=\"deny\"");
+        unsafe {
+            assert_eq!(howdah_sink_xml_deny_external_entities(c), 1);
+            assert_eq!(howdah_sink_xml_deny_external_entities(std::ptr::null_mut()), 0);
+            assert_eq!(howdah_sink_check_mail(std::ptr::null_mut(), std::ptr::null(), 0, std::ptr::null(), 0), HOWDAH_ALLOW);
+            assert_eq!(howdah_sink_check_mail(c, std::ptr::null(), 0, std::ptr::null(), 0), HOWDAH_ALLOW);
+            howdah_free(c);
+        }
+    }
+
+    /// The ext glue routes every one-argument sink through the `_at` entry
+    /// point (exceptions-aware), which has its own sink-id map: each legacy
+    /// id must be known there too (the lab caught `array_map('system')`
+    /// falling through to ALLOW when only the original map was extended).
+    #[test]
+    fn legacy_sink_ids_are_known_to_the_at_entry_point() {
+        let c = init("");
+        begin(c);
+        let at = |id: i32, name: &str, arg: &[u8]| unsafe {
+            howdah_sink_check_at(
+                c,
+                id,
+                name.as_ptr() as _,
+                name.len(),
+                arg.as_ptr() as _,
+                arg.len(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            )
+        };
+        for (id, name, arg, rule) in [
+            (HOWDAH_SINK_PREG_EVAL, "preg_replace", &b"/a/e"[..], "preg_eval"),
+            (HOWDAH_SINK_CREATE_FUNCTION, "create_function", b"1;", "create_function"),
+            (HOWDAH_SINK_ASSERT, "assert", b"1", "assert_string"),
+            (HOWDAH_SINK_CALLBACK, "array_map", b"system", "dangerous_callback"),
+            (HOWDAH_SINK_XML, "simplexml_load_string", b"<!DOCTYPE r [<!ENTITY x SYSTEM \"f\">]><r/>", "xxe"),
+            (HOWDAH_SINK_TLS, "curl_setopt", b"verifypeer", "tls_verify"),
+        ] {
+            assert_eq!(at(id, name, arg), HOWDAH_LOG, "{rule} via _at");
+            let l = take_sink(c).unwrap_or_else(|| panic!("{rule}: no line via _at"));
+            assert!(l.contains(&format!("\"rule\":\"{rule}\"")), "{l}");
+        }
+        // Benign arguments stay silent through the same path.
+        assert_eq!(at(HOWDAH_SINK_CALLBACK, "array_map", b"trim"), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        unsafe { howdah_free(c) };
     }
 
     #[test]

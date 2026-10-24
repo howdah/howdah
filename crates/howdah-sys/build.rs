@@ -34,6 +34,7 @@ fn main() {
     println!("cargo:rerun-if-changed=phar_hook.c");
     println!("cargo:rerun-if-changed=ssrf_hook.c");
     println!("cargo:rerun-if-changed=refuse_hook.c");
+    println!("cargo:rerun-if-changed=legacy_hook.c");
     println!("cargo:rerun-if-changed=howdah_sink.h");
     let mut shim = cc::Build::new();
     shim.file("shim.c")
@@ -41,6 +42,7 @@ fn main() {
         .file("phar_hook.c")
         .file("ssrf_hook.c")
         .file("refuse_hook.c")
+        .file("legacy_hook.c")
         .warnings(false);
     for inc in includes.split_whitespace() {
         if let Some(dir) = inc.strip_prefix("-I") {
@@ -48,6 +50,10 @@ fn main() {
         }
     }
     shim.compile("howdah_sys_shim");
+    // legacy_hook.c resolves ext/libxml's setter with dlsym at run time. On
+    // glibc < 2.34 (the 2.17 release baseline) dlsym lives in libdl; newer
+    // glibc keeps a libdl stub, so this is harmless there.
+    println!("cargo:rustc-link-lib=dl");
 
     let bindings = bindgen::Builder::default()
         .header("wrapper.h")

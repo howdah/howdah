@@ -9,8 +9,26 @@
 #define HOWDAH_SINK_UNSERIALIZE  3
 #define HOWDAH_SINK_PHAR         4
 #define HOWDAH_SINK_SSRF         5
+/* Legacy-era sinks (1.5; see legacy_hook.c). */
+#define HOWDAH_SINK_MAIL            6
+#define HOWDAH_SINK_PREG_EVAL       7
+#define HOWDAH_SINK_CREATE_FUNCTION 8
+#define HOWDAH_SINK_ASSERT          9
+#define HOWDAH_SINK_CALLBACK        10
+#define HOWDAH_SINK_XML             11
+#define HOWDAH_SINK_TLS             12
 
 #define HOWDAH_ACTION_BLOCK      2
+
+/* Legacy sink install mask bits (howdah_install_legacy_hooks; mirrored as
+ * HOWDAH_LEGACY_* in howdah-sys/src/lib.rs). */
+#define HOWDAH_LEGACY_MAIL            1
+#define HOWDAH_LEGACY_PREG_EVAL       2
+#define HOWDAH_LEGACY_CREATE_FUNCTION 4
+#define HOWDAH_LEGACY_ASSERT          8
+#define HOWDAH_LEGACY_CALLBACK        16
+#define HOWDAH_LEGACY_XML             32
+#define HOWDAH_LEGACY_TLS             64
 
 /* Layer-4 behavior facets. Values MUST mirror HOWDAH_BEHAVIOR_* in
  * howdah-core/src/ffi.rs (and howdah_core.h). */

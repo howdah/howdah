@@ -17,6 +17,16 @@ pub enum Mode {
     Block,
 }
 
+/// What to enforce when the config file does not parse (`on_invalid_config`).
+/// `Block` (the default) is the long-standing fail-toward-protection fallback.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OnInvalidConfig {
+    #[default]
+    Block,
+    Off,
+}
+
 /// Logging settings.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
@@ -247,6 +257,8 @@ pub struct Config {
     pub inspect: InspectConfig,
     pub sinks: SinkConfig,
     pub behavior: BehaviorConfig,
+    /// Fallback when this file does not parse; see [`Config::load`].
+    pub on_invalid_config: OnInvalidConfig,
 }
 
 #[derive(Deserialize)]
@@ -259,6 +271,7 @@ struct RawConfig {
     inspect: InspectConfig,
     sinks: SinkConfig,
     behavior: BehaviorConfig,
+    on_invalid_config: OnInvalidConfig,
 }
 
 impl Default for RawConfig {
@@ -272,6 +285,7 @@ impl Default for RawConfig {
             inspect: c.inspect,
             sinks: c.sinks,
             behavior: c.behavior,
+            on_invalid_config: c.on_invalid_config,
         }
     }
 }
@@ -339,7 +353,53 @@ impl Config {
             inspect: raw.inspect,
             sinks: raw.sinks,
             behavior: raw.behavior,
+            on_invalid_config: raw.on_invalid_config,
         })
+    }
+
+    /// Read `on_invalid_config` from the raw text of a file that failed to
+    /// parse. The parser is all-or-nothing, so this is a tiny line scan: only
+    /// top-level lines (before the first `[table]` header) are looked at, the
+    /// value must be a quoted `"off"`, and anything else (no such line,
+    /// another value, a bare word) yields the default, `Block`.
+    pub fn scan_on_invalid_config(s: &str) -> OnInvalidConfig {
+        for line in s.lines() {
+            let l = line.trim();
+            if l.starts_with('[') {
+                break;
+            }
+            let Some(rest) = l.strip_prefix("on_invalid_config") else { continue };
+            let Some(v) = rest.trim_start().strip_prefix('=') else { continue };
+            let v = v.trim();
+            for q in ["\"off\"", "'off'"] {
+                if let Some(tail) = v.strip_prefix(q) {
+                    let t = tail.trim();
+                    if t.is_empty() || t.starts_with('#') {
+                        return OnInvalidConfig::Off;
+                    }
+                }
+            }
+            return OnInvalidConfig::Block;
+        }
+        OnInvalidConfig::Block
+    }
+
+    /// Load a config file's bytes. On success `error` is `None`. On any parse
+    /// or validation failure (including non-UTF-8) `config` is the fallback
+    /// (`safe_defaults()` with the mode taken from the pre-parse of
+    /// `on_invalid_config`) and `error` carries the message so the caller can
+    /// report it loudly.
+    pub fn load(bytes: &[u8]) -> LoadOutcome {
+        let text = match std::str::from_utf8(bytes) {
+            Ok(t) => t,
+            Err(e) => {
+                return LoadOutcome::fallback(OnInvalidConfig::Block, ConfigError(format!("not valid UTF-8: {e}")))
+            }
+        };
+        match Config::from_toml(text) {
+            Ok(config) => LoadOutcome { config, error: None },
+            Err(e) => LoadOutcome::fallback(Config::scan_on_invalid_config(text), e),
+        }
     }
 
     /// A usable config: blocking, with critical limits active.
@@ -352,7 +412,34 @@ impl Config {
             inspect: InspectConfig::default(),
             sinks: SinkConfig::default(),
             behavior: BehaviorConfig::default(),
+            on_invalid_config: OnInvalidConfig::Block,
         }
+    }
+}
+
+/// Result of [`Config::load`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadOutcome {
+    pub config: Config,
+    pub error: Option<ConfigError>,
+}
+
+impl LoadOutcome {
+    fn fallback(on_invalid: OnInvalidConfig, error: ConfigError) -> LoadOutcome {
+        let mut config = Config::safe_defaults();
+        config.mode = match on_invalid {
+            OnInvalidConfig::Block => Mode::Block,
+            OnInvalidConfig::Off => Mode::Off,
+        };
+        config.on_invalid_config = on_invalid;
+        LoadOutcome { config, error: Some(error) }
+    }
+}
+
+impl ConfigError {
+    /// The bare parser message, without the "invalid howdah config:" prefix.
+    pub fn message(&self) -> &str {
+        &self.0
     }
 }
 
@@ -416,6 +503,59 @@ self_test = "off"
         assert_eq!(c.limits.max_part_header_bytes, 1024);
         assert_eq!(c.log.path.as_deref(), Some("/var/log/howdah.log"));
         assert_eq!(c.rule_modes.get(&RuleId::SelfTest), Some(&Mode::Off));
+    }
+
+    #[test]
+    fn on_invalid_config_parses_and_defaults_to_block() {
+        assert_eq!(Config::from_toml("").unwrap().on_invalid_config, OnInvalidConfig::Block);
+        let c = Config::from_toml("on_invalid_config = \"off\"\nmode = \"detect\"").unwrap();
+        assert_eq!(c.on_invalid_config, OnInvalidConfig::Off);
+        assert!(Config::from_toml("on_invalid_config = \"warn\"").is_err());
+    }
+
+    #[test]
+    fn scan_reads_only_top_level_quoted_value() {
+        let scan = Config::scan_on_invalid_config;
+        assert_eq!(scan("on_invalid_config = \"off\""), OnInvalidConfig::Off);
+        assert_eq!(scan("# c\n  on_invalid_config=\"off\"  # why\nmode = 3"), OnInvalidConfig::Off);
+        assert_eq!(scan("on_invalid_config = 'off'"), OnInvalidConfig::Off);
+        assert_eq!(scan("on_invalid_config = \"block\""), OnInvalidConfig::Block);
+        assert_eq!(scan("on_invalid_config = off"), OnInvalidConfig::Block);
+        assert_eq!(scan("on_invalid_config = \"offf\""), OnInvalidConfig::Block);
+        assert_eq!(scan("mode = \"detect\""), OnInvalidConfig::Block);
+        // Inside a table it is not the top-level key.
+        assert_eq!(scan("[log]\non_invalid_config = \"off\""), OnInvalidConfig::Block);
+        // A key that merely starts with the name is not it.
+        assert_eq!(scan("on_invalid_config_x = \"off\""), OnInvalidConfig::Block);
+    }
+
+    #[test]
+    fn load_valid_has_no_error() {
+        let o = Config::load(b"mode = \"detect\"");
+        assert!(o.error.is_none());
+        assert_eq!(o.config.mode, Mode::Detect);
+    }
+
+    #[test]
+    fn load_invalid_falls_back_to_block_with_error() {
+        let o = Config::load(b"mode = \"detect\"\n[limits]\nnope = 1");
+        assert_eq!(o.config.mode, Mode::Block);
+        assert!(o.error.unwrap().message().contains("nope"));
+    }
+
+    #[test]
+    fn load_invalid_honours_on_invalid_config_off() {
+        let o = Config::load(b"on_invalid_config = \"off\"\n[limits]\nnope = 1");
+        assert_eq!(o.config.mode, Mode::Off);
+        assert_eq!(o.config.on_invalid_config, OnInvalidConfig::Off);
+        assert!(o.error.is_some());
+    }
+
+    #[test]
+    fn load_non_utf8_falls_back_to_block() {
+        let o = Config::load(b"\xff\xfe");
+        assert_eq!(o.config.mode, Mode::Block);
+        assert!(o.error.is_some());
     }
 
     #[test]

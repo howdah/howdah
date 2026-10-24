@@ -1,0 +1,54 @@
+name: Bug report
+description: Howdah crashed, hung, failed to load, or behaved differently from the docs.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If you think this is a security vulnerability, stop and read [SECURITY.md](../blob/main/SECURITY.md) instead.
+        Do not paste request bodies, cookies, Authorization headers, passwords or other secrets.
+  - type: input
+    id: version
+    attributes:
+      label: Howdah version
+      placeholder: "1.3.0"
+    validations:
+      required: true
+  - type: input
+    id: php
+    attributes:
+      label: PHP version and SAPI
+      description: "From `php -v` and how PHP runs (php-fpm, mod_php, cli-server, CGI/FastCGI, CLI)."
+      placeholder: "7.4.33, php-fpm"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS, architecture and install method
+      placeholder: "Debian 12 amd64, apt from pkg.howdah.org"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Describe the request shape (sizes, counts), not payloads.
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: Your howdah.toml and the three php.ini settings (howdah.mode, howdah.config, howdah.log), with any secrets removed.
+      render: toml
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: Howdah log lines and PHP error log lines. Howdah logs contain no bodies, but check before pasting.
+      render: text

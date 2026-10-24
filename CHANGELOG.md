@@ -6,6 +6,24 @@ All notable changes to Howdah are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- A malformed `howdah.config` is no longer silent. The extension writes one
+  line to the SAPI error log at startup (file and parse error, once per
+  process) and `phpinfo()` / `php --ri howdah` shows
+  `Config status => INVALID (fell back to block): <error>`. The fallback is
+  still block mode by default; the new optional top-level TOML key
+  `on_invalid_config = "block" | "off"` picks `off` instead. The parser is
+  all-or-nothing, so a failed file is scanned for that one top-level line
+  (see `docs/config.md`). No new php.ini directive.
+- A read-only "Risky ini settings" table in `php --ri howdah` / `phpinfo()`
+  and a `howdah-check ini [php-binary]` command: flag `register_argc_argv`
+  (Craft CMS CVE-2024-56145, Laravel CVE-2024-52301), `allow_url_include`,
+  `session.upload_progress.enabled`, a world-readable or docroot
+  `session.save_path`, `display_errors`, `expose_php`, `enable_dl`,
+  `cgi.fix_pathinfo` under CGI/FastCGI, and exec-family functions missing from
+  `disable_functions`, each with the reason and what to set instead.
+  `allow_url_fopen` and an unset `open_basedir` are shown by `howdah-check` as
+  information only. Nothing is changed. A list of known preconditions, not an
+  audit.
 - A config editor at https://howdah.org/config/: builds `howdah.ini` and
   `howdah.toml` from a form with every setting's default and effect (including
   the 1.3 `[sinks.phar]` and `[sinks.ssrf]` tables), validates the TOML with
@@ -20,6 +38,12 @@ All notable changes to Howdah are documented here. The format follows
   JSON, or the error), `howdah_wasm_rule_catalog` and `howdah_wasm_version`.
 
 ### Fixed
+- Stale trust surfaces: `SECURITY.md` (supported versions, scope, response
+  times, key fingerprint), the site status banner (now names all three
+  layers), the config editor notes that said `include`/`eval` are PHP 7.0+
+  only (they are active on 5.x since 1.3), and the "not live yet" banners in
+  `docs/install-repos.md` and `packaging/repo/GO-LIVE.md`. Added issue and
+  pull request templates.
 - `docs/config.md` claimed `[log] path` in the TOML overrides `howdah.log`;
   the extension never reads it. The log path is set only by the ini directive.
 - The browser demo ran a stale core: `site/demo/howdah_wasm.wasm` was a

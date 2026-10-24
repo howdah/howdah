@@ -24,19 +24,55 @@ enough for us to reproduce and fix it.
 
 | Version | Supported |
 | ------- | --------- |
-| 0.1 (pre-release) | Yes. This is the only line, and it is not yet released. |
+| 1.3.x | Yes. Current release; fixes ship here first. |
+| 1.2.x and earlier | No. Upgrade to the latest 1.3.x release. |
 
-Until a stable release exists, fixes land on the main branch and in the next
-pre-release.
+Fixes land on `main` and ship in the next patch release of the current minor
+line. Releases and packages are available from the GitHub releases page and
+the signed apt/yum repositories at `https://pkg.howdah.org`.
 
 ## What to expect
 
-We will acknowledge a report, keep you updated while we investigate, and credit
-you in the advisory if you want that. This is a small open-source project, so
-we cannot promise fixed response times.
+This is a small open-source project, but we commit to the following:
 
-## Scope reminder
+- **Acknowledgement** within 3 business days of your report.
+- **A fix or a mitigation plan** within 14 days for High and Critical reports.
+  Lower severities are handled on a best-effort basis and we will tell you
+  where they stand.
+- **Coordinated disclosure:** we ask that you keep the report private for up to
+  90 days from the date you reported it. If we ship a fix sooner, we publish
+  the advisory then; if a fix needs longer, we will agree an extension with you
+  rather than let the deadline pass silently.
+- We keep you updated while we investigate, and credit you in the advisory if
+  you want that.
 
-Howdah 0.1 only covers abusive multipart upload floods. It is not a
-replacement for patching PHP. A vulnerability in PHP itself should go to the PHP
-project.
+## Verifying releases
+
+Release checksums (`SHA256SUMS`) and the apt/yum repositories are signed with
+the project key, published at `https://howdah.org/key.asc`. The primary key
+fingerprint is `1152 1035 C600 F638 31F8 2551 2087 B872 0997 807B`. Check it
+before trusting the key:
+
+```sh
+curl -fsSL https://howdah.org/key.asc | gpg --show-keys --with-fingerprint
+```
+
+## Scope
+
+Howdah is a PHP extension with three layers. **Layer 1** enforces request
+limits (multipart floods, input-variable floods, nesting depth, header
+sizes); its critical limits block in the default `detect` mode. **Layer 2**
+inspects decoded input values and only logs. **Layer 3** hardens dangerous
+sinks (command execution, `unserialize`, `include`/`eval`, `phar://`, SSRF)
+and only logs unless a sink is explicitly armed. The exact, lab-verified
+coverage per PHP version is in [docs/coverage.md](docs/coverage.md), including
+what is not covered.
+
+In scope: a bypass of a documented protection, a crash or hang in the
+extension, excess memory use caused by Howdah itself, a way to make Howdah log
+request bodies, cookies, `Authorization` headers, matched values or sink
+arguments (it must not), and flaws in the package repositories or signing.
+
+Out of scope: gaps already listed as limitations in docs/coverage.md, and
+Howdah is not a replacement for patching PHP or your application. A
+vulnerability in PHP itself should go to the PHP project.

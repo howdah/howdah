@@ -1,0 +1,25 @@
+name: Feature request
+description: Suggest a new capability or a change to an existing one.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe your situation (PHP version, hosting, the app you cannot upgrade).
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like Howdah to do?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+  - type: markdown
+    attributes:
+      value: |
+        Howdah logs first and does not block by default beyond the Layer 1 critical limits, adds no php.ini directives beyond the three it has, and has no telemetry. Requests that fit those rules are the easiest to accept.

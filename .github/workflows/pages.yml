@@ -35,7 +35,7 @@ jobs:
             target
           key: pages-wasm-${{ hashFiles('Cargo.lock') }}
       - name: Build the core as wasm
-        run: packaging/build-wasm.sh
+        run: sh packaging/build-wasm.sh
       - uses: actions/setup-node@v4
         with:
           node-version: 22

@@ -14,10 +14,34 @@ howdah.log=/var/log/howdah.log          ; where JSON event lines are written
 If `howdah.config` is unset, or the file is missing or unreadable, Howdah uses
 `howdah.mode` with the built-in limits below. If the file is present but
 malformed, Howdah falls back to its **safe defaults** (block mode, the limits
-below) and keeps serving — a bad config never takes PHP down, but note that
-`phpinfo()` still names the file, so validate it before deploying (the
-[config editor](https://howdah.org/config/) does this with the extension's own
-parser).
+below) and keeps serving — a bad config never takes PHP down. The fallback is
+loud, not silent: at startup Howdah writes one line to the SAPI error log
+(PHP's `error_log`, or stderr on the CLI) naming the file and the parse error,
+once per process, and `phpinfo()` / `php --ri howdah` shows a row
+`Config status => INVALID (fell back to block): at line 3, column 1: unknown
+field ...` (it reads `ok` for a good file). Validate the file before deploying;
+the [config editor](https://howdah.org/config/) does this with the extension's
+own parser. A file that cannot be read at all is reported as `UNREADABLE`, and
+Howdah then uses `howdah.mode`.
+
+### `on_invalid_config`
+
+```toml
+on_invalid_config = "block"   # "block" (default) | "off"
+```
+
+Chooses the mode Howdah runs in when the file does not parse. `"block"` is the
+long-standing behaviour. `"off"` runs with Howdah disabled instead, for a site
+where a typo must not start refusing requests.
+
+The parser is all-or-nothing, so the key cannot be read from the parsed file.
+When parsing fails, Howdah scans the raw text for a top-level
+`on_invalid_config = "off"` line (before the first `[table]` header, value in
+double or single quotes, optional trailing comment) and uses that. Anything else
+(no such line, another value, a bare word, the key inside a table, a file that
+is not valid UTF-8) means `block`. So the key works even when a sub-table is the
+broken part, but it is not a general parse: a typo in the line itself falls back
+to `block`. It is a TOML key, not a php.ini directive.
 
 ## Build a config in the browser
 

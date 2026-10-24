@@ -59,6 +59,20 @@ test('mode is always written even when it equals the core default', () => {
   assert.ok(E.emitToml(s, {}).startsWith('mode = "block"\n'));
 });
 
+test('on_invalid_config: default omitted, off emitted as a top-level line, round-trips', () => {
+  assert.equal(SCHEMA.top[0].default, validate('').config.on_invalid_config);
+  const s = fresh();
+  s.on_invalid_config = 'off';
+  s['limits.max_parts'] = 10;
+  const toml = E.emitToml(s, {});
+  assert.ok(toml.indexOf('on_invalid_config = "off"') < toml.indexOf('[limits]'), toml);
+  const v = validate(toml);
+  assert.equal(v.ok, true, v.error);
+  assert.equal(v.config.on_invalid_config, 'off');
+  assert.equal(E.loadFromCanonical(v.config, catalog).state.on_invalid_config, 'off');
+  assert.ok(E.emitToml(fresh(), { includeDefaults: true }).includes('# on_invalid_config = "block"'));
+});
+
 test('includeDefaults writes defaults as comments and still validates', () => {
   const toml = E.emitToml(fresh(), { includeDefaults: true });
   assert.ok(toml.includes('# max_parts = 2000'), toml);

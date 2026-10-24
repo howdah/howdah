@@ -85,6 +85,17 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
         </fieldset>
 
         <fieldset>
+          <legend>Top-level TOML key</legend>
+          {SCHEMA.top.map((k) => (
+            <div class="ctl">
+              <label for={'t-' + k.key}><code>{k.key}</code> <span class="def">default: {k.default}</span></label>
+              <select id={'t-' + k.key} name={k.key} data-type="enum">{k.values.map((v) => <option value={v} selected={v === k.default}>{v}</option>)}</select>
+              <small>{k.note}</small>
+            </div>
+          ))}
+        </fieldset>
+
+        <fieldset>
           <legend>[limits]</legend>
           <p class="small">Any limit set to 0 is rejected by the core (0 would block every request); there is no "unlimited", set a large number instead.</p>
           {limitGroups.map((g) => (
@@ -141,10 +152,10 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
             <legend>[{sec.id}]: {sec.title.replace(/^Layer \d: /, '')}</legend>
             <p class="small">{sec.id === 'inspect'
               ? 'Layer 2 only logs by default and is independent of the global mode: a global block does not arm it. Signature inspection is best-effort and can be bypassed; use the log to find application bugs rather than relying on it. In block mode the request is refused after the script has run (see Enforcement timing in the configuration reference).'
-              : 'Layer 3 only logs by default and is independent of the global mode: a global block does not arm any sink. Set a sink’s allowlist first, then arm block. include/require and eval are PHP 7.0+ only. The sink argument is never logged.'}</p>
+              : 'Layer 3 only logs by default and is independent of the global mode: a global block does not arm any sink. Set a sink’s allowlist first, then arm block. include/require and eval are active on PHP 5.x as well as 7.0+; on 5.x an include served from a warm opcache is not re-inspected (eval is fully covered). The sink argument is never logged.'}</p>
             {sec.keys.map((k) => (
               <div class={'ctl' + (sec.php7Only && sec.php7Only.some((p) => k.key.startsWith(p + '.')) ? ' php7' : '')}>
-                <label for={sec.id + '-' + k.key}><code>{k.key}</code> <span class="def">default: {fmtDefault(k)}</span>{sec.php7Only && sec.php7Only.some((p) => k.key.startsWith(p + '.')) ? <span class="tag php">PHP 7.0+</span> : null}</label>
+                <label for={sec.id + '-' + k.key}><code>{k.key}</code> <span class="def">default: {fmtDefault(k)}</span>{sec.php7Only && sec.php7Only.some((p) => k.key.startsWith(p + '.')) ? <span class="tag php">5.x: opcache caveat</span> : null}</label>
                 {k.type === 'bool'
                   ? <input id={sec.id + '-' + k.key} name={sec.id + '.' + k.key} data-type="bool" type="checkbox" checked={k.default} />
                   : k.type === 'int'
@@ -200,7 +211,7 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
         <li>Validation is the extension's own <code>Config::from_toml</code>, built to WebAssembly from the same source as the release. The error text you see is the core's.</li>
         <li>Nothing leaves your browser except the URL you copy. The fetch service at <code>cfg.howdah.org</code> keeps no copies and no logs of configs.</li>
         <li>The <code>[log]</code> TOML table is not offered: the extension reads the log path only from the <code>howdah.log</code> ini directive.</li>
-        <li>A malformed <code>howdah.config</code> on a server makes Howdah fall back to its safe defaults (block mode) and keep serving; using this page is how you avoid finding that out in production. Source: <a href={REPO + '/blob/main/docs/config.md'}>docs/config.md</a>.</li>
+        <li>A malformed <code>howdah.config</code> on a server makes Howdah fall back to its safe defaults (block mode, or off with <code>on_invalid_config = "off"</code>) and keep serving, with a line in the PHP error log and an INVALID row in <code>php --ri howdah</code>; using this page is how you avoid finding that out in production. Source: <a href={REPO + '/blob/main/docs/config.md'}>docs/config.md</a>.</li>
       </ul>
     </div>
   </section>

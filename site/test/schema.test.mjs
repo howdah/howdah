@@ -107,5 +107,5 @@ test('ini entries, presets and php7-only sinks are declared', () => {
   assert.equal(SCHEMA.ini[2].default, '/etc/howdah/howdah.toml');
   assert.deepEqual(Object.keys(SCHEMA.presets), ['defaults', 'enforcing']);
   assert.equal(SCHEMA.presets.enforcing['howdah.mode'], 'block');
-  assert.deepEqual(SCHEMA.sections.find((s) => s.id === 'sinks').php7Only, ['include', 'eval']);
+  assert.deepEqual(SCHEMA.sections.find((s) => s.id === 'sinks').php7Only, ['include']);
 });

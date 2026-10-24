@@ -5,6 +5,8 @@ All notable changes to Howdah are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-10-24
+
 ### Added
 - Scoped `[[exceptions]]`: turn one rule off for one executing script
   (absolute path, glob, or SHA-256 of the file), one request parameter

@@ -24,8 +24,8 @@ enough for us to reproduce and fix it.
 
 | Version | Supported |
 | ------- | --------- |
-| 1.4.x | Yes. Current release; fixes ship here first. |
-| 1.3.x and earlier | No. Upgrade to the latest 1.4.x release. |
+| 1.5.x | Yes. Current release; fixes ship here first. |
+| 1.4.x and earlier | No. Upgrade to the latest 1.5.x release. |
 
 Fixes land on `main` and ship in the next patch release of the current minor
 line. Releases and packages are available from the GitHub releases page and

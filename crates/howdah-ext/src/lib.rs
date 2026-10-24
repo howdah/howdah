@@ -21,6 +21,7 @@ pub mod ini_config;
 pub mod ini_risk;
 #[cfg(target_os = "linux")]
 pub mod logsink;
+pub mod script_hash;
 
 #[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]
 mod behavior_filter;
@@ -28,6 +29,8 @@ mod behavior_filter;
 mod input_filter;
 #[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]
 mod module;
+#[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]
+mod origin;
 #[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]
 mod response;
 #[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]

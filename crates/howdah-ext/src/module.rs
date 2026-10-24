@@ -50,6 +50,8 @@ static mut DISP_MODE: Option<CString> = None;
 static mut DISP_CONFIG: Option<CString> = None;
 static mut DISP_LOG: Option<CString> = None;
 static mut DISP_CONFIG_STATUS: Option<CString> = None;
+/// For the info table: `N configured, M rejected` ([[exceptions]]).
+static mut DISP_EXCEPTIONS: Option<CString> = None;
 static mut DISP_HOOK: Option<CString> = None;
 
 const SUCCESS: c_int = 0;
@@ -305,7 +307,11 @@ unsafe fn exec_dir_decision() -> Option<(c_int, String)> {
         return None;
     }
     maybe_begin();
-    let action = core::howdah_behavior_check_exec_dir(CTX, pt as *const c_char, plen);
+    // The main script is the executing file for this check; a hash facet
+    // (`script_sha256`) is served the same way as at the sink hooks.
+    let sha = crate::origin::sha_for(std::slice::from_raw_parts(pt as *const u8, plen));
+    let (sp, sl) = crate::origin::sha_args(&sha);
+    let action = core::howdah_behavior_check_exec_dir_at(CTX, pt as *const c_char, plen, sp, sl);
     // Take + write the stashed log line (behavior reuses the core's sink_log).
     let line = {
         let p = core::howdah_take_sink_log_line(CTX);
@@ -526,12 +532,16 @@ unsafe extern "C" fn minit(_type: c_int, module_number: c_int) -> c_int {
     // defaults (Block) — we fail toward protection, never toward Off.
     let mode_disp;
     let mut config_status = String::from("ok");
+    // `[[exceptions]]` counts for the info table: (configured, rejected), a
+    // lenient second pass over the file text (`None` when it is not TOML).
+    let mut exc_report: Option<(usize, usize)> = Some((0, 0));
     let ctx = match cfg_path.as_deref().and_then(read_file) {
         Some(bytes) => {
             // A file that does not parse is NOT silent: one startup line in the
             // SAPI error log and an INVALID row in phpinfo(). The fallback is
             // block unless the file's top-level `on_invalid_config = "off"`.
             let plan = crate::ini_config::plan_file_config(&bytes);
+            exc_report = std::str::from_utf8(&bytes).ok().and_then(howdah_core::Config::exceptions_report);
             let eff = match &plan.invalid {
                 Some(inv) => {
                     let path = cfg_path.as_deref().unwrap_or("");
@@ -584,6 +594,24 @@ unsafe extern "C" fn minit(_type: c_int, module_number: c_int) -> c_int {
     DISP_MODE = Some(cstring(&mode_disp));
     DISP_CONFIG = Some(cstring(cfg_path.as_deref().unwrap_or("(none; mode from howdah.mode ini)")));
     DISP_CONFIG_STATUS = Some(cstring(&config_status));
+
+    // `[[exceptions]]`: the info row, and one startup line in the SAPI error
+    // log when any are active (the once-per-process config summary; matched
+    // exceptions are otherwise silent unless `exceptions_log = true`).
+    let active = core::howdah_exceptions_count(ctx).max(0) as usize;
+    DISP_EXCEPTIONS = Some(cstring(&match exc_report {
+        Some((_, rejected)) => format!("{active} configured, {rejected} rejected"),
+        None => format!("{active} configured, n/a rejected (config does not parse)"),
+    }));
+    if active > 0 {
+        let msg = format!(
+            "Howdah: {active} exception(s) active from '{}'; exceptions_log = {}",
+            cfg_path.as_deref().unwrap_or(""),
+            if exceptions_log_on(ctx) { "on" } else { "off" }
+        );
+        let c = cstring(&msg);
+        sys::howdah_sys_log_err(c.as_ptr());
+    }
 
     // Chain the multipart callback: save whatever is installed (e.g. session
     // upload-progress) and install ours above it.
@@ -645,6 +673,9 @@ unsafe extern "C" fn minfo(_module: *mut sys::zend_module_entry) {
     if let Some(s) = (*ptr::addr_of!(DISP_CONFIG_STATUS)).as_ref() {
         row(b"Config status\0", s.as_bytes_with_nul());
     }
+    if let Some(e) = (*ptr::addr_of!(DISP_EXCEPTIONS)).as_ref() {
+        row(b"Exceptions ([[exceptions]])\0", e.as_bytes_with_nul());
+    }
     if let Some(l) = (*ptr::addr_of!(DISP_LOG)).as_ref() {
         row(b"Log destination\0", l.as_bytes_with_nul());
     }
@@ -703,6 +734,12 @@ unsafe fn row(k: &[u8], v: &[u8]) {
 
 fn cstring(s: &str) -> CString {
     CString::new(s).unwrap_or_default()
+}
+
+/// Whether the context's config has `exceptions_log = true` (for the startup
+/// summary line). Read through the Rust-only accessor, fail-closed to "off".
+unsafe fn exceptions_log_on(ctx: *mut core::howdah_ctx) -> bool {
+    catch_unwind(AssertUnwindSafe(|| core::howdah_exceptions_log(ctx) != 0)).unwrap_or(false)
 }
 
 /// Read a whole file; `None` (with a loud stderr note) on any error, so a

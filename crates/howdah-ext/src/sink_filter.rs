@@ -7,10 +7,13 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use howdah_core::ffi as core;
 
-use crate::{module, response};
+use crate::{module, origin, response};
 
 /// Installed as the sink-decision callback by MINIT. Returns the action code
 /// (0 ALLOW / 1 LOG / 2 BLOCK); on BLOCK the C neutralizes the call.
+///
+/// The executing script (and, when an exception asks for it, its SHA-256) is
+/// passed along so `[[exceptions]]` `script` facets can match; see `origin`.
 ///
 /// # Safety
 /// Invoked by the C sink trampolines mid-call; `name`/`arg` valid for their lens.
@@ -29,7 +32,21 @@ pub(crate) unsafe extern "C" fn decide(
             return core::HOWDAH_ALLOW;
         }
         module::maybe_begin();
-        let action = core::howdah_sink_check(module::CTX, sink, name, name_len, arg, arg_len);
+        let script = origin::current_script();
+        let sha = origin::sha_for(&script);
+        let (sp, sl) = origin::sha_args(&sha);
+        let action = core::howdah_sink_check_at(
+            module::CTX,
+            sink,
+            name,
+            name_len,
+            arg,
+            arg_len,
+            script.as_ptr() as *const c_char,
+            script.len(),
+            sp,
+            sl,
+        );
         // Emit this hit's line immediately (per-hit, at the call site), then
         // return the action so the C side chains (ALLOW/LOG) or neutralizes (BLOCK).
         let p = core::howdah_take_sink_log_line(module::CTX);

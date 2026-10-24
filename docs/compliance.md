@@ -286,9 +286,15 @@ Two things to say plainly to the assessor:
 Reviewers look for "documented rationales for rule removals" and "a clear
 understanding of what's being excluded and why"
 ([OWASP CRS on PCI DSS](https://coreruleset.org/20250810/how-crs-contributes-to-pci-dss-compliance/)).
-Howdah's levers are a rule's mode (`block`, `detect`, `off`) and a sink's
-allowlist. It has no per-URL or per-parameter exclusions. Record every change
-from the defaults in one table:
+Howdah's levers are a rule's mode (`block`, `detect`, `off`), a sink's
+allowlist, and, since 1.5, scoped `[[exceptions]]` (one rule off for one
+script, parameter, URI prefix or client network; see
+[exceptions.md](exceptions.md)). An exception cannot be written without a
+`reason`, so the exceptions in the file **are** the exclusions record: `grep
+-n reason /etc/howdah/howdah.toml` prints it, the file's version history dates
+it, and `exceptions_log = true` writes each exercised exception to the event
+log as `action: "excepted"` when an assessor wants to see them in use. Record
+every other change from the defaults in one table:
 
 | Rule or sink | Mode | Justification | Owner | Date |
 |---|---|---|---|---|
@@ -315,6 +321,12 @@ max_request_headers = "detect"
 # legitimate shell call. Allowlist set first, then armed.
 allow = ["/usr/bin/convert *"]
 mode = "block"
+
+# Scoped exclusions carry their own record in the mandatory `reason`.
+[[exceptions]]
+rule   = "sinks.command_exec"
+script = "/var/www/html/cron.php"
+reason = "DECISION 2026-10-24 owner=jdoe(web ops): cron.php shells out to the mailer with per-run temp paths, so no allow pattern can be anchored. This means command_exec is not checked for cron.php. Reviewed quarterly."
 ```
 
 `grep -n DECISION /etc/howdah/howdah.toml` prints the record, and the version

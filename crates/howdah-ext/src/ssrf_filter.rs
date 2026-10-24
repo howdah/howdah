@@ -2,13 +2,14 @@
 //! trampolines in howdah-sys `ssrf_hook.c` invoke, plus the oversize-host
 //! verdict. Mirrors `sink_filter`: the C-passed ctx is ignored (the shim's ctx
 //! is never set) and `module::CTX` is used, so there is no per-request ctx to
-//! keep in sync. Fail-open everywhere.
+//! keep in sync. Fail-open everywhere. The executing script is passed to the
+//! core for `[[exceptions]]` `script` facets (see `origin`).
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use howdah_core::ffi as core;
 
-use crate::{module, response};
+use crate::{module, origin, response};
 
 /// Take the pending sink-log line (if any), write it, free it.
 unsafe fn flush_log_line() {
@@ -40,8 +41,22 @@ pub(crate) unsafe extern "C" fn decide(
             return core::HOWDAH_ALLOW;
         }
         module::maybe_begin();
-        let action = core::howdah_sink_check_ssrf(
-            module::CTX, scheme, scheme_len, host, host_len, port, ips, ips_count,
+        let script = origin::current_script();
+        let sha = origin::sha_for(&script);
+        let (sp, sl) = origin::sha_args(&sha);
+        let action = core::howdah_sink_check_ssrf_at(
+            module::CTX,
+            scheme,
+            scheme_len,
+            host,
+            host_len,
+            port,
+            ips,
+            ips_count,
+            script.as_ptr() as *const c_char,
+            script.len(),
+            sp,
+            sl,
         );
         flush_log_line();
         action
@@ -81,7 +96,16 @@ pub unsafe extern "C" fn howdah_ssrf_oversize_glue(_ctx: *mut c_void) -> c_int {
             return core::HOWDAH_ALLOW;
         }
         module::maybe_begin();
-        let action = core::howdah_sink_ssrf_oversize(module::CTX);
+        let script = origin::current_script();
+        let sha = origin::sha_for(&script);
+        let (sp, sl) = origin::sha_args(&sha);
+        let action = core::howdah_sink_ssrf_oversize_at(
+            module::CTX,
+            script.as_ptr() as *const c_char,
+            script.len(),
+            sp,
+            sl,
+        );
         flush_log_line();
         action
     }))

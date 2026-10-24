@@ -1,0 +1,127 @@
+# Howdah application profile: Joomla 3.10 and 4.4 (vanilla; extensions add
+# behaviours of their own; 5.x not checked). A STARTING POINT,
+# never applied automatically.
+#
+# Verified against the 3.10.12 and 4.4.10 release tags: J3 =
+# https://github.com/joomla/joomla-cms/blob/3.10.12/<path>, J4 =
+# https://github.com/joomla/joomla-cms/blob/4.4.10/<path>.
+#
+# Before use: replace /var/www/html with the path PHP reports for your docroot
+# (`__FILE__` in a script; symlinks are resolved), read every entry, delete
+# what you do not need, keep the reasons. See docs/exceptions.md.
+
+mode = "detect"
+
+# ---------------------------------------------------------------------------
+# Layer 4 [behavior]
+# ---------------------------------------------------------------------------
+# images/ is the media manager root (J4 plugins/filesystem/local/local.xml
+# L39) and uploads are extension-restricted (com_media/config.xml); tmp/ and
+# administrator/logs are the installer defaults for tmp_path and log_path in
+# BOTH 3.x and 4.x (J3 installation/model/configuration.php L144-145; J4
+# installation/src/Model/ConfigurationModel.php L435-436). No PHP executes
+# from them legitimately.
+#
+# NOTE: cache/ and administrator/cache DO receive .php files: the file cache
+# writes every entry as <name>.php with a `<?php die("Access Denied"); ?>`
+# prefix (J4 libraries/src/Cache/Storage/FileStorage.php L195-203; J3
+# L206-215), and 4.x writes administrator/cache/autoload_psr4.php. Do not
+# deny those directories without the php_write exception below.
+[behavior]
+mode = "detect"
+# deny_exec_dirs = ["/var/www/html/images", "/var/www/html/tmp", "/var/www/html/administrator/logs"]
+# deny_php_writes = true
+# Core has no exec-family calls on web requests (only the CLI
+# DaemonApplication; PHPMailer's popen only with the sendmail mailer).
+# allow_exec_binaries = []
+# Outbound: core and extension update checks (update.joomla.org, J4
+# administrator/manifests/files/joomla.xml L48), the stats plugin
+# (developer.joomla.org, J4 plugins/system/stats/src/Extension/Stats.php L63),
+# Install from Web (appscdn.joomla.org). Extension update servers vary.
+# allow_egress_hosts = ["update.joomla.org", "developer.joomla.org", "appscdn.joomla.org", "downloads.joomla.org"]
+
+# ---------------------------------------------------------------------------
+# Layer 3 [sinks]
+# ---------------------------------------------------------------------------
+[sinks.command_exec]
+allow = []
+
+# unserialize: every request unserializes the session namespace, which holds
+# Registry objects and the User object (J4 libraries/src/Session/Storage/
+# JoomlaStorage.php L299; J3 libraries/src/Session/Session.php L665-671), and
+# cache reads unserialize whatever was cached (J4 libraries/src/Cache/
+# Controller/*). Extension params are JSON (Registry), not serialized.
+# Enabling the sink will be loud; if you do, start from:
+# [sinks.unserialize]
+# mode = "detect"
+# allow_classes = ["stdClass", "Joomla\\Registry\\Registry", "Joomla\\CMS\\User\\User", "JUser", "JRegistry"]
+
+# ---------------------------------------------------------------------------
+# [[exceptions]]
+# ---------------------------------------------------------------------------
+# php_write: the file cache (FileStorage.php, fopen 'wb' at J4 L195 / J3 L206)
+# is the write Howdah sees on ordinary page views whenever caching is on.
+[[exceptions]]
+rule   = "behavior.php_write"
+script = "/var/www/html/libraries/src/Cache/Storage/FileStorage.php"
+reason = "Joomla's file cache stores entries as cache/<name>.php and administrator/cache/<name>.php (FileStorage.php: fopen wb, J4 L195, J3 L206). Fires on normal page views with caching enabled."
+
+# Extension installs/updates and the template editor write through
+# File::write -> file_put_contents: J4 libraries/src/Filesystem/File.php L448
+# (legacy class) and libraries/vendor/joomla/filesystem/src/File.php L251;
+# J3 libraries/src/Filesystem/File.php L459. Targets: components, modules,
+# plugins, libraries, templates, language, media (installer adapters under
+# libraries/src/Installer/Adapter/).
+[[exceptions]]
+rule   = "behavior.php_write"
+script = "/var/www/html/libraries/src/Filesystem/File.php"
+reason = "Extension installer and template editor writes via Joomla File::write (file_put_contents, J4 L448 / J3 L459). This means php_write is not checked for writes made through File::write."
+
+[[exceptions]]
+rule   = "behavior.php_write"
+script = "/var/www/html/libraries/vendor/joomla/filesystem/src/File.php"
+reason = "4.x: the same writes via the joomla/filesystem package (File.php L251). Harmless on 3.x (path absent)."
+
+# Joomla Update extracts the new core over the whole site root from a
+# standalone script, not through index.php: J4 administrator/components/
+# com_joomlaupdate/extract.php (fopen wb, L1418, L1507), J3 .../restore.php
+# (L2156, L2262). Each release replaces that script, so a hash pin would
+# expire; the path is stable.
+[[exceptions]]
+rule   = "behavior.php_write"
+script = "/var/www/html/administrator/components/com_joomlaupdate/extract.php"
+reason = "Joomla 4 core updater writes the whole tree from extract.php (L1418, L1507)."
+
+[[exceptions]]
+rule   = "behavior.php_write"
+script = "/var/www/html/administrator/components/com_joomlaupdate/restore.php"
+reason = "Joomla 3 core updater writes the whole tree from restore.php (L2156, L2262)."
+
+# 4.x also writes administrator/cache/autoload_psr4.php from
+# libraries/namespacemap.php (the write is a file_put_contents in that file,
+# see its comment at L140):
+[[exceptions]]
+rule   = "behavior.php_write"
+script = "/var/www/html/libraries/namespacemap.php"
+reason = "4.x namespace map writes administrator/cache/autoload_psr4.php (libraries/namespacemap.php)."
+
+# Layer 2: every admin form posts under the `jform` control: article text
+# jform[articletext]/jform[introtext]/jform[fulltext] (J4 administrator/
+# components/com_content/forms/article.xml L53, L936, L942), custom HTML
+# module jform[content] (com_modules/forms/module.xml L111), template editor
+# jform[source] (com_templates/forms/source.xml L15), global configuration
+# paths jform[log_path], jform[tmp_path], jform[cache_path]. All behind the
+# administrator login.
+[[exceptions]]
+rule         = "inspect"
+param_prefix = "jform["
+uri_prefix   = "/administrator/"
+reason       = "Administrator forms (jform[...]): article HTML, custom HTML modules, the template source editor and configuration paths all look like injection to Layer 2. Authenticated admin area only."
+
+# The site contact form posts jform[contact_message] (J4 components/
+# com_contact/forms/contact.xml L45): anonymous free text, NOT excepted by
+# default.
+# [[exceptions]]
+# rule       = "inspect.sql_injection"
+# param      = "jform[contact_message]"
+# reason     = "Contact form messages trip the SQL signatures; accepted as noise (anonymous input: you lose that signal)."

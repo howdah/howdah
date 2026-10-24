@@ -6,6 +6,41 @@ All notable changes to Howdah are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Scoped `[[exceptions]]`: turn one rule off for one executing script
+  (absolute path, glob, or SHA-256 of the file), one request parameter
+  (exact or prefix), one URI prefix, one client CIDR (IPv4/IPv6), or any AND
+  of those, with a mandatory `reason` that doubles as the decision record.
+  `rule` is a rule id, a layer (`limits`, `inspect`, `sinks`, `behavior`) or
+  `layer.rule`. Critical Layer 1 rules can never be excepted; Layer 1
+  Standard rules take only `uri_prefix`/`client_cidr`; Layer 2 takes no
+  `script` (its events are raised before any script runs); every validation
+  error names `exceptions[i].key` and an invalid entry takes the
+  `on_invalid_config` path. A match is decided after the finding and before
+  the mode, never arms anything and never widens an allowlist. The `script`
+  facet reuses the Layer 4 origin capture (`zend_get_executed_filename()`,
+  exported once from `sink_hook.c`); the glue hashes a file only when an
+  entry with `script_sha256` could apply. New optional top-level
+  `exceptions_log = true` writes each match as an event with the new
+  `action: "excepted"` (the only schema-2 addition). `php --ri howdah` shows
+  `Exceptions ([[exceptions]]) => N configured, M rejected` and the SAPI
+  error log gets one summary line per process. Under php-fpm and Apache the
+  client IP is known before any variable; the input filter now also feeds
+  `REMOTE_ADDR` to the core where the SAPI exposes it only as a `$_SERVER`
+  entry. `lab/integration/exceptions.sh` (19 checks) passes on PHP 5.6, 7.4
+  and 8.3. Design: `docs/superpowers/specs/2026-10-24-howdah-exceptions-design.md`;
+  how-to: `docs/exceptions.md`.
+- Application profiles in `profiles/` (WordPress, Drupal 7, Magento 1 and 2,
+  Joomla, PrestaShop 1.6): complete detect-mode configs whose
+  `[[exceptions]]` entries and commented allowlist suggestions cover each
+  application's own verified behaviours (compiled-template and cache writers,
+  cron spawns, admin editors), every entry with a cited reason; anything
+  unverified is commented out. Starting points, never applied automatically;
+  a core test parses every profile and checks it arms nothing. Also served at
+  https://howdah.org/profiles/.
+- The config editor preserves `[[exceptions]]` and `exceptions_log` on load
+  and re-emits them, offers a plain exceptions table (rule, script,
+  param, uri_prefix, client_cidr, reason) validated by the wasm core, and a
+  "start from an application profile" selector.
 - A malformed `howdah.config` is no longer silent. The extension writes one
   line to the SAPI error log at startup (file and parse error, once per
   process) and `phpinfo()` / `php --ri howdah` shows

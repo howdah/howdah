@@ -25,7 +25,7 @@ written for the old line keeps working.
 | `request_id` | string | 1.0 | Lowercase hex, at most 64 characters. The block response body prints the same id, so a user's report maps to its line. Every event from one request carries the same id. |
 | `layer` | integer | schema 2 | The protection layer of `rule`: `1`, `2`, `3` or `4` (table below). |
 | `rule` | string | 1.0 | Rule name, the same spelling as the config keys (`max_parts`, `sql_injection`, `command_exec`, ...). |
-| `action` | string | 1.0 | `"block"` (request refused or call denied) or `"log"` (recorded, allowed). `"allow"` is reserved and not written. |
+| `action` | string | 1.0 | `"block"` (request refused or call denied), `"log"` (recorded, allowed), or `"excepted"` (a finding a `[[exceptions]]` entry turned off; written only when `exceptions_log = true`, see `docs/exceptions.md`). `"allow"` is reserved and not written. |
 | `client_ip` | string | 1.0 | `REMOTE_ADDR` as the SAPI reports it: the proxy's address behind a reverse proxy (`X-Forwarded-For` is not read). Empty when the SAPI reports none, as on the command line and under the built-in `php -S` server. |
 | `method` | string | 1.0 | HTTP method. Empty when the SAPI reports none. |
 | `uri` | string | 1.0 | Request path. The query string is removed before logging, because it can carry secrets. |
@@ -65,6 +65,12 @@ boundary is also logged as `self_test`, with the reason
 Layer 4 in observe mode (`[behavior] observe = true`) writes its proposals
 as ordinary `action: "log"` lines whose `reason` starts with `proposed: `.
 That prefix is kept stable so proposals can be told apart.
+
+With `exceptions_log = true`, a finding that a `[[exceptions]]` entry turned
+off is written as `action: "excepted"` with the rule it would have had and a
+`reason` of the form `exception #<index> (<selector>): <the entry's reason>`.
+Nothing is enforced for such a line. Layers 1 and 2 write at most one
+excepted line per request; Layers 3 and 4 one per excepted call.
 
 ## What is never in a line
 

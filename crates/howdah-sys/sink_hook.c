@@ -63,6 +63,13 @@ static const char *howdah_current_script(void) {
 #endif
 }
 
+/* The same capture, exported for the Rust glue (sink_filter / ssrf_filter):
+ * the [[exceptions]] `script` facet must match exactly the path a Layer-4
+ * finding is attributed to, so there is one origin function, not two. */
+const char *howdah_sys_current_script(void) {
+    return howdah_current_script();
+}
+
 typedef void (*howdah_zif)(INTERNAL_FUNCTION_PARAMETERS);
 
 /* Read the call's first argument as a string into (p,len); ok=1 on success.

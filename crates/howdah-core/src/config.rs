@@ -4,6 +4,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::exceptions::ExceptionEntry;
 use crate::inspect::{InspectClass, InspectLimits};
 use crate::limits::{Limits, RuleId};
 use crate::sinks::SinkId;
@@ -423,6 +424,10 @@ pub struct Config {
     pub behavior: BehaviorConfig,
     /// Fallback when this file does not parse; see [`Config::load`].
     pub on_invalid_config: OnInvalidConfig,
+    /// Scoped `[[exceptions]]`, validated (see `exceptions::Exceptions`).
+    pub exceptions: Vec<ExceptionEntry>,
+    /// Log matched exceptions as `action: "excepted"` events.
+    pub exceptions_log: bool,
 }
 
 #[derive(Deserialize)]
@@ -436,6 +441,8 @@ struct RawConfig {
     sinks: SinkConfig,
     behavior: BehaviorConfig,
     on_invalid_config: OnInvalidConfig,
+    exceptions: Vec<ExceptionEntry>,
+    exceptions_log: bool,
 }
 
 impl Default for RawConfig {
@@ -450,6 +457,8 @@ impl Default for RawConfig {
             sinks: c.sinks,
             behavior: c.behavior,
             on_invalid_config: c.on_invalid_config,
+            exceptions: c.exceptions,
+            exceptions_log: c.exceptions_log,
         }
     }
 }
@@ -510,6 +519,7 @@ impl Config {
                 )));
             }
         }
+        crate::exceptions::Exceptions::validate(&raw.exceptions).map_err(ConfigError)?;
         Ok(Config {
             mode: raw.mode,
             limits: raw.limits,
@@ -519,7 +529,16 @@ impl Config {
             sinks: raw.sinks,
             behavior: raw.behavior,
             on_invalid_config: raw.on_invalid_config,
+            exceptions: raw.exceptions,
+            exceptions_log: raw.exceptions_log,
         })
+    }
+
+    /// Counts of `[[exceptions]]` entries that compile and that are rejected,
+    /// from the raw file text (for `php --ri howdah`). `None` when the text is
+    /// not TOML. See `exceptions::report`.
+    pub fn exceptions_report(s: &str) -> Option<(usize, usize)> {
+        crate::exceptions::report(s)
     }
 
     /// Read `on_invalid_config` from the raw text of a file that failed to
@@ -578,6 +597,8 @@ impl Config {
             sinks: SinkConfig::default(),
             behavior: BehaviorConfig::default(),
             on_invalid_config: OnInvalidConfig::Block,
+            exceptions: Vec::new(),
+            exceptions_log: false,
         }
     }
 }
@@ -1064,5 +1085,61 @@ self_test = "off"
     fn log_unknown_key_still_rejected() {
         assert!(Config::from_toml("[log]\nexec_args = []").is_err());
         assert!(Config::from_toml("[log]\nfacility = \"local0\"").is_err());
+    }
+
+    // ---- [[exceptions]] -------------------------------------------------------
+
+    #[test]
+    fn exceptions_default_empty_and_log_off() {
+        let c = Config::from_toml("").unwrap();
+        assert!(c.exceptions.is_empty());
+        assert!(!c.exceptions_log);
+        let j = serde_json::to_value(&c).unwrap();
+        assert_eq!(j["exceptions"], serde_json::json!([]));
+        assert_eq!(j["exceptions_log"], false);
+    }
+
+    #[test]
+    fn exceptions_parse_and_serialize_verbatim() {
+        let c = Config::from_toml(
+            "exceptions_log = true\n\
+             [[exceptions]]\nrule = \"sinks.command_exec\"\nscript = \"/var/www/cron.php\"\nreason = \"cron mailer\"\n\
+             [[exceptions]]\nrule = \"inspect.sql_injection\"\nparam = \"content\"\nuri_prefix = \"/wp-admin/\"\nclient_cidr = \"10.0.0.0/8\"\nreason = \"editors\"\n",
+        )
+        .unwrap();
+        assert!(c.exceptions_log);
+        assert_eq!(c.exceptions.len(), 2);
+        assert_eq!(c.exceptions[0].rule.as_deref(), Some("sinks.command_exec"));
+        assert_eq!(c.exceptions[1].client_cidr.as_deref(), Some("10.0.0.0/8"));
+        // Unset facets are omitted from the canonical JSON the editor reads.
+        let j = serde_json::to_value(&c).unwrap();
+        assert_eq!(
+            j["exceptions"][0],
+            serde_json::json!({ "rule": "sinks.command_exec", "script": "/var/www/cron.php", "reason": "cron mailer" })
+        );
+    }
+
+    #[test]
+    fn exceptions_errors_name_index_and_key() {
+        let e = Config::from_toml("[[exceptions]]\nrule = \"max_parts\"\nuri_prefix = \"/\"\nreason = \"x\"").unwrap_err();
+        assert!(e.to_string().contains("exceptions[0].rule"), "{e}");
+        assert!(e.to_string().contains("Critical"), "{e}");
+        let e = Config::from_toml(
+            "[[exceptions]]\nrule = \"command_exec\"\nscript = \"/a.php\"\nreason = \"ok\"\n[[exceptions]]\nrule = \"eval\"\nscript = \"/b.php\"",
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("exceptions[1].reason"), "{e}");
+        let e = Config::from_toml("[[exceptions]]\nrule = \"sql_injection\"\nscript = \"/a.php\"\nreason = \"x\"").unwrap_err();
+        assert!(e.to_string().contains("exceptions[0].script") && e.to_string().contains("uri_prefix"), "{e}");
+        assert!(Config::from_toml("[[exceptions]]\nrule = \"eval\"\nscript = \"/a.php\"\nbogus = 1\nreason = \"x\"").is_err());
+        assert!(Config::from_toml("exceptions_log = \"yes\"").is_err());
+    }
+
+    #[test]
+    fn exceptions_report_counts() {
+        assert_eq!(Config::exceptions_report("mode = \"detect\""), Some((0, 0)));
+        let t = "[[exceptions]]\nrule = \"command_exec\"\nscript = \"/a.php\"\nreason = \"x\"\n[[exceptions]]\nrule = \"max_parts\"\nuri_prefix = \"/\"\nreason = \"x\"\n";
+        assert_eq!(Config::exceptions_report(t), Some((1, 1)));
+        assert!(Config::from_toml(t).is_err());
     }
 }

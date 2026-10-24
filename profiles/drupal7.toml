@@ -1,0 +1,118 @@
+# Howdah application profile: Drupal 7 (vanilla core; contributed modules such
+# as Views, ctools and advagg add behaviours of their own). A STARTING POINT,
+# never applied automatically.
+#
+# Drupal 7 reached end of life on 2025-01-05 (drupal.org/psa-2023-06-07); the
+# last release is 7.103. Verified against the 7.103 tarball; file:line
+# references resolve at
+# https://git.drupalcode.org/project/drupal/-/raw/7.x/<path>.
+#
+# Before use: replace /var/www/html with the path PHP reports for your docroot
+# (`__FILE__` in a script; symlinks are resolved), read every entry, delete
+# what you do not need, keep the reasons. See docs/exceptions.md.
+
+mode = "detect"
+
+# ---------------------------------------------------------------------------
+# Layer 4 [behavior]
+# ---------------------------------------------------------------------------
+# Public files default to sites/default/files (includes/stream_wrappers.inc
+# L925). Core writes only assets there: css/, js/ (aggregation, includes/
+# common.inc L3777, L5243), styles/ (image derivatives, modules/image/
+# image.module L1175), color/, languages/, pictures/, tmp/. No core module
+# writes PHP into it; the PHP filter module is a pure eval() (modules/php/
+# php.module L63-80) and is not enabled by default. The private files path is
+# unset by default (set it outside the docroot).
+[behavior]
+mode = "detect"
+# deny_exec_dirs = ["/var/www/html/sites/default/files"]
+# deny_php_writes = true
+# Core has no exec-family calls reachable from the web (only PDO ->exec SQL
+# and scripts/run-tests.sh, a CLI test runner). The image toolkit is GD.
+# allow_exec_binaries = []
+# Outbound: update status checks updates.drupal.org (modules/update) when the
+# Update Manager module is enabled.
+# allow_egress_hosts = ["updates.drupal.org"]
+
+# ---------------------------------------------------------------------------
+# Layer 3 [sinks]
+# ---------------------------------------------------------------------------
+# No legitimate shell calls in core: leave `allow` empty so any exec is a
+# finding.
+[sinks.command_exec]
+allow = []
+
+# unserialize is everywhere in Drupal 7: every bootstrap unserializes the
+# whole {variable} table (includes/bootstrap.inc L1255), every cache row
+# (includes/cache.inc L449), sessions (includes/session.inc L111), batch,
+# queue, user data, menu router items. Payloads are arrays and stdClass, plus
+# FileTransfer* objects during authorize.php updates (modules/update/
+# update.authorize.inc L130-137). Enabling the sink will be loud; if you do,
+# this is the class list core needs for ordinary requests.
+# [sinks.unserialize]
+# mode = "detect"
+# allow_classes = ["stdClass"]
+
+# include/require: update.php loads every enabled module's .install file
+# (drupal_load_updates, update.php L451; includes/install.inc L81-87) and
+# authorize.php require_once's a module-supplied file (includes/authorize.inc).
+# Both live under the docroot, so an include allowlist of the docroot covers
+# them:
+# [sinks.include]
+# allow_paths = ["/var/www/html"]
+
+# ---------------------------------------------------------------------------
+# [[exceptions]]
+# ---------------------------------------------------------------------------
+# php_write: the only PHP files core writes are sites/default/settings.php,
+# from the installer (drupal_rewrite_settings, includes/install.inc L652,
+# fopen 'w') and from update.php during a 6.x -> 7.x upgrade (includes/
+# update.inc L487, file_put_contents FILE_APPEND). Both are one-off events on
+# a finished site; the entries are here so an install or upgrade run under an
+# armed Layer 4 is not refused. Remove them afterwards.
+[[exceptions]]
+rule   = "behavior.php_write"
+script = "/var/www/html/includes/install.inc"
+reason = "install.php writes sites/default/settings.php through drupal_rewrite_settings (includes/install.inc L652). One-off; remove after installation."
+
+[[exceptions]]
+rule   = "behavior.php_write"
+script = "/var/www/html/includes/update.inc"
+reason = "update.php appends $databases/$drupal_hash_salt to settings.php during a 6.x->7.x upgrade (includes/update.inc L487). One-off; remove after the upgrade."
+
+# authorize.php installs/updates modules with the FileTransfer backends. The
+# `local` backend uses copy() (includes/filetransfer/local.inc L17), which
+# Howdah does not hook, so nothing to except; the ssh/ftp backends write
+# through the ssh2/ftp extensions, also outside Howdah's hooks.
+
+# Layer 2: node bodies and comments are text_format fields posted as
+# body[und][0][value] (modules/node/node.module L589-601, modules/field/
+# modules/text/text.module L53) and comment_body[und][0][value] (modules/
+# comment/comment.module L362-366); custom blocks post body[value]
+# (modules/block/block.module L517-535). Node and block editing is behind
+# a login; comments can be anonymous and are NOT excepted by default.
+# With clean URLs the edit forms are under /node/; without them the path is
+# / and the query carries q=node/..., so use the param facets alone.
+[[exceptions]]
+rule         = "inspect"
+param_prefix = "body[und]["
+reason       = "Node body field (body[und][0][value], body[und][0][summary]): authors paste SQL, paths and code into content. Edit forms are authenticated."
+
+[[exceptions]]
+rule       = "inspect"
+param      = "body[value]"
+uri_prefix = "/admin/structure/block/"
+reason     = "Custom block body (modules/block/block.module L517-535), administrators only."
+
+# [[exceptions]]
+# rule         = "inspect.sql_injection"
+# param_prefix = "comment_body[und]["
+# reason       = "Comment bodies trip the SQL signatures; accepted as noise on this site (anonymous input: you lose that signal)."
+
+# Site information form: site_frontpage, site_403, site_404 are internal
+# paths (modules/system/system.admin.inc L1512-1561) and can look like
+# traversal to Layer 2. Rarely noisy; uncomment if it is.
+# [[exceptions]]
+# rule       = "inspect.path_traversal"
+# uri_prefix = "/admin/config/system/site-information"
+# reason     = "Front page / 403 / 404 path settings are internal paths."

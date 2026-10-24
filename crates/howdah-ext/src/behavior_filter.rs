@@ -5,13 +5,17 @@
 //! used, and the glue also writes the core's pre-built log line (which carries
 //! no argument values). Fail-open everywhere (NULL CTX / panic -> ALLOW, or 0
 //! for `armed`).
+//!
+//! The caller path the C side passes IS the executing script (the Layer-4
+//! origin); for `[[exceptions]]` hash facets the glue adds its SHA-256 when
+//! the core asks for it (`origin::sha_for`) and uses the `_at` entry points.
 
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use howdah_core::ffi as core;
 
-use crate::{module, response};
+use crate::{module, origin, response};
 
 /// Take the pending sink-log line (behavior reuses the core's `sink_log` slot),
 /// write it, free it. Same helper shape as `ssrf_filter::flush_log_line`.
@@ -21,6 +25,15 @@ unsafe fn flush_log_line() {
         let line = CStr::from_ptr(p).to_string_lossy().into_owned();
         core::howdah_free_str(p);
         response::write_log_line(&line);
+    }
+}
+
+/// The bytes of a C `(ptr, len)` pair (empty for NULL).
+unsafe fn bytes<'a>(p: *const c_char, len: usize) -> &'a [u8] {
+    if p.is_null() || len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(p as *const u8, len)
     }
 }
 
@@ -54,7 +67,9 @@ pub(crate) unsafe extern "C" fn exec_dir(
             return core::HOWDAH_ALLOW;
         }
         module::maybe_begin();
-        let action = core::howdah_behavior_check_exec_dir(module::CTX, path, path_len);
+        let sha = origin::sha_for(bytes(path, path_len));
+        let (sp, sl) = origin::sha_args(&sha);
+        let action = core::howdah_behavior_check_exec_dir_at(module::CTX, path, path_len, sp, sl);
         flush_log_line();
         action
     }))
@@ -78,8 +93,11 @@ pub(crate) unsafe extern "C" fn binary(
             return core::HOWDAH_ALLOW;
         }
         module::maybe_begin();
-        let action =
-            core::howdah_behavior_check_binary(module::CTX, caller, caller_len, prog, prog_len);
+        let sha = origin::sha_for(bytes(caller, caller_len));
+        let (sp, sl) = origin::sha_args(&sha);
+        let action = core::howdah_behavior_check_binary_at(
+            module::CTX, caller, caller_len, prog, prog_len, sp, sl,
+        );
         flush_log_line();
         action
     }))
@@ -106,8 +124,11 @@ pub(crate) unsafe extern "C" fn egress(
             return core::HOWDAH_ALLOW;
         }
         module::maybe_begin();
-        let action =
-            core::howdah_behavior_check_egress(module::CTX, caller, caller_len, host, host_len);
+        let sha = origin::sha_for(bytes(caller, caller_len));
+        let (sp, sl) = origin::sha_args(&sha);
+        let action = core::howdah_behavior_check_egress_at(
+            module::CTX, caller, caller_len, host, host_len, sp, sl,
+        );
         flush_log_line();
         action
     }))
@@ -132,13 +153,17 @@ pub(crate) unsafe extern "C" fn php_write(
             return core::HOWDAH_ALLOW;
         }
         module::maybe_begin();
-        let action = core::howdah_behavior_check_php_write(
+        let sha = origin::sha_for(bytes(caller, caller_len));
+        let (sp, sl) = origin::sha_args(&sha);
+        let action = core::howdah_behavior_check_php_write_at(
             module::CTX,
             caller,
             caller_len,
             target,
             target_len,
             is_write_mode,
+            sp,
+            sl,
         );
         flush_log_line();
         action

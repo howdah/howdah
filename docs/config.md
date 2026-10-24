@@ -643,6 +643,110 @@ program until it is labelled for that.
 Promtail pipeline for Loki, tested against the real tools by
 `lab/integration/siem_snippets.sh`.
 
+## `[[exceptions]]` — scoped exceptions (1.5)
+
+An exception turns **one rule off for one scope**: the executing script, a
+request parameter, a URI prefix, a client network, or a combination. Every
+entry needs a `reason`; it is the decision record. The method, from a log
+line to an entry, is in [docs/exceptions.md](exceptions.md); the shipped
+starting points for WordPress, Drupal 7, Magento 1 and 2, Joomla and
+PrestaShop 1.6 are in [`profiles/`](../profiles/README.md).
+
+```toml
+exceptions_log = false   # optional, top-level. true -> log each match as action "excepted"
+
+[[exceptions]]
+rule   = "sinks.command_exec"            # required: rule id | layer | layer.rule
+script = "/var/www/html/cron.php"        # absolute path or glob (* within a segment, ** across, ? one char)
+reason = "DECISION 2026-10-24 jdoe: cron.php shells out to the mailer with per-run temp paths."
+
+[[exceptions]]
+rule       = "inspect.sql_injection"
+param      = "content"                   # request variable name, exact; or param_prefix = "jform["
+uri_prefix = "/wp-admin/"                # request path prefix (query string removed), raw bytes
+reason     = "Editors paste SQL into posts. Layer 2 is detect-only here."
+
+[[exceptions]]
+rule        = "max_request_headers"
+client_cidr = "10.0.0.0/8"               # IPv4/IPv6 CIDR or a bare address; REMOTE_ADDR as the SAPI sees it
+reason      = "The internal SSO proxy adds ~40 headers."
+
+[[exceptions]]
+rule          = "behavior.php_write"
+script_sha256 = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"   # sha256sum of the file
+reason        = "Vendor template compiler, pinned by content because the docroot differs per tenant."
+```
+
+Rules:
+
+- **Facets are ANDed.** Every facet an entry sets must match; unset facets
+  match anything. At least one facet is required. The first matching entry
+  wins.
+- **`rule`** is a rule id as spelled in the log (`sql_injection`,
+  `command_exec`, `php_write`, `max_request_headers`, ...), a layer name
+  (`limits`, `inspect`, `sinks`, `behavior`; `inspect.*` is the same as
+  `inspect`), or `layer.rule`. `*` on its own is refused.
+- **Critical rules take no exception**: `max_parts`, `max_files`,
+  `max_part_headers`, `max_part_header_bytes`, `max_field_name_len`,
+  `max_filename_len`, `parse_memory_budget`, `max_input_vars`,
+  `max_input_nesting_depth`. `rule = "limits"` covers only the Standard
+  Layer 1 rules. An entry naming a Critical rule makes the file invalid.
+- **Facets per layer.** Layer 1 Standard rules: `uri_prefix`, `client_cidr`
+  only. Layer 2: `param`, `param_prefix`, `uri_prefix`, `client_cidr`; `script`
+  is refused because Layer 2 values are inspected while PHP registers request
+  variables, before any script runs. Layers 3 and 4: `script`,
+  `script_sha256`, `uri_prefix`, `client_cidr`; `param` is refused. `param`
+  and `param_prefix` are mutually exclusive.
+- **`script`** is compared with the path PHP reports for the executing file
+  (`__FILE__`): the file that contains the call (a framework's filesystem
+  class, a `require`d file), not the page the request hit; absolute, with
+  symlinks resolved by PHP; matched byte-for-byte. Patterns must start
+  with `/`.
+- **Effect.** A match sets the rule to `off` for that event, decided after the
+  rule found something and before the mode applies. It never arms anything
+  and never widens an allowlist: **an exception on `sinks.command_exec` means
+  that sink is not checked for that script.**
+- **Validation errors name the entry and key** (`exceptions[1].reason:
+  required ...`). An invalid entry makes the whole file invalid and takes the
+  `on_invalid_config` path: a startup line in the SAPI error log, an INVALID
+  row in `php --ri howdah`, fallback mode.
+- **Observability.** `php --ri howdah` shows `Exceptions ([[exceptions]]) => N
+  configured, M rejected`; the SAPI error log gets one summary line per
+  process when N > 0; `exceptions_log = true` writes each match as an event
+  with `action: "excepted"` (schema 2 adds that one action value; see
+  [log-schema.md](log-schema.md)). Layers 1 and 2 write at most one excepted
+  line per request, Layers 3 and 4 one per excepted call.
+
+### Verification
+
+`lab/integration/exceptions.sh` (19 checks) passed on PHP 5.6, 7.4 and 8.3:
+a sink exception by exact script, glob, SHA-256 and through a symlinked
+docroot; that an exception on one sink leaves `eval` from the same script
+logged; a `param` exception silencing one Layer 2 rule for one parameter
+while the same payload in another parameter and another rule in the same
+parameter are still logged; `client_cidr` on Layer 1 Standard rules under
+php-fpm (header count and input-key rules); `exceptions_log`; the `php --ri`
+counts; a Critical-rule entry refused at startup with the loud error, the
+INVALID row and the `on_invalid_config` fallback; and a `behavior.php_write`
+exception by script.
+
+### Known limitations
+
+- `client_cidr` is `REMOTE_ADDR`: behind a proxy or CDN it is the proxy's
+  address, and `X-Forwarded-For` is not read. The client must be known when
+  the rule fires: php-fpm and Apache provide it before any variable is parsed;
+  the CLI built-in server (`php -S`) does not, so under `php -S` a
+  `client_cidr` exception does not match Layer 1 or Layer 2 events.
+- `uri_prefix` is a raw byte prefix (not decoded, not case-folded). Prefer
+  `script` where the layer offers it.
+- `script` follows symlinks because PHP does; pin the target, not the link.
+- The hash facet reads the file once per path per process (re-read on
+  size/mtime change; 256-path cache; an unreadable file never matches).
+- Layer 2 has no `script` facet (above). On a front-controller application
+  every path may be `/index.php`.
+- An exception is a recorded hole with the same threat model as setting the
+  rule to `off`, narrowed to its scope.
+
 ## Enforcement timing (honest caveat)
 
 The multipart limits refuse the request *while the body is parsed*, before PHP

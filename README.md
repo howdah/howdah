@@ -112,6 +112,16 @@ Layer 4.
 See the `[behavior]` section of [docs/config.md](docs/config.md) and the
 [CHANGELOG](CHANGELOG.md).
 
+## Scoped exceptions (1.5)
+
+`[[exceptions]]` turns one rule off for one executing script (path, glob or
+SHA-256), one request parameter, one URI prefix or one client network, with a
+mandatory `reason` that is the decision record. Critical Layer 1 rules can
+never be excepted. An exception never arms anything and never widens an
+allowlist. Starting points for WordPress, Drupal 7, Magento 1 and 2, Joomla
+and PrestaShop 1.6 are in [`profiles/`](profiles/README.md). See
+[docs/exceptions.md](docs/exceptions.md).
+
 ## PHP versions
 
 Built to target PHP 5.4 through 8.5 on Linux (NTS builds; CLI, FPM and Apache

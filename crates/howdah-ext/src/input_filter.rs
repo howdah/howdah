@@ -79,7 +79,7 @@ pub(crate) unsafe extern "C" fn filter(
     // Layer-2 value scanning runs in its OWN guard, after Layer 1's `process`
     // result is captured: a scan panic means "no scan" and can never flip
     // Layer 1's drop verdict.
-    let drop_var = catch_unwind(AssertUnwindSafe(|| process(arg, var, val_len))).unwrap_or(false);
+    let drop_var = catch_unwind(AssertUnwindSafe(|| process(arg, var, val, val_len))).unwrap_or(false);
     let _ = catch_unwind(AssertUnwindSafe(|| inspect_value(arg, var, val, val_len)));
 
     if drop_var {
@@ -112,7 +112,7 @@ pub(crate) unsafe extern "C" fn filter(
 ///   * GET/POST/COOKIE names are fed to the input-shape limits.
 /// Returns true only when a GET/POST/COOKIE variable must be dropped (the core
 /// returned Block); always false for `PARSE_SERVER` and any other `arg`.
-unsafe fn process(arg: c_int, var: VarPtr, val_len: ValLen) -> bool {
+unsafe fn process(arg: c_int, var: VarPtr, val: *mut *mut c_char, val_len: ValLen) -> bool {
     // Whichever hook fires first in a request begins the core request; the rest
     // skip. The input_filter fires before RINIT, so this may be the first.
     module::maybe_begin();
@@ -127,6 +127,14 @@ unsafe fn process(arg: c_int, var: VarPtr, val_len: ValLen) -> bool {
             let action = core::howdah_request_header(module::CTX, name_len, val_len as usize);
             if action == core::HOWDAH_BLOCK {
                 INPUT_BLOCKED = true;
+            }
+        } else if is_remote_addr(name, name_len) {
+            // The built-in server has no `sapi_getenv`, so `maybe_begin` could
+            // not learn the client IP there; the `$_SERVER` variable is the
+            // same string on every SAPI. The core keeps a non-empty IP it has.
+            let vptr = if val.is_null() { ptr::null() } else { *val as *const c_char };
+            if !vptr.is_null() {
+                core::howdah_request_client_ip(module::CTX, vptr, val_len as usize);
             }
         }
         return false;
@@ -204,6 +212,14 @@ unsafe fn is_http_header(name: *const c_char, name_len: usize) -> bool {
         return false;
     }
     std::slice::from_raw_parts(name as *const u8, PREFIX.len()) == PREFIX
+}
+
+/// True when a `PARSE_SERVER` variable name is exactly `REMOTE_ADDR`.
+unsafe fn is_remote_addr(name: *const c_char, name_len: usize) -> bool {
+    const KEY: &[u8] = b"REMOTE_ADDR";
+    !name.is_null()
+        && name_len == KEY.len()
+        && std::slice::from_raw_parts(name as *const u8, name_len) == KEY
 }
 
 /// The variable name as a `(ptr, len)` pair for the core (the name is inspected

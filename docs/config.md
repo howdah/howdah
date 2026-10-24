@@ -15,6 +15,16 @@ If `howdah.config` is unset, or the file is missing or malformed, Howdah falls
 back to its **safe defaults** (block mode, the limits below) and keeps serving —
 a bad config never takes PHP down.
 
+## Build a config in the browser
+
+[howdah.org/config/](https://howdah.org/config/) builds `howdah.ini` and
+`howdah.toml` from a form, with every setting's default and effect next to it,
+and validates the TOML with the extension's own parser (`howdah-core` compiled
+to WebAssembly), so what it calls valid is what the extension accepts. The
+result can be copied, downloaded, or fetched with one `curl` command from
+`cfg.howdah.org`, a stateless service that re-validates the config with the
+same core and stores nothing (the URL carries the whole file).
+
 ## The TOML file
 
 ```toml
@@ -42,7 +52,7 @@ max_request_headers      = 200       # request headers in one request
 max_request_header_bytes = 16384     # bytes (name+value) of any one request header
 
 [log]
-path = "/var/log/howdah.log"         # same as the howdah.log ini; TOML wins if both set
+path = "/var/log/howdah.log"         # accepted but NOT used: set the log path with the howdah.log ini
 
 [rules]
 # Override the mode for a single rule by its name (see the table below).

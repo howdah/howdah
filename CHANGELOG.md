@@ -34,7 +34,21 @@ All notable changes to Howdah are documented here. The format follows
 - Both new sinks log first. A global `howdah.mode = block` or `[sinks]
   mode = "block"` does not arm them; only an explicit per-sink mode does.
 
+### Added
+- A config editor at https://howdah.org/config/: builds `howdah.ini` and
+  `howdah.toml` from a form with every setting's default and effect, validates
+  the TOML with the extension's own parser compiled to WebAssembly (the core's
+  error text, verbatim), loads an existing file, and offers the result as copy,
+  download or one `curl` command. The `curl` URL is served by `cfg.howdah.org`,
+  a stateless Cloudflare Worker (`site/worker/`) that decodes the config from
+  the URL, re-validates it with the same core and stores nothing; it is
+  deployed on every release tag (`.github/workflows/worker.yml`).
+- `howdah-wasm` exports `howdah_wasm_validate_config` (the parsed config as
+  JSON, or the error), `howdah_wasm_rule_catalog` and `howdah_wasm_version`.
+
 ### Fixed
+- `docs/config.md` claimed `[log] path` in the TOML overrides `howdah.log`;
+  the extension never reads it. The log path is set only by the ini directive.
 - The browser demo ran a stale core: `site/demo/howdah_wasm.wasm` was a
   committed binary last built at 1.0 and nothing in the site deploy rebuilt
   it. The wasm is no longer committed; the Pages workflow builds it from the

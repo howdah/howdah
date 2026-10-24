@@ -127,6 +127,7 @@ tools/howdah-check web https://host/   # self-test over HTTP
 ## Documentation
 
 - [Coverage](docs/coverage.md): what has been tested, and where
+- [Config editor](https://howdah.org/config/): build and validate `howdah.toml` in the browser with the extension's own parser
 - [Design document](docs/superpowers/specs/2026-10-22-howdah-design.md)
 - [0.1 implementation plan](docs/superpowers/plans/2026-10-22-howdah-0.1-php2shell-shield.md)
 - Project site: built from `site/` and published with GitHub Pages

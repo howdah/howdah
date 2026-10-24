@@ -1,6 +1,6 @@
 # Howdah config editor: design
 
-**Status:** owner-approved direction (2026-10-24); builder-checked design.
+**Status:** owner-approved (2026-10-24); built per `docs/superpowers/plans/2026-10-24-howdah-config-editor.md` (the 1.3 sections are the plan's gated last task).
 **Owner asks:** a configuration editor and validator on howdah.org whose output a sysadmin can fetch with one `curl` command. Validation must come from Howdah's real validator, not a JavaScript copy of it.
 
 Markers: **(owner)** = decided by the owner. **(call)** = a default chosen during design; the builder may revisit it with a reason.

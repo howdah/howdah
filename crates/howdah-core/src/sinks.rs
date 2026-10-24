@@ -4,6 +4,8 @@
 //! rest of the core). Each function answers only "is this sink use benign /
 //! allowlisted?"; the caller resolves the outcome against the configured mode.
 
+pub mod ssrf;
+
 /// Dangerous PHP sinks guarded by Layer 3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SinkId {

@@ -65,5 +65,75 @@ check "Layer-2 line states it blocks nothing unless opted in" $?
 printf '%s\n' "$l2" | grep -qi 'default: block\|blocks by default'
 [ $? -ne 0 ]; check "Layer-2 line never claims blocking by default" $?
 
+# --- ini: risky php.ini settings report ---------------------------------------
+# fake php whose `-i` prints $T/ini/<name>.txt; its php.ini is $T/ini/php.ini
+mkdir -p "$T/ini/bin" "$T/ini/sess_ok" "$T/ini/sess_open"
+chmod 700 "$T/ini/sess_ok"; chmod 755 "$T/ini/sess_open"
+cat > "$T/ini/bin/php" <<'P'
+#!/bin/sh
+[ "$1" = "-i" ] && cat "$FAKE_INFO"
+P
+chmod +x "$T/ini/bin/php"
+mkinfo() { # file, then extra "name => local => master" lines on stdin
+  { printf 'PHP Version => 7.4.33\nLoaded Configuration File => %s\nScan this dir for additional .ini files => (none)\n' "$T/ini/php.ini"; cat; } > "$1"
+}
+ini_run() { FAKE_INFO=$1 sh "$HC" ini "$T/ini/bin/php" 2>&1; }
+
+# hardened: nothing flagged
+printf 'register_argc_argv = Off\ndisplay_errors = Off\n' > "$T/ini/php.ini"
+mkinfo "$T/ini/clean.txt" <<EOF
+allow_url_include => Off => Off
+allow_url_fopen => On => On
+session.upload_progress.enabled => Off => Off
+session.save_handler => files => files
+session.save_path => $T/ini/sess_ok => $T/ini/sess_ok
+expose_php => Off => Off
+enable_dl => Off => Off
+cgi.fix_pathinfo => 0 => 0
+disable_functions => exec,system,passthru,shell_exec,popen,proc_open => exec,system,passthru,shell_exec,popen,proc_open
+open_basedir => no value => no value
+EOF
+out=$(ini_run "$T/ini/clean.txt"); rc=$?
+eq "ini exits 0" "$rc" 0
+printf '%s\n' "$out" | grep -q '^none flagged$'; check "ini: hardened config flags nothing" $?
+printf '%s\n' "$out" | grep -q '^0 risky setting(s) flagged$'; check "ini: hardened config count is 0" $?
+printf '%s\n' "$out" | grep -q '^info  allow_url_fopen = On'; check "ini: allow_url_fopen is informational only" $?
+printf '%s\n' "$out" | grep -q '^FLAG  allow_url_fopen'
+[ $? -ne 0 ]; check "ini: allow_url_fopen is never flagged" $?
+printf '%s\n' "$out" | grep -q '^info  open_basedir is unset'; check "ini: open_basedir unset is informational" $?
+
+# risky: everything flagged, with reason and fix
+printf 'register_argc_argv = On\ndisplay_errors = 1 ; dev\n' > "$T/ini/php.ini"
+mkinfo "$T/ini/risky.txt" <<EOF
+allow_url_include => On => On
+session.upload_progress.enabled => On => On
+session.save_handler => files => files
+session.save_path => $T/ini/sess_open => $T/ini/sess_open
+expose_php => On => On
+enable_dl => On => On
+cgi.fix_pathinfo => 1 => 1
+disable_functions => exec, system => exec, system
+EOF
+out=$(ini_run "$T/ini/risky.txt")
+for s in register_argc_argv allow_url_include session.upload_progress.enabled session.save_path display_errors expose_php enable_dl cgi.fix_pathinfo disable_functions; do
+  printf '%s\n' "$out" | grep -q "^FLAG  $s = "; check "ini: flags $s" $?
+done
+printf '%s\n' "$out" | grep -q 'CVE-2024-56145 and Laravel CVE-2024-52301'; check "ini: register_argc_argv names both CVEs" $?
+printf '%s\n' "$out" | grep -q 'set: add passthru, shell_exec, popen, proc_open to disable_functions'; check "ini: disable_functions lists what is still enabled" $?
+printf '%s\n' "$out" | grep -q '^9 risky setting(s) flagged$'; check "ini: risky count is 9" $?
+printf '%s\n' "$out" | grep -c '^      why: ' | grep -q '^9$'; check "ini: every flagged line has a why" $?
+printf '%s\n' "$out" | grep -c '^      set: ' | grep -q '^9$'; check "ini: every flagged line has a fix" $?
+
+# docroot heuristic for session.save_path, and read-only: the ini file is untouched
+sum1=$(cksum < "$T/ini/php.ini")
+mkinfo "$T/ini/docroot.txt" <<EOF
+session.save_handler => files => files
+session.save_path => /home/u/public_html/sess => /home/u/public_html/sess
+EOF
+ini_run "$T/ini/docroot.txt" | grep -q 'under a web docroot'; check "ini: session.save_path under a docroot is flagged" $?
+eq "ini: php.ini untouched" "$(cksum < "$T/ini/php.ini")" "$sum1"
+
+sh "$HC" ini "$T/nonexistent-php" >/dev/null 2>&1; rc=$?; eq "ini with a missing php exits 2" "$rc" 2
+
 [ $fail -eq 0 ] && echo "all passed"
 exit $fail

@@ -77,4 +77,41 @@ grep -q '"action":"log"' "$LOG" || fail "6: no action:log"
 if grep -qF 'O:8:' "$LOG"; then fail "6: log leaked serialized payload"; fi
 echo "  ok   - unserialize detect: logged, payload not logged"
 
+# --- include/eval: ACTIVE on PHP 7.0+, DORMANT on PHP 5.x ---
+INC="$WORK/inc.php"
+printf '<?php echo "INC_RAN\\n";' > "$INC"
+
+if [ "$FEATURE" = php5 ]; then
+  # 7(php5). include/eval have no opcode handler on 5.x: block config is inert,
+  # the include runs, and nothing is logged.
+  run_php '[sinks.include]\nmode="block"\nallow_paths=["/var/www/app"]\n' "\$p='$INC'; include \$p; echo \"CONT\n\";"
+  grep -q 'INC_RAN' "$WORK/out.txt" || fail "7(php5): include did not run (should be dormant on 5.x)"
+  if [ -s "$LOG" ]; then fail "7(php5): include produced an event (dormant on 5.x)"; fi
+  echo "  ok   - php5: include/eval dormant (no hook) — include ran, no event"
+else
+  # 7. include detect (path outside allow_paths) -> logs, file runs, path never logged
+  run_php '[sinks.include]\nmode="detect"\nallow_paths=["/var/www/app"]\n' "\$p='$INC'; include \$p;"
+  grep -q 'INC_RAN' "$WORK/out.txt" || fail "7: include did not run in detect"
+  grep -q '"rule":"include"' "$LOG" || fail "7: no include event"
+  grep -q '"action":"log"' "$LOG" || fail "7: no action:log"
+  if grep -qF "$INC" "$LOG"; then fail "7: log leaked the include path"; fi
+  echo "  ok   - include detect: logged, file ran, path not logged"
+
+  # 8. include block -> neutralized (file not run, script continues)
+  run_php '[sinks.include]\nmode="block"\nallow_paths=["/var/www/app"]\n' "\$p='$INC'; include \$p; echo \"CONT\n\";"
+  if grep -q 'INC_RAN' "$WORK/out.txt"; then fail "8: include ran despite block"; fi
+  grep -q 'CONT' "$WORK/out.txt" || fail "8: script did not continue after include block"
+  grep -q '"action":"block"' "$LOG" || fail "8: no action:block"
+  grep -q '"rule":"include"' "$LOG" || fail "8: no include rule"
+  echo "  ok   - include block: neutralized (file not run, script continued)"
+
+  # 9. eval block -> neutralized (eval does not run, script continues)
+  run_php '[sinks.eval]\nmode="block"\n' 'eval("echo 99;"); echo "\nCONT2\n";'
+  if grep -q '99' "$WORK/out.txt"; then fail "9: eval ran despite block"; fi
+  grep -q 'CONT2' "$WORK/out.txt" || fail "9: script did not continue after eval block"
+  grep -q '"rule":"eval"' "$LOG" || fail "9: no eval rule"
+  grep -q '"action":"block"' "$LOG" || fail "9: no action:block"
+  echo "  ok   - eval block: neutralized (eval did not run, script continued)"
+fi
+
 echo "PASS"

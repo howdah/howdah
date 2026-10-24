@@ -12,13 +12,14 @@ item that will do it properly.
 
 Against the official `php:8.3-zts` image (PHP 8.3.36, `Thread Safety =>
 enabled`, Debian trixie, clang 19), `cargo build -p howdah-ext --features php8`
-on the 1.4.0 source fails with three errors:
+on the 1.4.0 source fails with three errors. Line numbers on this page are
+for `main` after #39 (in 1.4.0 these three were lines 147, 295 and 75):
 
 | Where | Error | Why |
 |---|---|---|
-| `crates/howdah-ext/src/module.rs:147` | cannot find value `sapi_globals` in crate `sys` | Under ZTS `SG()` is not a global variable; it is reached through `sapi_globals_offset` and the thread's TSRM cache. |
-| `crates/howdah-ext/src/module.rs:295` | the same | the same |
-| `crates/howdah-ext/src/module.rs:75` | struct `_zend_module_entry` has no field named `globals_ptr` | ZTS module entries have `globals_id_ptr` instead. |
+| `crates/howdah-ext/src/module.rs:150` | cannot find value `sapi_globals` in crate `sys` | Under ZTS `SG()` is not a global variable; it is reached through `sapi_globals_offset` and the thread's TSRM cache. |
+| `crates/howdah-ext/src/module.rs:298` | the same | the same |
+| `crates/howdah-ext/src/module.rs:78` | struct `_zend_module_entry` has no field named `globals_ptr` | ZTS module entries have `globals_id_ptr` instead. |
 
 The C hooks in `crates/howdah-sys/` compile unchanged: they use `EG()`,
 `CG()` and `SG()` through the PHP macros, which handle TSRM.
@@ -56,13 +57,14 @@ Rust, `crates/howdah-ext/src/`:
 
 | Where | State | Per request? |
 |---|---|---|
-| `module.rs:24` `CTX` | the single core context (`howdah_ctx`): the request id, the multipart parser state, input counters, the worst action so far, the pending log line, inspection budgets | yes: every request on every thread writes the same one |
-| `module.rs:35` `BEGUN`, `module.rs:36` `ENDED` | request begun / ended latches | yes |
-| `module.rs:42` `MULTIPART` | this request took the multipart path | yes |
+| `module.rs:25` `CTX` | the single core context (`howdah_ctx`): the request id, the multipart parser state, input counters, the worst action so far, the pending log line, inspection budgets | yes: every request on every thread writes the same one |
+| `module.rs:36` `BEGUN`, `module.rs:37` `ENDED` | request begun / ended latches | yes |
+| `module.rs:43` `MULTIPART` | this request took the multipart path | yes |
 | `rfc1867.rs:36` `BLOCKED`, `rfc1867.rs:37` `SELFTEST_SEEN` | this request was refused / carried the self-test marker | yes: a plausible cause of the wrong 403 and the missed blocks above |
 | `input_filter.rs:60` `INPUT_BLOCKED` | an input-shape limit fired in this request | yes |
-| `module.rs:25` `PRIOR`, `module.rs:29` `PRIOR_INPUT_FILTER` | the chained rfc1867 callback and input filter | no: set at MINIT, read-only after |
-| `module.rs:44` `LOG_PATH`, `module.rs:45` `MODULE_NUMBER`, `module.rs:47`-`50` `DISP_*`, `module.rs:86` `MODULE` | ini values and the info table | no: MINIT only |
+| `module.rs:46` `LOG` | the log destination and the `[log] exec` hook (added by #39): the hook's rate-limit window and last-refusal note (`logsink.rs`, `Hook::recent`, `refused`, `noted`) | yes: written on every event that runs the hook |
+| `module.rs:26` `PRIOR`, `module.rs:30` `PRIOR_INPUT_FILTER` | the chained rfc1867 callback and input filter | no: set at MINIT, read-only after |
+| `module.rs:47` `MODULE_NUMBER`, `module.rs:49`-`53` `DISP_*`, `module.rs:89` `MODULE` | module number and the info table | no: MINIT only |
 
 C, `crates/howdah-sys/`:
 
@@ -76,7 +78,7 @@ C, `crates/howdah-sys/`:
 | `phar_hook.c:49`-`51` | the copied and replacement `phar://` wrapper ops | no: set at MINIT |
 
 The core (`crates/howdah-core`) holds no process-global mutable state of its
-own apart from the request-id counter (`log.rs:93`, an atomic). Its
+own apart from the request-id counter (`log.rs:151`, an atomic). Its
 `howdah_ctx` is safe to use from one thread at a time; the problem is that the
 extension has only one.
 
@@ -92,8 +94,11 @@ extension has only one.
    PHP owns the threads, and TSRM is what it frees at thread exit.
 2. **SAPI globals through TSRM.** Replace the two direct `sapi_globals` reads
    with the C accessor (the throwaway patch above).
-3. **SSRF tables per thread.** Move `g_cache` and `g_map` into the same
-   module globals.
+3. **SSRF tables and the exec rate limiter per thread.** Move `g_cache` and
+   `g_map` into the same module globals, and give the `[log] exec` hook one
+   rate window per thread or a lock around the shared one
+   (`exec_rate_limit` is documented as per PHP process, so its docs change
+   with it).
 4. **Check the swapped function handlers under ZTS**: whether
    `zend_set_user_opcode_handler`, the `zend_compile_*` pointers and the
    function-table swaps installed at MINIT are seen by every thread's copy.

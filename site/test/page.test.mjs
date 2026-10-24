@@ -9,10 +9,19 @@ import { fileURLToPath } from 'node:url';
 
 const site = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const out = resolve(site, 'dist/config/index.html');
-const src = resolve(site, 'src/pages/config.astro');
+// Every source whose change must trigger a rebuild before these checks run.
+const srcs = [
+  'src/pages/config.astro',
+  'src/pages/index.astro',
+  'src/lib/site.ts',
+  'src/components/Nav.astro',
+  'src/components/Footer.astro',
+].map((p) => resolve(site, p));
 
 function fresh() {
-  return existsSync(out) && existsSync(src) && statSync(out).mtimeMs >= statSync(src).mtimeMs;
+  if (!existsSync(out)) return false;
+  const built = statSync(out).mtimeMs;
+  return srcs.every((s) => existsSync(s) && built >= statSync(s).mtimeMs);
 }
 if (!fresh()) {
   const r = spawnSync('npm', ['run', 'build'], { cwd: site, encoding: 'utf8' });
@@ -36,6 +45,18 @@ test('the docs, configuration and install pages link to the editor', () => {
     assert.ok(existsSync(f), p + ' missing');
     assert.ok(readFileSync(f, 'utf8').includes('href="/config/"'), p + ' has no link to /config/');
   }
+});
+
+test('the editor is reachable from the primary nav, the footer and the home page', () => {
+  const home = readFileSync(resolve(site, 'dist/index.html'), 'utf8');
+  const nav = home.match(/<nav aria-label="Primary">[\s\S]*?<\/nav>/)?.[0] ?? '';
+  assert.ok(nav.includes('href="/config/"'), 'primary nav has no /config/ entry');
+  const footer = home.match(/<footer[\s\S]*<\/footer>/)?.[0] ?? '';
+  assert.ok(footer.includes('href="/config/"'), 'footer has no /config/ entry');
+  const body = home.replace(nav, '').replace(footer, '');
+  assert.ok(body.includes('href="/config/"'), 'home page body has no /config/ link');
+  // The nav entry is marked current on the editor page itself.
+  assert.match(html, /<a href="\/config\/" aria-current="page">/);
 });
 
 test('live region, scripts and no third-party hosts', () => {

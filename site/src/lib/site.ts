@@ -23,6 +23,7 @@ export const NAV: NavItem[] = [
   { href: '/install/', label: 'Install' },
   { href: '/coverage/', label: 'Coverage' },
   { href: '/demo/', label: 'Demo' },
+  { href: '/config/', label: 'Config' },
   { href: '/docs/', label: 'Docs' },
   { href: '/blog/', label: 'Blog' },
   { href: '/community/', label: 'Community' },

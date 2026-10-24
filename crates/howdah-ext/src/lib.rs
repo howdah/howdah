@@ -19,6 +19,7 @@
 
 pub mod ini_config;
 pub mod ini_risk;
+pub mod refusal;
 #[cfg(target_os = "linux")]
 pub mod logsink;
 pub mod script_hash;

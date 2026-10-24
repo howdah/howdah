@@ -14,6 +14,7 @@ use howdah_sys as sys;
 
 use crate::input_filter;
 use crate::logsink;
+use crate::refusal::{Deferred, Delivery, Verdict};
 use crate::response;
 use crate::rfc1867;
 
@@ -44,6 +45,15 @@ pub(crate) static mut MULTIPART: bool = false;
 /// Resolved log destination + `[log] exec` hook (set at MINIT; `None` before
 /// that, when `response::write_log_line` falls back to stderr).
 pub(crate) static mut LOG: Option<logsink::Settings> = None;
+/// The request's deferred refusal (see `refusal.rs` and the 2026-10-24
+/// refusal-path design). A verdict decided during `php_request_startup()` is
+/// recorded here and delivered at the end of RINIT; reset by
+/// `clear_request_state`.
+pub(crate) static mut DEFERRED: Deferred = Deferred::new();
+/// Process-static: Layer 2 can block (computed once at first RINIT). When set,
+/// RINIT materialises `$_SERVER` so the path and header values are scanned
+/// before the script, and an armed class refuses before execution.
+static INSPECT_ARMED: AtomicBool = AtomicBool::new(false);
 static mut MODULE_NUMBER: c_int = 0;
 /// For the info table: (mode, config path, log destination, hook) as displayed.
 static mut DISP_MODE: Option<CString> = None;
@@ -172,13 +182,15 @@ pub(crate) unsafe fn maybe_begin() {
 
 /// Request shutdown (RSHUTDOWN): the unified end-of-request. Runs after every
 /// request. If the request was begun (by either glue hook) and NOT already
-/// ended by the multipart END path, end the core request, write any pending log
-/// line, and — if the input path latched a block (or the core's final verdict
-/// is Block) — emit the block response. We do NOT `zend_bailout` here: the
-/// input_filter already dropped the offending variables (the real DoS
-/// mitigation), and by RSHUTDOWN the script has run, so this response/status is
-/// best-effort. Always reset the lifecycle flags + input latch for the next
-/// request.
+/// ended (by the multipart END path, or by the RINIT refusal), end the core
+/// request, write any pending log line, and — if the input path latched a
+/// block (or the core's final verdict is Block) — emit the block response.
+/// This is the "post-hoc refuse": it only still applies to a block first seen
+/// AFTER RINIT (today: a request-header flood whose `$_SERVER` the script
+/// built lazily), because anything latched before RINIT is refused there,
+/// before the script. We do NOT `zend_bailout` here: by RSHUTDOWN the script
+/// has run, so this response/status is best-effort. Always reset the
+/// lifecycle flags + input latch for the next request.
 ///
 /// # Safety
 /// Called by PHP once per request at shutdown.
@@ -197,7 +209,13 @@ unsafe extern "C" fn rshutdown(_type: c_int, _module_number: c_int) -> c_int {
         if let Some(l) = line.as_deref() {
             response::write_log_line(l);
         }
-        if *ptr::addr_of!(input_filter::INPUT_BLOCKED) || end_action == core::HOWDAH_BLOCK {
+        // One response per request: a refusal already delivered at RINIT (the
+        // Layer-4 exec-dir verdict leaves the core request open) never gets a
+        // second body here.
+        let already = (*ptr::addr_of!(DEFERRED)).delivered();
+        if !already
+            && (*ptr::addr_of!(input_filter::INPUT_BLOCKED) || end_action == core::HOWDAH_BLOCK)
+        {
             let (rule, request_id) = line.as_deref().map(rfc1867::parse_line).unwrap_or_default();
             let status = if rule.is_empty() { 403 } else { response::status_for_rule(&rule) };
             // Best-effort: headers may already be sent; emit_block never bails.
@@ -217,9 +235,13 @@ unsafe extern "C" fn rshutdown(_type: c_int, _module_number: c_int) -> c_int {
 /// # Safety
 /// Called by PHP at request startup (NTS: single-threaded).
 unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
+    // Defensive: a compile swap left armed by a request whose RSHUTDOWN never
+    // ran (another module bailing out of startup) must not refuse this one.
+    sys::howdah_refuse_disarm();
     static INSTALLED: AtomicBool = AtomicBool::new(false);
     if !INSTALLED.swap(true, Ordering::Relaxed) && !CTX.is_null() {
         let _ = catch_unwind(AssertUnwindSafe(|| {
+            INSPECT_ARMED.store(core::howdah_inspect_armed(CTX) != 0, Ordering::Relaxed);
             if core::howdah_sink_armed(CTX, core::HOWDAH_SINK_PHAR) != 0 {
                 sys::howdah_install_phar_hook(crate::sink_filter::decide);
             }
@@ -264,20 +286,31 @@ unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
             }
         }));
     }
+    // Layer 2 armed: build `$_SERVER` now (a no-op unless auto_globals_jit
+    // deferred it) so REQUEST_URI/PATH_INFO and the HTTP_* headers pass through
+    // the chained input_filter BEFORE the script, and a hit latches INPUT_BLOCKED
+    // in time for the refusal below. Costs one $_SERVER build per request on
+    // apps that never read it; not paid by the default (log-only) install.
+    if INSPECT_ARMED.load(Ordering::Relaxed) {
+        let _ = catch_unwind(AssertUnwindSafe(|| sys::howdah_force_server_global()));
+    }
     // Layer-4 main-script exec-dir check: the primary, opcache-independent
-    // control. Runs every request, BEFORE the script executes, and bails with a
+    // control. Runs every request, BEFORE the script executes, and records a
     // 403 if the main script resolves under a denied exec dir.
     main_script_exec_dir_check();
+    // The earliest legal point for a response: deliver whatever startup
+    // recorded (multipart flood, exec-dir, input/header/Layer-2 block) and
+    // keep the script from running. No longjmp anywhere on this path.
+    deliver_startup_refusal();
     SUCCESS
 }
 
 /// Layer-4 RINIT main-script exec-dir check. When the EXEC_DIR facet is armed,
 /// read the main script path from the SAPI (`request_info.path_translated`,
 /// NUL-terminated; NULL when the SAPI supplies no main script path. The CLI does set it, so a CLI main script is checked too) and ask the core whether it falls under
-/// a denied exec dir. On BLOCK, emit the block response + `zend_bailout` before
-/// the script runs. The decision is computed inside a panic guard and the bail
-/// is performed OUTSIDE it (mirrors `rfc1867::callback`), so no Rust-owned heap
-/// value is live across the longjmp. Fully fail-open (panic -> no action).
+/// a denied exec dir. On BLOCK, record the refusal; `deliver_startup_refusal`
+/// sends it at the end of RINIT, before the script runs. Fully fail-open
+/// (panic -> no action).
 ///
 /// # Safety
 /// Called from `rinit` during request startup; `CTX` is live when set.
@@ -285,9 +318,77 @@ unsafe fn main_script_exec_dir_check() {
     let decision =
         catch_unwind(AssertUnwindSafe(|| exec_dir_decision())).unwrap_or(None);
     if let Some((status, request_id)) = decision {
-        // Bail outside the catch_unwind frame: emit + longjmp; drops nothing.
-        rfc1867::emit_and_bail(status, request_id);
+        refuse(status, request_id);
     }
+}
+
+/// A hook decided to refuse the request. While PHP is inside
+/// `php_request_startup()` (the multipart callback, RINIT) the verdict is only
+/// recorded: a `zend_bailout` there unwinds to the SAPI's startup-failure
+/// path, which under php-fpm is a forced close and `exit(70)` (see the
+/// 2026-10-24 refusal-path design). `deliver_startup_refusal` sends it at the
+/// end of RINIT. A verdict that arrives during execution (no hook does this
+/// today) takes the old emit-and-bailout path, which is legal there.
+///
+/// # Safety
+/// Called from the glue hooks during an active request.
+pub(crate) unsafe fn refuse(status: c_int, request_id: String) {
+    let during_startup = sys::howdah_during_request_startup() != 0;
+    let verdict = Verdict { status, request_id };
+    let delivery = catch_unwind(AssertUnwindSafe(|| {
+        (*ptr::addr_of_mut!(DEFERRED)).refuse(verdict, during_startup)
+    }));
+    if let Ok(Delivery::Now(v)) = delivery {
+        // Past startup: emit + longjmp, with the verdict's String dropped
+        // inside emit_and_bail before the bailout (nothing else is live here).
+        rfc1867::emit_and_bail(v.status, v.request_id);
+    }
+}
+
+/// End of RINIT: send the recorded refusal (or one derived from a block the
+/// input path latched before RINIT), then arm the per-request compile swap so
+/// the main script never runs. The request then ends normally through
+/// RSHUTDOWN and the worker survives. Every step is panic-guarded; a failure
+/// means "no refusal delivered" (fail-open), never a crash.
+///
+/// # Safety
+/// Called from `rinit`; `CTX` is live when set.
+unsafe fn deliver_startup_refusal() {
+    let verdict = catch_unwind(AssertUnwindSafe(|| startup_verdict())).unwrap_or(None);
+    if let Some(v) = verdict {
+        let _ = catch_unwind(AssertUnwindSafe(|| response::emit_block(v.status, &v.request_id)));
+        sys::howdah_refuse_arm();
+    }
+}
+
+/// The verdict to deliver at RINIT, if any: a recorded one (multipart END,
+/// exec-dir) wins; otherwise a block latched by the input path before RINIT
+/// (Layer 1 input-shape / header rules, an armed Layer 2 class) ends the core
+/// request now, writes its log line and maps rule -> status, exactly as
+/// RSHUTDOWN would have done after the script.
+unsafe fn startup_verdict() -> Option<Verdict> {
+    let d = &mut *ptr::addr_of_mut!(DEFERRED);
+    if let Some(v) = d.take_at_rinit() {
+        return Some(v);
+    }
+    if d.delivered()
+        || CTX.is_null()
+        || !*ptr::addr_of!(input_filter::INPUT_BLOCKED)
+        || !*ptr::addr_of!(BEGUN)
+        || *ptr::addr_of!(ENDED)
+    {
+        return None;
+    }
+    ENDED = true;
+    let _ = core::howdah_request_end(CTX);
+    let line = rfc1867::take_log_line();
+    if let Some(l) = line.as_deref() {
+        response::write_log_line(l);
+    }
+    let (rule, request_id) = line.as_deref().map(rfc1867::parse_line).unwrap_or_default();
+    let status = if rule.is_empty() { 403 } else { response::status_for_rule(&rule) };
+    d.mark_delivered();
+    Some(Verdict { status, request_id })
 }
 
 /// Compute the main-script exec-dir verdict. Returns `Some((status, request_id))`
@@ -361,6 +462,13 @@ pub(crate) unsafe fn clear_request_state() {
     ENDED = false;
     MULTIPART = false;
     input_filter::INPUT_BLOCKED = false;
+    // The deferred refusal is request-local too. Its only heap value (a
+    // pending request id) is `None` on the bailout path by construction (a
+    // verdict is delivered Now only when nothing is pending), so this reset
+    // leaves nothing heap-owned alive across a `bail()`.
+    (*ptr::addr_of_mut!(DEFERRED)).reset();
+    // Restore `zend_compile_file` if this request's refusal swapped it.
+    sys::howdah_refuse_disarm();
     // Drop the C-owned SSRF curl handle map + resolution cache (FPM workers
     // persist; a bailout can skip RSHUTDOWN). Idempotent; a no-op when the ssrf
     // hooks were never installed.

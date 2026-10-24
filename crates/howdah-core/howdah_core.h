@@ -534,4 +534,17 @@ int32_t howdah_behavior_check_php_write_at(struct howdah_ctx *ctx,
                                            const uint8_t *sha256,
                                            size_t sha256_len);
 
+/**
+ * 1 iff Layer 2 can return Block for at least one class: the `[inspect]`
+ * effective mode is not off AND (it is `block`, or a `[inspect.rule_modes]`
+ * override is `block`). Mirrors the decision `howdah_inspect_value` makes,
+ * so the glue can decide per process whether to force `$_SERVER` at RINIT
+ * and refuse before the script. A global `block` never arms it. NULL ctx or
+ * panic is 0. Never stashes a log line.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_inspect_armed(struct howdah_ctx *ctx);
+
 #endif  /* HOWDAH_CORE_H */

@@ -183,6 +183,15 @@ A `[inspect.rule_modes]` entry overrides `inspect.mode` for that class only.
 The `[inspect.limits]` budgets bound the scanning work per value and per
 request; values past a budget are not scanned.
 
+When a class is armed (`block`), the refusal happens **before the script
+runs** on php-fpm, Apache mod_php, php-cgi and the CLI server: GET, POST and
+cookie values are scanned while PHP builds the superglobals at request
+startup, and Howdah then builds `$_SERVER` at RINIT so the path and header
+values are scanned there too, instead of whenever the script first touches
+`$_SERVER`. That `$_SERVER` build is the one cost of arming Layer 2 on an
+application that never reads it; log-only mode does not pay it. Details and
+what stays post-hoc: "Enforcement timing" below.
+
 ## `[sinks]` — Layer 3 sink hardening (log-only by default)
 
 **Sinks log by default; they do not block.** Layer 3 watches dangerous PHP
@@ -764,15 +773,47 @@ exception by script.
 
 ## Enforcement timing (honest caveat)
 
-The multipart limits refuse the request *while the body is parsed*, before PHP
-allocates per-part memory, and emit a 403/413 before the script runs.
+Howdah refuses a request by sending the 403/413 (status, headers and the
+"Howdah blocked" body with the request id) and keeping the script from
+running. It never terminates the PHP worker. A refusal decided while PHP is
+still starting the request is delivered at the end of Howdah's RINIT, the
+first point where a response is legal. Releases up to 1.4.0 unwound out of
+request startup instead, which made php-fpm exit the worker with code 70 and
+drop the body; the mechanism and the per-SAPI evidence are in
+`docs/superpowers/specs/2026-10-24-howdah-refusal-path-design.md` and
+`lab/integration/refusal.sh`.
 
-The **input-shape and request-header limits** are enforced on the request-variable
-and `$_SERVER` stream: Howdah **drops** offending variables (bounding the symbol
-table — the real DoS mitigation) and writes the event, but the 403 response is
-**best-effort** and may be emitted at request shutdown, after the script has
-already produced output, on SAPIs that populate superglobals lazily
-(`auto_globals_jit=On`). Request-header counting in particular depends on the
-application (or PHP) materializing `$_SERVER`. Treat the var-drop + log as the
-guarantee and the 403 as best-effort. See `docs/coverage.md` for the per-SAPI
+**Refused before the script runs.** php-fpm, Apache mod_php, php-cgi and the
+CLI server all build `$_GET`, `$_POST` and `$_COOKIE` during request startup,
+before any extension's RINIT, so these refusals happen before the
+application's first line:
+
+- the multipart limits: the body is parsed at startup, over-limit parts are
+  never allocated, and the refusal follows at RINIT;
+- the input-shape limits (`max_input_vars`, `max_input_nesting_depth`,
+  `max_input_key_bytes`) on GET, POST and cookie variables; the offending
+  variables are also dropped, which bounds the symbol table;
+- an armed Layer 2 class (`[inspect] mode = "block"` or a `rule_modes` entry)
+  on GET, POST and cookie values, and on the request path and headers: with
+  Layer 2 armed, Howdah builds `$_SERVER` at RINIT itself, so the
+  `auto_globals_jit` deferral no longer hides the path and the `HTTP_*` values
+  from the scan. The cost is one `$_SERVER` build per request on applications
+  that never read it (the same work every framework triggers on its first
+  line). The default, log-only install does not pay it;
+- the Layer 4 `deny_exec_dirs` check on the requested script.
+
+**Post-hoc refuse.** The response is set at request shutdown, after the
+script ran and may have produced output, so the HTTP status can already be
+committed; the log line is the reliable signal:
+
+- the request-header limits (`max_request_headers`,
+  `max_request_header_bytes`) when `$_SERVER` is built lazily by the script
+  (`auto_globals_jit=On`, the default, and Layer 2 not armed). Headers are
+  counted exactly once the variables exist; an application that never reads
+  `$_SERVER` leaves the limit unexercised.
+
+**Not a refusal.** An armed Layer 3 sink makes the call return `false` and the
+script continues. A superglobal PHP never builds (`variables_order` without
+`G`, `P` or `C`; `enable_post_data_reading = Off` for POST) has nothing to
+inspect before or after the script. See `docs/coverage.md` for the per-SAPI
 lab status.

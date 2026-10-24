@@ -18,8 +18,11 @@ The 1.0 **Layer-1** rules extend this to request *inputs* (variable count, array
 nesting depth, key length) and request *headers* (count, size). Tables 3 and 4
 report their per-version/SAPI status from the same matrix. Read the per-rule
 caveats below: the input/header rules mitigate by **dropping** offending
-variables and logging, and their 403 response is **best-effort** (it may land at
-request shutdown, after the script, on JIT-globals SAPIs). php-cgi
+variables and logging; the input-shape rules refuse before the script runs,
+while the request-header rules' 403 is **post-hoc** (set at request shutdown,
+after the script) when the script builds `$_SERVER` lazily. The refusal
+itself (status, body, request id, worker survival) is covered by the
+separate refusal-path lab below. php-cgi
 argument injection (CVE-2012-1823) is **out of reach** from inside PHP — the
 exploit is consumed before any extension hook runs — so it is **not** protected
 (see Table 4 and caveat 7).
@@ -120,10 +123,11 @@ version-dependent), shown as "Not run" there but covered by the other SAPIs.
 | 8.4.27 | Enforced (cli-server, php-fpm, Apache mod_php) | Enforced (cli-server, php-fpm, Apache mod_php) | Enforced (php-fpm, Apache mod_php) |
 | 8.5.12 | Enforced (Apache mod_php) | Enforced (Apache mod_php) | Enforced (Apache mod_php) |
 
-*Enforcement is best-effort on the response:* these rules **drop** the offending
-variable(s) (bounding the symbol table — the actual DoS mitigation) and write the
-event; the 403 may be emitted at request shutdown, after the script, on SAPIs
-that populate superglobals lazily. See caveats 5–7.
+*Enforcement:* these rules **drop** the offending variable(s) (bounding the
+symbol table — the actual DoS mitigation) and write the event. The input-shape
+rules (`max_input_vars`, nesting depth) then refuse before the script runs; the
+request-header rules' 403 is post-hoc (set at request shutdown, after the
+script) when the script builds `$_SERVER` lazily. See caveats 5–7.
 
 ## Table 4: known-CVE & DoS coverage
 
@@ -178,20 +182,25 @@ made locally; no release carried musl tarballs when they ran.
    PHP bindings are per generation (php5, php7, php8) and each of these repeats a
    generation that did pass, but that is an expectation, not a test result, and
    is **not claimed as passing**. They have no lab base image yet.
-5. **The input-shape and request-header rules are enforced on the response as
-   best-effort.** The guaranteed mitigation is that Howdah **drops** the
-   offending variable(s) (bounding the symbol table) and writes the event; the
-   403 may be emitted at request shutdown, *after* the script has produced
-   output, so the HTTP status can be 200 with the block notice appended. The
-   matrix asserts the **log line** for these rules, not the HTTP code, and
-   records the observed code in the detail.
+5. **The input-shape rules refuse before the script; the request-header
+   rules' 403 is post-hoc.** For both, the guaranteed mitigation is that Howdah
+   **drops** the offending variable(s) (bounding the symbol table) and writes
+   the event. `$_GET`, `$_POST` and `$_COOKIE` are built during request
+   startup on every SAPI, so a block they latch is refused at the end of
+   Howdah's RINIT, before the script (the refusal-path lab asserts the 403,
+   the body and that the script did not run). `$_SERVER` is built lazily by
+   default, so a header-count block is usually first seen while the script
+   runs and its 403 is set at request shutdown, *after* the script may have
+   produced output. The matrix asserts the **log line** for these rules, not
+   the HTTP code, and records the observed code in the detail.
 6. **Request-header counting depends on `$_SERVER` being materialized.** With
    PHP's `auto_globals_jit=On` (the default), the HTTP_* server vars our chained
    `input_filter` counts are built only when the application accesses
    `$_SERVER` — which every real framework does, and the lab app does so
    explicitly. An app that never touches `$_SERVER` on a JIT-globals SAPI can
    leave the header limit unexercised. The limit is counted exactly once the
-   vars exist.
+   vars exist. With Layer 2 armed, Howdah builds `$_SERVER` at RINIT itself,
+   which also makes the header rules pre-execution on that install.
 7. **CVE-2012-1823 (php-cgi argument injection) is out of reach and NOT
    protected.** Lab testing proved the argv-injection query shape ("`-s`",
    "`-d…`") is consumed by php-cgi during its **own startup — before any PHP
@@ -235,6 +244,56 @@ is best-effort, so it can be bypassed. Lab-verified end to end (GET and POST onl
 7.4 (cli-server); the scanners are version-independent, so matching should be the
 same on 5.4-8.5. Details: [coverage-data.md](coverage-data.md#howdah-10-layer-2-input-inspection-coverage-data-task-8). It is not part of the
 tables above.
+
+When a class is **armed** (`[inspect] mode = "block"` or a `rule_modes`
+entry), the request is refused **before the script runs**: GET, POST and
+cookie values are scanned while PHP builds the superglobals at request
+startup, and Howdah builds `$_SERVER` at RINIT so the path and header values
+are scanned there too. The refusal-path lab (next section) asserts, for a
+SQLi-, traversal- and command-injection-shaped `q` in GET, POST and a cookie,
+that the answer is 403 with the Howdah body and that the script's side effect
+(a marker file) did not happen, on PHP 5.6, 7.4 and 8.3 under php-fpm behind
+nginx and under Apache mod_php prefork. Not claimed: other minors (expected to
+match by generation, not run), php-cgi, and a superglobal PHP never builds
+(`variables_order` without `G`/`P`/`C`, `enable_post_data_reading = Off`).
+
+## Refusal path (worker survival)
+
+Releases up to 1.4.0 refused a request by unwinding (`zend_bailout`) out of
+PHP's request startup. Under php-fpm that made the worker exit with code 70
+(FPM respawned it per blocked request), nginx logged `readv() failed (104:
+Connection reset by peer)`, the body with the request id was lost, and
+`howdah-check web` reported "refused (HTTP 403) but not by Howdah". The matrix
+above never saw it because it drives php-fpm with `cgi-fcgi` and reads only
+the `Status:` header. The refusal is now delivered at the end of Howdah's
+RINIT with the script kept from compiling; no longjmp. Design note:
+`docs/superpowers/specs/2026-10-24-howdah-refusal-path-design.md`.
+
+`lab/integration/refusal.sh` runs php-fpm with one static worker behind a real
+nginx (a sidecar container sharing its network namespace) and Apache mod_php
+prefork, and checks for every refusal: HTTP 403/413, the "Howdah blocked" body
+with `request_id`, the script's marker file absent, the php-fpm worker pid
+unchanged, no `exited with code` / `exited on signal` in the php-fpm log, no
+`readv()`/`Connection reset` in nginx's error log, and `tools/howdah-check web`
+through nginx reporting BLOCKED.
+
+| scenario | php-fpm + nginx (5.6, 7.4, 8.3) | php-fpm via cgi-fcgi (7.4, 8.3) | Apache mod_php prefork (5.6, 7.4, 8.3) |
+|---|---|---|---|
+| Layer 1 multipart flood (`max_parts`), twice on one worker | refused before the script, worker alive | refused, worker alive | refused before the script, no child exit |
+| Layer 1 `max_input_vars` flood | refused before the script | not run | refused before the script |
+| armed Layer 2: SQLi in GET, POST, cookie; traversal; command injection | refused before the script | not run | refused before the script |
+| Layer 2 default (detect) | logged, script ran | not run | logged, script ran |
+| Layer 4 `deny_exec_dirs` on the requested script | refused before the script, worker alive | not run | refused before the script |
+| armed Layer 3 `command_exec` sink | call returns false, script continues, worker alive | not run | not run |
+| `howdah-check web` through the front | BLOCKED with request id | n/a | BLOCKED with request id |
+
+Run on 2026-10-24: 95 checks passed, 0 failed, 1 skipped (no `cgi-fcgi` in
+the 5.6 image; the nginx path covers php-fpm there). The same lab against the
+1.4.0 tree reproduces the bug on 8.3: five `child N exited with code 70`
+lines, four nginx `readv() failed (104)` lines, an empty body on the Layer 4
+refusal, and "refused (HTTP 403) but not by Howdah" from `howdah-check web`.
+Not claimed: php-cgi (same startup code as php-fpm, not run), the CLI server
+(covered by the other labs, which still pass), other minors.
 
 ## Layer 3 (sink hardening, 1.3 additions)
 

@@ -10,10 +10,14 @@
 //!
 //! The ONE exception: once the core says Block (too many vars / nesting / key
 //! length), we drop that variable (return 0 without chaining) to bound the hash
-//! table the parser is building, and latch the block for the request-end
-//! response (see `module`'s RSHUTDOWN). We do NOT `zend_bailout` from here: the
-//! filter runs mid-parse, before RINIT, where a longjmp is unsafe; the var-drop
-//! is the actual DoS mitigation and the response/log is emitted at request end.
+//! table the parser is building, and latch the block (`INPUT_BLOCKED`). We do
+//! NOT `zend_bailout` from here: the filter runs mid-parse, before RINIT, where
+//! a longjmp is unsafe; the var-drop is the actual DoS mitigation. The latch is
+//! read at the end of RINIT (`module::deliver_startup_refusal`): `$_GET`,
+//! `$_POST` and `$_COOKIE` are built during `php_request_startup`, so a block
+//! they latch (Layer 1 counts or an armed Layer 2 class) is refused before the
+//! script runs. Only a block first seen after RINIT (a `$_SERVER` built lazily
+//! by the script) falls through to the post-hoc response at RSHUTDOWN.
 //!
 //! Panic discipline mirrors `rfc1867::callback`: our processing runs inside
 //! `catch_unwind`; on a panic we do NOT drop/suppress — we chain the prior

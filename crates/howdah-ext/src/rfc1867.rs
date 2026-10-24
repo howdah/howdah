@@ -8,7 +8,10 @@
 //! (carry-forward #1): only the *allocation* of an over-limit part is
 //! suppressed, by returning FAILURE for that part's `FILE_START`/`FORMDATA`.
 //! (3) On the body's end, if the core decided Block, we refuse the request:
-//! emit the 413/403 response and terminate.
+//! the verdict is recorded (`module::refuse`) and delivered at the end of
+//! RINIT as the 413/403 response, with the script kept from running. Not a
+//! bailout: END fires inside `php_request_startup`, where a longjmp kills a
+//! php-fpm worker (see the 2026-10-24 refusal-path design).
 //!
 //! PHP hands this callback parsed events, not request bytes. Earlier versions
 //! re-synthesised multipart framing with a fixed boundary and pushed part DATA
@@ -58,7 +61,11 @@ pub(crate) unsafe extern "C" fn callback(
     if event == sys::MULTIPART_EVENT_END {
         let decision = catch_unwind(AssertUnwindSafe(|| end_request())).unwrap_or(None);
         if let Some((status, request_id)) = decision {
-            emit_and_bail(status, request_id);
+            // Never a bailout from here: END fires from php_hash_environment,
+            // inside php_request_startup's zend_try, where a longjmp makes the
+            // startup fail and php-fpm exit the worker (code 70). The verdict
+            // is recorded and delivered at the end of RINIT, before the script.
+            module::refuse(status, request_id);
         }
     }
 
@@ -222,9 +229,11 @@ pub(crate) unsafe fn cbytes(p: *const c_char) -> Vec<u8> {
     }
 }
 
-/// Terminate the current request (PHP `zend_bailout`, a longjmp). Never returns.
-/// Must be called with no live Rust-owned values in scope.
-/// Emit the block response, then terminate the request. Takes `request_id` by
+/// Emit the block response, then terminate the request (PHP `zend_bailout`, a
+/// longjmp). Never returns. ONLY legal once PHP is past `php_request_startup`
+/// (`PG(during_request_startup)` clear): `module::refuse` routes a startup-phase
+/// verdict to the RINIT delivery instead, and reaches this only for a verdict
+/// decided during execution (no hook does that today). Takes `request_id` by
 /// value and drops it (and every other heap-owned Rust value) BEFORE the
 /// `bail()` longjmp, which skips destructors — otherwise each blocked (i.e.
 /// attacker-triggerable) request would leak the id string.

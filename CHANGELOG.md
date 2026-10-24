@@ -203,6 +203,23 @@ All notable changes to Howdah are documented here. The format follows
   keys and a round trip would drop them.
 - A log file Howdah creates now gets mode 0640 minus the umask (it was 0666
   minus the umask, usually world-readable). Existing files keep their mode.
+- An armed Layer 2 class (`[inspect] mode = "block"`, or a `rule_modes`
+  entry) now refuses the request **before the script runs** on php-fpm,
+  Apache mod_php, php-cgi and the CLI server, instead of after it. `$_GET`,
+  `$_POST` and `$_COOKIE` are scanned while PHP builds them at request
+  startup; when Layer 2 is armed Howdah also builds `$_SERVER` at RINIT, so
+  the request path and headers are scanned before the script instead of at
+  the script's first `$_SERVER` access. That `$_SERVER` build is the one cost
+  of arming Layer 2 on an application that never reads it; the log-only
+  default does not pay it. The Layer 1 input-shape rules (`max_input_vars`,
+  `max_input_nesting_depth`, `max_input_key_bytes`) move with it and are also
+  refused before the script. The request-header rules stay post-hoc when the
+  script builds `$_SERVER` lazily. Lab-verified on 5.6, 7.4 and 8.3 under
+  php-fpm behind nginx and Apache mod_php prefork: a SQLi-, traversal- or
+  command-injection-shaped parameter in GET, POST or a cookie gets a 403 and
+  the script's side effect does not happen (`lab/integration/refusal.sh`).
+  `docs/config.md` "Enforcement timing" lists what is refused before the
+  script and what stays post-hoc, per SAPI.
 
 ### Fixed
 - `[log] path` in the TOML file was parsed but ignored. It is now used when
@@ -224,6 +241,26 @@ All notable changes to Howdah are documented here. The format follows
   committed binary last built at 1.0 and nothing in the site deploy rebuilt
   it. The wasm is no longer committed; the Pages workflow builds it from the
   same commit it deploys, and the site build fails if it is missing.
+- A Layer 1 refusal killed the php-fpm worker and lost the response body.
+  The multipart callback and the Layer 4 main-script check refused with
+  `zend_bailout()` from inside `php_request_startup()`, whose `zend_try` turns
+  that into a startup failure; php-fpm answers a startup failure with a forced
+  close and `exit(70)` (the master logs `child N exited with code 70` and
+  respawns the worker on every blocked request), nginx logs `readv() failed
+  (104: Connection reset by peer)` and forwards a 403 with an empty body, and
+  `howdah-check web` reports "refused (HTTP 403) but not by Howdah". The same
+  on 5.4 to 8.3; the matrix never saw it because it drives php-fpm with
+  `cgi-fcgi`. A refusal decided during request startup is now recorded and
+  delivered at the end of Howdah's RINIT: the 403/413 with the same body and
+  request id goes out through the SAPI, and `zend_compile_file` is swapped for
+  the rest of that request so the script (and `auto_prepend_file`) never
+  compiles. No longjmp; the request ends normally and the worker survives.
+  Armed Layer 3 sinks never bailed (they neutralise the call) and are
+  unchanged. `lab/integration/refusal.sh` puts a real nginx in front of a
+  single-worker php-fpm (plus Apache mod_php prefork) and checks the status,
+  the body, the worker pid, the php-fpm log and nginx's error log on 5.6, 7.4
+  and 8.3; run against 1.4.0 it reproduces the exits. Design note:
+  `docs/superpowers/specs/2026-10-24-howdah-refusal-path-design.md`.
 
 ### Docs
 - A compliance evidence page, `docs/compliance.md` and

@@ -73,7 +73,19 @@ if [ "$FROM_SOURCE" -eq 1 ]; then
     # autotools. We then install ONLY headers + build scripts + php-config --
     # there is NO `make` of PHP itself, so modern PHP is never compiled with
     # CentOS 7's gcc 4.8.5 (we only need headers to generate bindings).
-    ./configure --prefix="$PREFIX" --disable-all --without-pear \
+    #
+    # Old tarballs ship an old config.guess (PHP 5.4's is from 2008, before
+    # aarch64 existed) and ./configure then fails with "cannot guess build
+    # type". The shipped config.sub does accept an explicit triple, so when the
+    # guesser cannot identify this host, name it. (config.guess is not
+    # executable in the tarball; run it through sh.)
+    BUILD_TRIPLE=""
+    if ! sh ./config.guess >/dev/null 2>&1; then
+      BUILD_TRIPLE="--build=$ARCH-unknown-linux-gnu"
+      note "config.guess cannot identify this host; passing $BUILD_TRIPLE"
+    fi
+    # shellcheck disable=SC2086
+    ./configure $BUILD_TRIPLE --prefix="$PREFIX" --disable-all --without-pear \
       --disable-cgi --disable-phpdbg --enable-cli >/tmp/phpconf.log 2>&1 \
       || { tail -25 /tmp/phpconf.log >&2; die "PHP ./configure failed"; }
     make install-headers install-build install-programs >/tmp/phphdr.log 2>&1 \

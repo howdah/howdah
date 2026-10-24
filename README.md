@@ -9,9 +9,10 @@ tool: it recognizes and blocks abusive input. It is not a hacking tool, and it
 is not a replacement for patching PHP. Upgrade when you can; use Howdah when you
 can't, or until you can.
 
-> **Status: 1.2.0 is released** — Layer 1 (request-parsing limits), Layer 2 (input
+> **Status: 1.2.1 is released** — Layer 1 (request-parsing limits), Layer 2 (input
 > inspection, log-only) plus Layer 3 (sink hardening, log-first). Signed tarballs for PHP 5.4 to 8.5 are on the
-> [v1.2.0 release page](https://github.com/howdah/howdah/releases/tag/v1.2.0).
+> [v1.2.1 release page](https://github.com/howdah/howdah/releases/tag/v1.2.1).
+> 1.2.1 is a security fix for every earlier release; see the [changelog](CHANGELOG.md).
 > Defaults may still change; Layer 4 is the roadmap.
 > Start in `detect` mode. Not every PHP version has been tested:
 > see [docs/coverage.md](docs/coverage.md). Install, verify and rollback steps
@@ -70,12 +71,11 @@ until `allow_paths` is set. `phar://` and SSRF coverage are roadmap, not shipped
 
 Built to target PHP 5.4 through 8.5 on Linux (NTS builds; CLI, FPM and Apache
 mod_php). Release tarballs ship for **x86_64 and aarch64** on a glibc-2.17
-baseline. x86_64 covers all 14 minors. aarch64 is provided for the minors whose
-from-source build succeeds in CI on native arm64 runners (Remi has no aarch64
-EL7 packages), and **PHP 5.x on aarch64 is best-effort** (old `./configure` may
-not detect aarch64); the release assets are the definitive per-arch list. The
-core is arch-agnostic pure Rust, but arm64 is build-verified only: the full
-scenario matrix has run on x86_64 alone. Not every minor is tested yet. [docs/coverage.md](docs/coverage.md)
+baseline. x86_64 covers all 14 minors. aarch64 builds every minor from PHP
+source in CI on native arm64 runners (Remi has no aarch64 EL7 packages); the
+release assets are the definitive per-arch list. The core is arch-agnostic
+pure Rust, but arm64 is build-verified only: the full scenario matrix has run
+on x86_64 alone. Not every minor is tested yet. [docs/coverage.md](docs/coverage.md)
 is the source of truth for which versions and SAPIs have been exercised.
 
 ## Quickstart

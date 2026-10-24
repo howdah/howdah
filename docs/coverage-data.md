@@ -41,8 +41,9 @@ every name length precisely.
 Caveat (documented, by design): the glue-level `max_part_header_bytes` /
 `max_part_headers` are a best-effort **lower bound**. PHP's callback surfaces
 only the `Content-Disposition` name/filename — not a part's other headers
-(`Content-Type`, etc.) nor their raw bytes — so Howdah reconstructs a single
-header per part and under-counts header bytes versus what PHP actually parsed.
+(`Content-Type`, etc.) nor their raw bytes — so Howdah records one
+`Content-Disposition` header per part (from the name and filename lengths)
+and under-counts header bytes versus what PHP actually parsed.
 `max_part_header_bytes`/`max_part_headers` therefore back up, but do not drive,
 the defense; the count + length rules above are the real gate.
 

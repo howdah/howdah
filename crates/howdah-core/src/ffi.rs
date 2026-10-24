@@ -38,6 +38,10 @@ pub const HOWDAH_ALLOW: i32 = 0;
 pub const HOWDAH_LOG: i32 = 1;
 pub const HOWDAH_BLOCK: i32 = 2;
 
+/// Part kinds for `howdah_part`: a plain form field, or a file upload.
+pub const HOWDAH_PART_FIELD: i32 = 0;
+pub const HOWDAH_PART_FILE: i32 = 1;
+
 /// Input sources for `howdah_inspect_value`.
 pub const HOWDAH_SRC_GET: i32 = 0;
 pub const HOWDAH_SRC_POST: i32 = 1;
@@ -524,6 +528,45 @@ impl howdah_ctx {
         self.worst
     }
 
+    /// One already-parsed multipart part (the PHP glue's `FORMDATA` /
+    /// `FILE_START`). Counting happens in `MultipartState::note_part` and does
+    /// not depend on any byte parsing, so part data can never suppress it.
+    fn part(&mut self, kind: i32, name_len: usize, filename_len: usize) -> Action {
+        #[cfg(test)]
+        if tests::FORCE_PANIC.with(|f| f.get()) {
+            panic!("injected test panic");
+        }
+        if self.worst == Action::Block {
+            return self.worst; // already blocked: every further part is refused
+        }
+        let Some(state) = self.state.as_mut() else {
+            return self.worst; // no request in progress: fail-open
+        };
+        let filename = (kind == HOWDAH_PART_FILE).then_some(filename_len);
+        state.note_part(name_len, filename);
+        let hit = self.config.limits.check(state, &Event::PartStart);
+        self.apply(hit.as_ref());
+        self.worst
+    }
+
+    /// `len` bytes of part data (a `FORMDATA` value or a `FILE_DATA` chunk).
+    fn part_data(&mut self, len: usize) -> Action {
+        #[cfg(test)]
+        if tests::FORCE_PANIC.with(|f| f.get()) {
+            panic!("injected test panic");
+        }
+        if self.worst == Action::Block {
+            return self.worst;
+        }
+        let Some(state) = self.state.as_mut() else {
+            return self.worst;
+        };
+        state.note_data(len as u64);
+        let hit = self.config.limits.check(state, &Event::PartData { len: len as u64 });
+        self.apply(hit.as_ref());
+        self.worst
+    }
+
     fn input_var(&mut self, name: &[u8]) -> Action {
         #[cfg(test)]
         if tests::FORCE_PANIC.with(|f| f.get()) {
@@ -677,6 +720,51 @@ pub unsafe extern "C" fn howdah_request_end(ctx: *mut howdah_ctx) -> i32 {
         return HOWDAH_ALLOW;
     }
     let r = catch_unwind(AssertUnwindSafe(|| code((*ctx).end())));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// Report one already-parsed multipart part: `kind` is `HOWDAH_PART_FIELD` or
+/// `HOWDAH_PART_FILE`; `name_len` is the form field name's byte length and
+/// `filename_len` the upload filename's (ignored for a field). This is how the
+/// PHP glue reports parts: PHP hands it parsed events, never request bytes, so
+/// nothing in the part data can influence the count. Returns the most severe
+/// action so far (0 Allow, 1 Log, 2 Block); `Block` for a part means the
+/// caller must not let PHP allocate it. Panic or NULL ctx returns 0.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_part(
+    ctx: *mut howdah_ctx,
+    kind: i32,
+    name_len: usize,
+    filename_len: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| code((*ctx).part(kind, name_len, filename_len))));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// Report `len` bytes of data for the current part (a field value or one file
+/// chunk). Only the length is used, so the bytes are not passed. Returns the
+/// most severe action so far. Panic or NULL ctx returns 0.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_part_data(ctx: *mut howdah_ctx, len: usize) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| code((*ctx).part_data(len))));
     r.unwrap_or_else(|_| {
         report_panic(ctx);
         HOWDAH_ALLOW
@@ -1269,6 +1357,30 @@ mod tests {
         assert_eq!(unsafe { howdah_request_header(c, 1, 1) }, 0);
         FORCE_PANIC.with(|f| f.set(false));
         unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn part_entrypoints_null_and_panic_safe() {
+        unsafe {
+            assert_eq!(howdah_part(std::ptr::null_mut(), HOWDAH_PART_FILE, 1, 1), 0);
+            assert_eq!(howdah_part_data(std::ptr::null_mut(), 1), 0);
+            // No request begun: fail-open, no state touched.
+            let c = init("");
+            assert_eq!(howdah_part(c, HOWDAH_PART_FILE, 1, 1), 0);
+            assert_eq!(howdah_part_data(c, 1), 0);
+            // A panic inside is caught and fails open, and the ctx stays usable.
+            howdah_request_begin(c, std::ptr::null(), 0, std::ptr::null());
+            FORCE_PANIC.with(|f| f.set(true));
+            assert_eq!(howdah_part(c, HOWDAH_PART_FILE, 1, 1), 0);
+            assert_eq!(howdah_part_data(c, 1), 0);
+            FORCE_PANIC.with(|f| f.set(false));
+            assert!(take(c).expect("panic noted").contains("panic caught"));
+            for i in 0..300 {
+                howdah_part(c, HOWDAH_PART_FILE, 1, 1);
+                assert!(i < 200 || howdah_part(c, HOWDAH_PART_FILE, 1, 1) == 2, "part {i}");
+            }
+            howdah_free(c);
+        }
     }
 
     fn inspect(c: *mut howdah_ctx, src: i32, name: &str, val: &[u8]) -> i32 {

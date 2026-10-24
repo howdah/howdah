@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use howdah_core::ffi as core;
 use howdah_sys as sys;
 
-use crate::feeder;
 use crate::input_filter;
 use crate::response;
 use crate::rfc1867;
@@ -38,9 +37,8 @@ pub(crate) static mut ENDED: bool = false;
 /// True once the multipart (rfc1867) path has begun this request. The input
 /// filter then skips `PARSE_POST` variables (they ARE the multipart fields,
 /// already counted by the part limits — double-counting them would both
-/// mis-attribute a flood and diverge from 0.1), and RSHUTDOWN leaves the
-/// (real, frame-fed) multipart state to its own truncation detection rather
-/// than force-closing it. GET/COOKIE on a multipart request are still counted.
+/// mis-attribute a flood and diverge from 0.1). GET/COOKIE on a multipart
+/// request are still counted.
 pub(crate) static mut MULTIPART: bool = false;
 /// Log destination file; `None` => stderr fallback.
 pub(crate) static mut LOG_PATH: Option<CString> = None;
@@ -159,12 +157,9 @@ pub(crate) unsafe fn maybe_begin() {
         uri: uri.as_ptr() as *const c_char,
         uri_len: uri.len(),
     };
-    core::howdah_request_begin(
-        CTX,
-        feeder::INTERNAL_BOUNDARY.as_ptr() as *const c_char,
-        feeder::INTERNAL_BOUNDARY.len(),
-        &meta,
-    );
+    // No boundary: the glue never feeds request bytes. Parts are reported with
+    // `howdah_part` / `howdah_part_data` from the parsed events PHP hands us.
+    core::howdah_request_begin(CTX, ptr::null(), 0, &meta);
     // ip/method/uri outlive this call's request_begin, which copies them.
     // (BEGUN was latched at the top, before the re-entrant sapi_getenv.)
 }
@@ -188,15 +183,9 @@ unsafe extern "C" fn rshutdown(_type: c_int, _module_number: c_int) -> c_int {
     // input-path 403 is intentionally skipped here — the var-drop in the
     // input_filter is the actual mitigation, and the log line is still written.
     if *ptr::addr_of!(BEGUN) && !*ptr::addr_of!(ENDED) {
-        // Input-only request (no multipart body): close the synthetic multipart
-        // state cleanly so request_end's truncation check does not false-positive
-        // on a never-fed state. Mirrors rfc1867::end_request's closing feed. A
-        // real multipart request reaches RSHUTDOWN unended only on a hard abort;
-        // leave its partially-fed state to genuine truncation detection.
-        if !*ptr::addr_of!(MULTIPART) {
-            let closing = feeder::Feeder::new().closing();
-            core::howdah_feed(CTX, closing.as_ptr() as *const c_char, closing.len());
-        }
+        // Nothing to close: the core request was begun without a boundary, so
+        // request_end has no framing to find truncated (input-only requests
+        // and hard-aborted multipart requests alike).
         let end_action = core::howdah_request_end(CTX);
         let line = rfc1867::take_log_line();
         if let Some(l) = line.as_deref() {

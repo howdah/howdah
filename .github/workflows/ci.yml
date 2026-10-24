@@ -52,11 +52,16 @@ jobs:
       - name: Run the multipart target briefly
         working-directory: fuzz
         run: cargo fuzz run multipart -- -runs=20000 -max_total_time=60
+      - name: Run the events target briefly (the interface the PHP glue uses)
+        working-directory: fuzz
+        run: cargo fuzz run events -- -runs=20000 -max_total_time=60
 
   # Per-PR arm64 build smoke on the native arm64 runner (ubuntu-24.04-arm; QEMU
   # not used). Spans generations incl. PHP 5.x, the key open question for
-  # aarch64. Non-blocking: it reports whether each minor builds and does not
-  # gate merges. build-one.sh asserts ELF/glibc <= 2.17 itself; re-checked here.
+  # aarch64; 5.4 is included because its 2008 config.guess needs the explicit
+  # --build triple build-one.sh passes. Non-blocking: it reports whether each
+  # minor builds and does not gate merges. build-one.sh asserts ELF/glibc <= 2.17
+  # itself; re-checked here.
   aarch64-build-smoke:
     name: aarch64 build PHP ${{ matrix.minor }}
     runs-on: ubuntu-24.04-arm
@@ -65,7 +70,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        minor: ['5.6', '7.4', '8.4']
+        minor: ['5.4', '5.6', '7.4', '8.4']
     steps:
       - uses: actions/checkout@v4
       - name: Build aarch64 tarball

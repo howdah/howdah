@@ -1,12 +1,20 @@
 //! The chained multipart callback — the heart of the extension.
 //!
-//! For every `MULTIPART_EVENT_*` we (1) reconstruct the equivalent framing and
-//! feed it to the core through its C ABI, (2) ALWAYS chain to the prior callback
-//! so `session.upload_progress` and any other consumer keep working — even after
-//! the allocation cap is hit (carry-forward #1): only the *allocation* of an
-//! over-limit part is suppressed, by returning FAILURE for that part's
-//! `FILE_START`/`FORMDATA`. (3) On the body's end, if the core decided Block,
-//! we refuse the request: emit the 413/403 response and terminate.
+//! For every `MULTIPART_EVENT_*` we (1) report the already-parsed part to the
+//! core through its C ABI (`howdah_part` for a `FORMDATA`/`FILE_START`,
+//! `howdah_part_data` for a value or `FILE_DATA` chunk; only lengths, never
+//! bytes), (2) ALWAYS chain to the prior callback so `session.upload_progress`
+//! and any other consumer keep working — even after the allocation cap is hit
+//! (carry-forward #1): only the *allocation* of an over-limit part is
+//! suppressed, by returning FAILURE for that part's `FILE_START`/`FORMDATA`.
+//! (3) On the body's end, if the core decided Block, we refuse the request:
+//! emit the 413/403 response and terminate.
+//!
+//! PHP hands this callback parsed events, not request bytes. Earlier versions
+//! re-synthesised multipart framing with a fixed boundary and pushed part DATA
+//! through the core's byte parser; a data chunk carrying that boundary wedged
+//! the parser and switched the count rules off (fixed in 1.2.1). Nothing the
+//! client sends reaches a parser here any more.
 //!
 //! The milestone-0 spike proved returning FAILURE caps per-part memory but does
 //! NOT end the request; the termination here is the piece that actually refuses.
@@ -18,7 +26,6 @@ use std::ptr;
 use howdah_core::ffi as core;
 use howdah_sys as sys;
 
-use crate::feeder::Feeder;
 use crate::module;
 use crate::response;
 
@@ -26,7 +33,6 @@ const SUCCESS: c_int = 0;
 const FAILURE: c_int = -1;
 
 // Per-request state (NTS: one request at a time per worker).
-static mut FEEDER: Option<Feeder> = None;
 static mut BLOCKED: bool = false;
 static mut SELFTEST_SEEN: bool = false;
 
@@ -63,7 +69,7 @@ pub(crate) unsafe extern "C" fn callback(
     }
 }
 
-/// Translate one event into core feed calls. Returns whether PHP should cancel
+/// Translate one event into core calls. Returns whether PHP should cancel
 /// (FAILURE) this event's part — true only once the core has decided Block, and
 /// only for the part-introducing events, so over-limit parts are not allocated.
 unsafe fn process(event: c_uint, event_data: *mut c_void) -> bool {
@@ -76,14 +82,9 @@ unsafe fn process(event: c_uint, event_data: *mut c_void) -> bool {
             let ev = &*(event_data as *const sys::multipart_event_formdata);
             let name = cbytes(ev.name);
             note_selftest(&name);
-            if let Some(h) = feeder_mut().map(|f| f.field_header(&name)) {
-                feed(&h);
-            }
-            if !ev.value.is_null() {
-                let vp = *ev.value;
-                if !vp.is_null() && ev.length > 0 {
-                    feed(std::slice::from_raw_parts(vp as *const u8, ev.length));
-                }
+            note(core::howdah_part(module::CTX, core::HOWDAH_PART_FIELD, name.len(), 0));
+            if ev.length > 0 {
+                note(core::howdah_part_data(module::CTX, ev.length as usize));
             }
             BLOCKED
         }
@@ -91,20 +92,18 @@ unsafe fn process(event: c_uint, event_data: *mut c_void) -> bool {
             let ev = &*(event_data as *const sys::multipart_event_file_start);
             let name = cbytes(ev.name);
             note_selftest(&name);
-            let filename = if ev.filename.is_null() {
-                Vec::new()
+            let filename_len = if ev.filename.is_null() || (*ev.filename).is_null() {
+                0
             } else {
-                cbytes(*ev.filename)
+                CStr::from_ptr(*ev.filename).to_bytes().len()
             };
-            if let Some(h) = feeder_mut().map(|f| f.file_part_header(&name, &filename)) {
-                feed(&h);
-            }
+            note(core::howdah_part(module::CTX, core::HOWDAH_PART_FILE, name.len(), filename_len));
             BLOCKED
         }
         x if x == sys::MULTIPART_EVENT_FILE_DATA => {
             let ev = &*(event_data as *const sys::multipart_event_file_data);
-            if !ev.data.is_null() && ev.length > 0 {
-                feed(std::slice::from_raw_parts(ev.data as *const u8, ev.length));
+            if ev.length > 0 {
+                note(core::howdah_part_data(module::CTX, ev.length as usize));
             }
             false
         }
@@ -142,27 +141,23 @@ unsafe fn add_selftest_header(request_id: &str) {
     );
 }
 
-/// Begin a request: reset the multipart feeder state, then open the core
-/// request through the shared, idempotent [`module::maybe_begin`]. For a
-/// multipart request this START is normally the first glue hook to fire, so it
-/// still effectively begins the request exactly as in 0.1; if the input_filter
+/// Begin a request: reset the per-request flags, then open the core request
+/// through the shared, idempotent [`module::maybe_begin`]. For a multipart
+/// request this START is normally the first glue hook to fire, so it still
+/// effectively begins the request exactly as in 0.1; if the input_filter
 /// already began it this call is a no-op begin and we share the same ctx.
 unsafe fn start() {
     BLOCKED = false;
     SELFTEST_SEEN = false;
-    ptr::addr_of_mut!(FEEDER).write(Some(Feeder::new()));
     // Mark this a multipart request: fires before any field is registered, so
     // the input_filter skips the POST fields (counted here as parts instead).
     module::MULTIPART = true;
     module::maybe_begin();
 }
 
-/// End of body: feed the closing delimiter, end the core request, write any log
-/// line, and (if blocked) return the (status, request_id) for the response.
+/// End of body: end the core request, write any log line, and (if blocked)
+/// return the (status, request_id) for the response.
 unsafe fn end_request() -> Option<(c_int, String)> {
-    if let Some(close) = feeder_mut().map(|f| f.closing()) {
-        feed(&close);
-    }
     let end_action = core::howdah_request_end(module::CTX);
     // Mark the request ended so RSHUTDOWN does not end (or respond) a second
     // time for this multipart request.
@@ -190,16 +185,11 @@ unsafe fn end_request() -> Option<(c_int, String)> {
     Some((status, request_id))
 }
 
-/// Feed bytes to the core; latch Block.
-unsafe fn feed(bytes: &[u8]) {
-    let action = core::howdah_feed(module::CTX, bytes.as_ptr() as *const c_char, bytes.len());
+/// Latch Block from a core action code.
+unsafe fn note(action: i32) {
     if action == core::HOWDAH_BLOCK {
         BLOCKED = true;
     }
-}
-
-unsafe fn feeder_mut() -> Option<&'static mut Feeder> {
-    (*ptr::addr_of_mut!(FEEDER)).as_mut()
 }
 
 pub(crate) unsafe fn take_log_line() -> Option<String> {

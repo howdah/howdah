@@ -3,6 +3,38 @@
 All notable changes to Howdah are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+- The aarch64 build of the PHP 5.4 extension. PHP 5.4's tarball ships a 2008
+  `config.guess` that cannot identify an aarch64 host, so `./configure` failed
+  with "cannot guess build type" and every release so far has had no 5.4 arm64
+  tarball. `build-one.sh` now passes an explicit `--build` triple when the
+  shipped guesser fails; the per-PR arm64 CI smoke now includes 5.4.
+
+## [1.2.1] - 2026-10-23
+
+### Security
+- Fixed a bypass of the multipart count rules (`max_parts`, `max_files`,
+  `max_filename_bytes`, `max_field_name_bytes`) that affected every release
+  from 0.1.0 to 1.2.0 in the shipped `detect` mode. The PHP glue used to
+  re-synthesise multipart framing with a fixed internal boundary and push part
+  data through the core's byte parser; a data chunk containing that boundary
+  put the parser into its sticky failed state, after which no further part
+  was counted or suppressed, so a flood behind one such chunk was allocated by
+  PHP as if Howdah were not loaded. In `block` mode the request was still
+  refused, as `malformed_multipart`. The glue now reports parts to the core
+  structurally (`howdah_part`, `howdah_part_data`: kinds and lengths only);
+  no request bytes reach a parser. The byte parser remains for the browser
+  demo and tests. Reported and fixed internally; regression tests cover the
+  host ABI (`crates/howdah-ext/tests/multipart_events.rs`), the lab
+  (`block_shaped_container.sh`, poisoned flood on real PHP) and a new
+  event-level fuzz target (`fuzz/fuzz_targets/events.rs`).
+
+### Changed
+- `howdah_core.h` is regenerated and now declares the Layer 2/3 entry points
+  that were missing from the committed header.
+
 ## [1.2.0] - 2026-10-23
 
 ### Added

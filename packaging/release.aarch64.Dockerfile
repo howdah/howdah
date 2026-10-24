@@ -19,7 +19,7 @@
 #
 # Build context must be the repo root so COPY can reach lab/images/.
 
-FROM --platform=linux/arm64 alpine:3.21 AS clangres
+FROM --platform=linux/arm64 alpine:3.21@sha256:ee16d92f96db08d9d2d07da48555a27f3a69d8f0759021dbc601195ed0d2b5bd AS clangres
 ARG CLANG_DEB=https://archive.ubuntu.com/ubuntu/pool/universe/l/llvm-toolchain-18/libclang-common-18-dev_18.1.3-1ubuntu1_amd64.deb
 ARG CLANG_DEB_SHA256=d41631bb752815a8196261d1030c096591c59678c8adfbf2e6a740a691b49e80
 RUN set -eu; apk add --no-cache curl binutils zstd tar >/dev/null; cd /tmp; \
@@ -32,7 +32,8 @@ RUN set -eu; apk add --no-cache curl binutils zstd tar >/dev/null; cd /tmp; \
     cp -r usr/lib/llvm-18/lib/clang/18/include /opt/clang-res/include; \
     test -f /opt/clang-res/include/arm_neon.h
 
-FROM --platform=linux/arm64 centos:7
+# Same digest pin as release.Dockerfile (the multi-arch manifest list).
+FROM --platform=linux/arm64 centos:7@sha256:be65f488b7764ad3638f236b7b515b3678369a5124c47b8d32916d6487418ea4
 
 # See release.Dockerfile: CentOS 7 is EOL, so point the base repos at the CERN
 # frozen vault mirror (altarch tree) over HTTPS, gpg-verified against the AltArch
@@ -68,17 +69,21 @@ COPY --from=clangres /opt/clang-res /opt/clang-res
 ENV LIBCLANG_PATH=/opt/libclang \
     BINDGEN_EXTRA_CLANG_ARGS="-resource-dir /opt/clang-res"
 
-# Pinned rustup-init (aarch64), sha256-verified before running.
+# Pinned rustup-init (aarch64), sha256-verified before running. Installs the
+# toolchain pinned in packaging/rust-toolchain.toml (see release.Dockerfile).
 ARG RUSTUP_VERSION=1.27.1
 ARG RUSTUP_INIT_SHA256=1cffbf51e63e634c746f741de50649bbbcbd9dbe1de363c9ecef64e278dba2b2
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
+COPY packaging/rust-toolchain.toml /opt/rust-toolchain.toml
 RUN set -eu; \
+    tc="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' /opt/rust-toolchain.toml)"; \
+    test -n "$tc"; echo "pinned Rust toolchain: $tc"; \
     rc() { n=0; until curl -fsSL "$@"; do n=$((n+1)); [ "$n" -ge 5 ] && return 1; echo "curl retry $n: $*" >&2; sleep 3; done; }; \
     rc -o /tmp/rustup-init \
       "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/aarch64-unknown-linux-gnu/rustup-init"; \
     echo "${RUSTUP_INIT_SHA256}  /tmp/rustup-init" | sha256sum -c -; \
     chmod +x /tmp/rustup-init; \
-    /tmp/rustup-init -y --profile minimal --default-toolchain stable --no-modify-path; \
+    /tmp/rustup-init -y --profile minimal --default-toolchain "$tc" --no-modify-path; \
     rm -f /tmp/rustup-init; \
     chmod -R a+rX /opt/rustup /opt/cargo
 

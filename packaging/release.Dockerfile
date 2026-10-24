@@ -16,7 +16,9 @@
 #
 # Build context must be the repo root so COPY can reach lab/images/.
 
-FROM centos:7
+# Pinned by digest (the multi-arch manifest list of the frozen centos:7 tag) so
+# a rebuild from a tag starts from the same base layers; see docs/verify.md.
+FROM centos:7@sha256:be65f488b7764ad3638f236b7b515b3678369a5124c47b8d32916d6487418ea4
 
 # CentOS 7 is EOL; mirrorlist.centos.org is gone and vault.centos.org rate-limits
 # (intermittent HTTP 403 on metadata). Point the base repos at the CERN frozen
@@ -79,18 +81,22 @@ ENV LIBCLANG_PATH=/opt/libclang \
 
 # Minimal rustup toolchain. Fetch a PINNED rustup-init over HTTPS and verify its
 # sha256 before running it (never pipe an unverified `curl | sh` into a shell on
-# the host that builds the signed binaries). The toolchain version is not
-# load-bearing for the glibc baseline -- any stable Rust x86_64-gnu std is built
-# against a glibc-2.17 baseline.
+# the host that builds the signed binaries). The toolchain is the one pinned in
+# packaging/rust-toolchain.toml. It is not load-bearing for the glibc baseline
+# (any stable Rust x86_64-gnu std is built against glibc 2.17), but it is for
+# reproducible builds: a different compiler emits different bytes.
 ARG RUSTUP_VERSION=1.27.1
 ARG RUSTUP_INIT_SHA256=6aeece6993e902708983b209d04c0d1dbb14ebb405ddb87def578d41f920f56d
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
+COPY packaging/rust-toolchain.toml /opt/rust-toolchain.toml
 RUN set -eu; \
+    tc="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' /opt/rust-toolchain.toml)"; \
+    test -n "$tc"; echo "pinned Rust toolchain: $tc"; \
     curl -fsSL -o /tmp/rustup-init \
       "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init"; \
     echo "${RUSTUP_INIT_SHA256}  /tmp/rustup-init" | sha256sum -c -; \
     chmod +x /tmp/rustup-init; \
-    /tmp/rustup-init -y --profile minimal --default-toolchain stable --no-modify-path; \
+    /tmp/rustup-init -y --profile minimal --default-toolchain "$tc" --no-modify-path; \
     rm -f /tmp/rustup-init; \
     chmod -R a+rX /opt/rustup /opt/cargo
 

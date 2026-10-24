@@ -167,6 +167,20 @@ fi
 export PHP_CONFIG
 export CARGO_TARGET_DIR=/tmp/t
 cd /src
+# Reproducible builds (docs/verify.md): the compiler is the one pinned in
+# packaging/rust-toolchain.toml (the release image installs exactly that one),
+# and builder paths are remapped so the .so carries no /src, $CARGO_HOME or
+# target-dir paths (panic locations of dependencies otherwise embed
+# /opt/cargo/registry/...). Cargo's own trim-paths is not stable yet.
+RUST_TOOLCHAIN=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' /src/packaging/rust-toolchain.toml)
+[ -n "$RUST_TOOLCHAIN" ] || die "no channel in packaging/rust-toolchain.toml"
+rustup toolchain list | grep -q "^$RUST_TOOLCHAIN-" \
+  || die "pinned toolchain $RUST_TOOLCHAIN is not installed in this image (rebuild it without KEEP_IMAGE=1)"
+export RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN"
+CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
+# Appended, so the musl build's -crt-static flag (set at the top) is kept.
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=/src=/howdah --remap-path-prefix=$CARGO_HOME_DIR=/cargo --remap-path-prefix=$CARGO_TARGET_DIR=/target"
+note "toolchain: $(rustc -V); RUSTFLAGS=$RUSTFLAGS; SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-unset}"
 note "cargo build -p howdah-ext --features $FEATURE --release --locked"
 cargo build -p howdah-ext --features "$FEATURE" --release --locked 2>&1 | sed "s/^/   [$MINOR] /" >&2
 SO=/tmp/t/release/libhowdah_ext.so

@@ -4,7 +4,8 @@
 #
 # A glibc howdah.so cannot load on musl, so Alpine needs its own build. This
 # image builds one with:
-#   - rustup's stable x86_64-unknown-linux-musl toolchain (Alpine 3.21's own
+#   - rustup's x86_64-unknown-linux-musl toolchain, the version pinned in
+#     packaging/rust-toolchain.toml (Alpine 3.21's own
 #     rust, 1.83, is too old for the locked dependencies), with
 #     RUSTFLAGS="-C target-feature=-crt-static" (build-one.sh sets it): a
 #     cdylib must link musl dynamically. The result needs libc.musl and
@@ -33,15 +34,20 @@ RUN set -eu; \
 ENV LIBCLANG_PATH=/usr/lib/llvm19/lib
 
 # Pinned rustup-init (x86_64 musl host), sha256-verified before running.
+# Installs the toolchain pinned in packaging/rust-toolchain.toml (see
+# release.Dockerfile); build-one.sh refuses to build without it.
 ARG RUSTUP_VERSION=1.27.1
 ARG RUSTUP_INIT_SHA256=1455d1df3825c5f24ba06d9dd1c7052908272a2cae9aa749ea49d67acbe22b47
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
+COPY packaging/rust-toolchain.toml /opt/rust-toolchain.toml
 RUN set -eu; \
+    tc="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' /opt/rust-toolchain.toml)"; \
+    test -n "$tc"; echo "pinned Rust toolchain: $tc"; \
     curl -fsSL -o /tmp/rustup-init \
       "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-musl/rustup-init"; \
     echo "${RUSTUP_INIT_SHA256}  /tmp/rustup-init" | sha256sum -c -; \
     chmod +x /tmp/rustup-init; \
-    /tmp/rustup-init -y --profile minimal --default-toolchain stable --no-modify-path; \
+    /tmp/rustup-init -y --profile minimal --default-toolchain "$tc" --no-modify-path; \
     rm -f /tmp/rustup-init; \
     chmod -R a+rX /opt/rustup /opt/cargo
 

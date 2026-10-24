@@ -44,6 +44,10 @@
 
 #define HOWDAH_SINK_UNSERIALIZE 3
 
+#define HOWDAH_SINK_PHAR 4
+
+#define HOWDAH_SINK_SSRF 5
+
 /**
  * Maximum number of class names reported by `unserialize_classes`.
  */
@@ -200,6 +204,78 @@ int32_t howdah_sink_check(struct howdah_ctx *ctx,
                           size_t name_len,
                           const char *arg,
                           size_t arg_len);
+
+/**
+ * 1 iff SSRF guarding is armed (effective mode != off); NULL ctx or panic is
+ * 0. Never stashes a log line. Lets the shim skip DNS work when disarmed.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_sink_ssrf_armed(struct howdah_ctx *ctx);
+
+/**
+ * 1 iff the given sink (`HOWDAH_SINK_*`) is armed (effective mode != off);
+ * NULL ctx, unknown sink or panic is 0. Never stashes a log line. Used by the
+ * glue to decide, once per process, whether to install the phar/ssrf hooks.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_sink_armed(struct howdah_ctx *ctx, int32_t sink);
+
+/**
+ * SSRF decision for one intercepted outbound call. `ips` points to
+ * `ips_count` fixed 17-byte records `[family (4|6)][16 address bytes]` (a v4
+ * uses the first 4). Returns 0 Allow / 1 Log / 2 Block; NULL ctx, malformed
+ * input or panic is 0 (fail-open). The log line carries scheme/host/port/
+ * matched-ip/class only (in `reason`), never userinfo/path/query.
+ *
+ * # Safety
+ * `ctx` NULL or live; each pointer NULL or valid for its length (`ips`: 17 *
+ * `ips_count` bytes).
+ */
+int32_t howdah_sink_check_ssrf(struct howdah_ctx *ctx,
+                               const char *scheme,
+                               size_t scheme_len,
+                               const char *host,
+                               size_t host_len,
+                               uint16_t port,
+                               const uint8_t *ips,
+                               size_t ips_count);
+
+/**
+ * SSRF parse seam: parse the target of an intercepted outbound call so the C
+ * shim never parses URLs itself. `scheme_required != 0` selects
+ * `HostForm::SchemeRequired` (URL-only sinks), else `BareHostOk` (fsockopen,
+ * curl). Returns 2 when the host parsed but is longer than `out_host_cap`
+ * (suspicious: nothing is written; call `howdah_sink_ssrf_oversize`). Returns 1 ("act") after writing the clean host (no userinfo/brackets/
+ * port, lowercased) to `out_host`, its length to `*out_host_len` and the port
+ * (0 if none) to `*out_port`. Returns 0 ("skip") for a non-network target
+ * (local path, `unix://`, no scheme when required), a host that does not fit
+ * `out_host_cap`, any NULL argument, or a panic: fail-open, the call is chained.
+ *
+ * # Safety
+ * `input` NULL or valid for `input_len` bytes; `out_host` NULL or writable for
+ * `out_host_cap` bytes; `out_host_len` / `out_port` NULL or writable.
+ */
+int32_t howdah_ssrf_prepare(const uint8_t *input,
+                            size_t input_len,
+                            int32_t scheme_required,
+                            uint8_t *out_host,
+                            size_t out_host_cap,
+                            size_t *out_host_len,
+                            uint16_t *out_port);
+
+/**
+ * Verdict for an oversize (>cap) SSRF host, called when `howdah_ssrf_prepare`
+ * returned 2. 0 Allow (off) / 1 Log / 2 Block per the effective SSRF mode;
+ * stashes a log line with no host bytes. NULL ctx or panic is 0.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_sink_ssrf_oversize(struct howdah_ctx *ctx);
 
 /**
  * Take the pending sink log line, or NULL if none. Same ownership contract as

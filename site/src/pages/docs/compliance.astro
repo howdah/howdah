@@ -34,9 +34,9 @@ const logIni = String.raw`howdah.log = /var/log/howdah/events.log`;
 const logSyslog = String.raw`[log]
 destination = "syslog"   # facility local0, tag "howdah" unless set`;
 
-const samples = String.raw`{"action":"block","client_ip":"203.0.113.7","layer":1,"method":"POST","reason":"multipart part count exceeds limit","request_id":"12feab0bc42ea29d0","rule":"max_parts","schema":2,"ts":"1792862615157","uri":"/index.php","version":"1.3.0"}
-{"action":"log","client_ip":"203.0.113.7","layer":2,"method":"GET","reason":"sql_injection pattern in get variable 'q'","request_id":"1aa8be308b30a2f10","rule":"sql_injection","schema":2,"ts":"1792862615161","uri":"/index.php","version":"1.3.0"}
-{"action":"log","client_ip":"203.0.113.7","layer":3,"method":"GET","reason":"non-allowlisted command via system","request_id":"16fbb40494928d080","rule":"command_exec","schema":2,"ts":"1792862615164","uri":"/index.php","version":"1.3.0"}`;
+const samples = String.raw`{"action":"block","client_ip":"203.0.113.7","layer":1,"method":"POST","reason":"multipart part count exceeds limit","request_id":"11eccf6d90ad2987d","rule":"max_parts","schema":2,"ts":"1792864974141","uri":"/index.php","version":"1.4.0"}
+{"action":"log","client_ip":"203.0.113.7","layer":2,"method":"GET","reason":"sql_injection pattern in get variable 'q'","request_id":"1a2d239820e2f06bc","rule":"sql_injection","schema":2,"ts":"1792864974146","uri":"/index.php","version":"1.4.0"}
+{"action":"log","client_ip":"203.0.113.7","layer":3,"method":"GET","reason":"non-allowlisted command via system","request_id":"1fa7c36ea3c170856","rule":"command_exec","schema":2,"ts":"1792864974151","uri":"/index.php","version":"1.4.0"}`;
 
 const logDir = String.raw`# The directory belongs to the PHP worker user (www-data on Debian, apache or nginx on RHEL).
 sudo install -d -m 0750 -o www-data -g www-data /var/log/howdah`;
@@ -217,11 +217,11 @@ const noJq = String.raw`zcat -f /var/log/howdah/events.log* | awk -F'"rule":"' '
           <caption class="sr-only">Howdah log fields and the PCI DSS 10.2.2 element each one supplies</caption>
           <thead><tr><th scope="col">Field</th><th scope="col">Content</th><th scope="col">PCI DSS 10.2.2 element</th></tr></thead>
           <tbody>
-            <tr><th scope="row"><code>schema</code></th><td>Version of the line format, <code>2</code>. Lines from Howdah 1.0 to 1.3 have no <code>schema</code> key.</td><td>(format)</td></tr>
+            <tr><th scope="row"><code>schema</code></th><td>Version of the line format, <code>2</code>. Lines from Howdah 1.0 to 1.4.0 have no <code>schema</code> key.</td><td>(format)</td></tr>
             <tr><th scope="row"><code>version</code></th><td>Version of the Howdah extension that wrote the line.</td><td>(provenance)</td></tr>
             <tr><th scope="row"><code>ts</code></th><td>UTC time of the event, Unix epoch milliseconds, as a string. Taken from the system clock, so keep NTP running (10.6.1).</td><td>Date and time</td></tr>
             <tr><th scope="row"><code>request_id</code></th><td>An id for the request. The block response body prints it, so a user's report maps to one line.</td><td>(correlation)</td></tr>
-            <tr><th scope="row"><code>layer</code></th><td>Which protection layer the rule belongs to: 1 request-shape limits, 2 input inspection, 3 sinks.</td><td>Type of event</td></tr>
+            <tr><th scope="row"><code>layer</code></th><td>Which protection layer the rule belongs to: 1 request-shape limits, 2 input inspection, 3 sinks, 4 after-breach behaviour.</td><td>Type of event</td></tr>
             <tr><th scope="row"><code>rule</code></th><td>The rule or sink that fired, for example <code>max_parts</code>, <code>sql_injection</code>, <code>command_exec</code>.</td><td>Type of event</td></tr>
             <tr><th scope="row"><code>action</code></th><td><code>block</code> (refused) or <code>log</code> (allowed and recorded).</td><td>Success and failure indication</td></tr>
             <tr><th scope="row"><code>client_ip</code></th><td><code>REMOTE_ADDR</code> as PHP sees it. Behind a proxy or CDN this is the proxy's address.</td><td>Origination of event</td></tr>

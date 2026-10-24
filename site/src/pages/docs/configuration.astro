@@ -22,11 +22,11 @@ const standard = ['malformed_multipart', 'upload_progress_abuse', 'max_input_key
 // Event line fields, schema 2 — the source of truth is docs/log-schema.md
 // (site/test/log-contract.test.mjs checks this list against the core).
 const logFields = [
-  ['schema', 'integer', '2. Lines from 1.0 to 1.3 have no schema key.'],
+  ['schema', 'integer', '2. Lines from 1.0 to 1.4.0 have no schema key.'],
   ['version', 'string', 'Version of the extension that wrote the line.'],
   ['ts', 'string', 'UTC Unix epoch milliseconds, as a decimal string.'],
   ['request_id', 'string', 'Lowercase hex; also printed in the block response.'],
-  ['layer', 'integer', '1 request-shape limits, 2 input inspection, 3 sinks.'],
+  ['layer', 'integer', '1 request-shape limits, 2 input inspection, 3 sinks, 4 after-breach behaviour.'],
   ['rule', 'string', 'Rule name, spelled as in the config.'],
   ['action', 'string', 'block or log.'],
   ['client_ip', 'string', 'REMOTE_ADDR; empty when the SAPI has none (CLI, php -S).'],
@@ -188,9 +188,9 @@ deny_php_writes     = false <span class="c"># true -> flag a *.php/.phar/.phtml 
 
       <h2 id="log">Event log (<code>[log]</code>)</h2>
       <p>Howdah writes one JSON line per event: to a file (the default), to syslog, or to stderr. Each line carries the schema version, the Howdah version, a timestamp (<code>ts</code>, UTC epoch milliseconds), the request ID, the layer, the rule, the action, the client IP, the method, the path and the reason. The request ID also appears in the block response, so a user report maps to a log line. These three lines are from a lab run (PHP 7.4, php-fpm): a field flood refused by <code>max_parts</code>, a Layer 2 SQL-injection shape, and a Layer 3 <code>system()</code> call that is not on the allowlist.</p>
-      <pre tabindex="0" data-sample="event"><code>{`{"action":"block","client_ip":"203.0.113.7","layer":1,"method":"POST","reason":"multipart part count exceeds limit","request_id":"12feab0bc42ea29d0","rule":"max_parts","schema":2,"ts":"1792862615157","uri":"/index.php","version":"1.3.0"}
-{"action":"log","client_ip":"203.0.113.7","layer":2,"method":"GET","reason":"sql_injection pattern in get variable 'q'","request_id":"1aa8be308b30a2f10","rule":"sql_injection","schema":2,"ts":"1792862615161","uri":"/index.php","version":"1.3.0"}
-{"action":"log","client_ip":"203.0.113.7","layer":3,"method":"GET","reason":"non-allowlisted command via system","request_id":"16fbb40494928d080","rule":"command_exec","schema":2,"ts":"1792862615164","uri":"/index.php","version":"1.3.0"}`}</code></pre>
+      <pre tabindex="0" data-sample="event"><code>{`{"action":"block","client_ip":"203.0.113.7","layer":1,"method":"POST","reason":"multipart part count exceeds limit","request_id":"11eccf6d90ad2987d","rule":"max_parts","schema":2,"ts":"1792864974141","uri":"/index.php","version":"1.4.0"}
+{"action":"log","client_ip":"203.0.113.7","layer":2,"method":"GET","reason":"sql_injection pattern in get variable 'q'","request_id":"1a2d239820e2f06bc","rule":"sql_injection","schema":2,"ts":"1792864974146","uri":"/index.php","version":"1.4.0"}
+{"action":"log","client_ip":"203.0.113.7","layer":3,"method":"GET","reason":"non-allowlisted command via system","request_id":"1fa7c36ea3c170856","rule":"command_exec","schema":2,"ts":"1792864974151","uri":"/index.php","version":"1.4.0"}`}</code></pre>
       <div class="tablewrap" tabindex="0" role="region" aria-label="Event log fields (scrolls sideways on narrow screens)">
         <table>
           <caption class="sr-only">Fields of an event line, schema 2</caption>
@@ -211,20 +211,20 @@ syslog_facility = "local0"      # for "syslog"
 syslog_ident = "howdah"         # for "syslog": the tag
 # exec = "/usr/local/sbin/howdah-alert"   # off unless set
 # exec_rate_limit = 10          # hook starts per second per PHP process, 1-100`}</code></pre>
-      <p><strong>File</strong> (the default). The path is <code>howdah.log</code> if it is set, else <code>[log] path</code>, else stderr. Howdah opens the file for each line and writes the line in one append, so lines from concurrent workers do not interleave, and rotation needs no reload: logrotate's default rename-and-create works, and so does <code>copytruncate</code>. The PHP worker user writes the file; if it does not exist, the worker creates it with mode 0666 minus the umask (usually 0644). Create it first to choose the owner and mode. If the file cannot be written the line goes to stderr, which php-fpm discards unless the pool sets <code>catch_workers_output = yes</code>.</p>
-      <p><strong>Syslog.</strong> Each line goes to <code>/dev/log</code> (journald or rsyslog) as the message, tagged <code>howdah[pid]</code>, with severity warning for <code>block</code> and notice for <code>log</code>. <code>journalctl -t howdah -o cat</code> prints one JSON line per event. Both paths are ignored. If there is no syslog socket (a container without one, for example) the line goes to stderr with a note. Howdah writes to the socket itself instead of calling <code>openlog()</code>, because PHP shares and resets that state.</p>
+      <p><strong>File</strong> (the default). The path is <code>howdah.log</code> if it is set, else <code>[log] path</code>, else stderr. Howdah opens the file for each line and writes the line in one append, so lines from concurrent workers do not interleave, and rotation needs no reload: logrotate's default rename-and-create works, and so does <code>copytruncate</code>. The PHP worker user writes the file; if it does not exist, the worker creates it with mode 0640 minus the umask, so it is not world-readable. Create it first to choose the owner, group and mode. If the file cannot be written the line goes to stderr, which php-fpm discards unless the pool sets <code>catch_workers_output = yes</code>.</p>
+      <p><strong>Syslog.</strong> Each line goes to <code>/dev/log</code> (journald or rsyslog) as the message, tagged <code>howdah[pid]</code>, with severity warning for <code>block</code> and notice for <code>log</code>. <code>journalctl -t howdah -o cat</code> prints one JSON line per event. Both paths are ignored. If there is no syslog socket (a container without one, for example), or the daemon is not keeping up, the line goes to stderr with a note; the request never waits. Howdah writes to the socket itself instead of calling <code>openlog()</code>, because PHP shares and resets that state, and uses a datagram socket only: a syslog-ng set up with a stream socket at <code>/dev/log</code> gets stderr instead.</p>
       <p><strong>Stderr.</strong> Lines prefixed <code>howdah-event </code>, for containers that collect stderr.</p>
       <p><code>php --ri howdah</code> shows the result in its <code>Log destination</code> row, for example <code>syslog (/dev/log, facility local0, ident howdah)</code>.</p>
 
       <h3>A program per event (<code>exec</code>)</h3>
-      <p>Off unless set. For every event Howdah starts the program and does not wait for it. The JSON line arrives on stdin. The environment holds only <code>HOWDAH_RULE</code>, <code>HOWDAH_ACTION</code> and a fixed <code>PATH</code>; there are no arguments, and none of the PHP worker's other open files or sockets are passed on. At most <code>exec_rate_limit</code> starts per second (default 10) and 64 running hooks per PHP process; beyond that the hook is skipped and the event is still logged. Use it to raise an alert, for example a chat webhook:</p>
+      <p>Off unless set. For every event Howdah starts the program and does not wait for it. The JSON line arrives on stdin. The environment holds only <code>HOWDAH_RULE</code>, <code>HOWDAH_ACTION</code> and a fixed <code>PATH</code>; there are no arguments, and none of the PHP worker's other open files or sockets are passed on. It is double-forked, so it is never a child (or a zombie) of the PHP worker. At most <code>exec_rate_limit</code> starts per second per PHP process (default 10); beyond that the hook is skipped and the event is still logged. On every event Howdah checks the program before it runs it: not a symlink, a regular executable file, not group- or world-writable, owned by root or the PHP user, in a directory that is not group- or world-writable. It then runs the file it checked, through <code>/proc/self/fd</code>, so swapping the file in between does not help. Use it to raise an alert, for example a chat webhook:</p>
       <pre tabindex="0"><code>{`#!/bin/sh
 # /usr/local/sbin/howdah-alert (root:root, mode 0755)
 [ "$HOWDAH_ACTION" = block ] || exit 0
 exec curl -fsS -m 5 -H 'Content-Type: application/json' --data-binary @- https://hooks.example.com/howdah`}</code></pre>
       <div class="note">
         <h3>Security caveat</h3>
-        <p>The program runs as the PHP worker user, whenever an attacker trips a rule. Keep it quick, owned by root and not writable by the PHP user (Howdah refuses a world-writable one). Treat its input as untrusted: the path and the names in <code>reason</code> come from the request. Starting a process from PHP is safe on the single-threaded (NTS) SAPIs Howdah supports, php-fpm, Apache mod_php with prefork, CGI and the CLI; the lab tested the built-in server and php-fpm on PHP 7.4 and 8.3 and Apache prefork on 8.3. Threaded (ZTS) PHP is not supported by Howdah at all.</p>
+        <p>The program runs as the PHP worker user, whenever an attacker trips a rule. Keep it quick, owned by root and not writable by the PHP user (Howdah refuses a group- or world-writable one, but accepts one the PHP user owns, which a compromised application could rewrite). Treat its input as untrusted: the path and the names in <code>reason</code> come from the request. Starting a process from PHP is safe on the single-threaded (NTS) SAPIs Howdah supports, php-fpm, Apache mod_php with prefork, CGI and the CLI; <code>lab/integration/log_contract.sh</code> tests the built-in server, php-fpm and Apache prefork on PHP 7.4 and 8.3. Threaded (ZTS) PHP is not supported by Howdah at all.</p>
       </div>
 
       <h3 id="siem">Ship to a SIEM</h3>

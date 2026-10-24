@@ -60,27 +60,36 @@ All notable changes to Howdah are documented here. The format follows
   with the repository and package commands for each.
 - Event log schema 2. Every line gains `schema` (the integer 2), `version`
   (the extension version) and `layer` (1 request-shape limits, 2 input
-  inspection, 3 sinks, derived from the rule). The eight 1.x fields keep their
-  names and types, so existing consumers keep working. The contract is
-  `docs/log-schema.md`, with a JSON Schema in `docs/howdah-event.schema.json`;
-  tests check both against what the code writes for every rule.
+  inspection, 3 sinks, 4 after-breach behaviour, derived from the rule). The
+  eight fields of 1.0 to 1.4.0 keep their names and types, so existing
+  consumers keep working. The contract is `docs/log-schema.md`, with a JSON
+  Schema in `docs/howdah-event.schema.json`; tests check both against what the
+  code writes for every rule.
 - `[log] destination = "file" | "syslog" | "stderr"` in the TOML file, with
   `syslog_facility` (default `local0`) and `syslog_ident` (default `howdah`).
   The default, `file`, is the 1.x behaviour. Syslog lines go to `/dev/log`
   framed as glibc frames them (severity warning for `block`, notice for
   `log`), written by Howdah itself rather than through `openlog()`, which PHP
-  owns and resets at the end of every request. A missing socket or a full
-  daemon queue sends the line to stderr; the request never waits. Tested on
-  PHP 7.4 and 8.3 (built-in server and php-fpm), Apache mod_php prefork on
-  8.3, and against a real journald.
+  owns and resets at the end of every request. The socket is a non-blocking
+  datagram socket: a missing socket, a full daemon queue or a stream socket
+  (some syslog-ng setups; glibc's stream fallback is deliberately not copied)
+  sends the line to stderr, and the request never waits.
+  `lab/integration/log_contract.sh` tests it on PHP 7.4 and 8.3 under the
+  built-in server, php-fpm and Apache mod_php prefork; a run against a real
+  journald was done by hand.
 - `[log] exec`: run a program once per event with the JSON line on stdin.
   Off unless set; the path must be absolute. The program gets no arguments,
   an environment of only `HOWDAH_RULE`, `HOWDAH_ACTION` and a fixed `PATH`,
-  no inherited descriptors besides stdin/stdout/stderr, and its own session;
-  Howdah does not wait for it. At most `exec_rate_limit` starts per second
-  (default 10, 1 to 100) and 64 running hooks per PHP process; a missing,
-  non-executable or world-writable program is refused. It runs as the PHP
-  worker user: see the security notes in `docs/config.md`.
+  no inherited descriptors besides stdin/stdout/stderr (plus one for itself),
+  and its own session. It is double-forked, so it is never a child or zombie
+  of the PHP worker, and Howdah does not wait for it. At most
+  `exec_rate_limit` starts per second per PHP process (default 10, 1 to 100).
+  On every event the program is opened without following a symlink and
+  checked on that descriptor (a regular executable file, not group- or
+  world-writable, owned by root or the PHP user, in a directory that is not
+  group- or world-writable), and that same file is run through
+  `/proc/self/fd`, so it cannot be swapped between check and start. It runs
+  as the PHP worker user: see the security notes in `docs/config.md`.
 - `php --ri howdah` rows `Log hook ([log] exec)` (when set) and
   `Log schema => 2`.
 - SIEM starting points in `docs/integrations/`: a Wazuh decoder and rules
@@ -88,7 +97,8 @@ All notable changes to Howdah are documented here. The format follows
   event lines in wazuh-manager 4.12.0 and Promtail 3.5.1 by
   `lab/integration/siem_snippets.sh`.
 - `lab/integration/log_contract.sh`: `[log] path`, the three destinations and
-  the hook against the real extension, under `php -S` and php-fpm.
+  the hook against the real extension, under `php -S`, php-fpm and Apache
+  mod_php prefork.
 
 
 ### Changed
@@ -103,6 +113,8 @@ All notable changes to Howdah are documented here. The format follows
 - The config editor and `cfg.howdah.org` refuse to load a file with any
   `[log]` key (before, only `path`), because the form cannot carry the new
   keys and a round trip would drop them.
+- A log file Howdah creates now gets mode 0640 minus the umask (it was 0666
+  minus the umask, usually world-readable). Existing files keep their mode.
 
 ### Fixed
 - `[log] path` in the TOML file was parsed but ignored. It is now used when

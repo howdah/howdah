@@ -19,11 +19,11 @@ written for the old line keeps working.
 
 | Field | JSON type | Since | Content |
 |---|---|---|---|
-| `schema` | integer | schema 2 | Version of this line format: `2`. A line without `schema` is from Howdah 1.0 to 1.3 (schema 1). |
-| `version` | string | schema 2 | Version of the extension that wrote the line, for example `"1.3.0"`. |
-| `ts` | string | 1.0 | Time of the event, UTC Unix epoch milliseconds as a decimal string (`"1792862615157"`). A string, not a number, since 1.0; kept for compatibility. |
+| `schema` | integer | schema 2 | Version of this line format: `2`, in releases after 1.4.0. A line without `schema` is from Howdah 1.0 to 1.4.0 (schema 1). |
+| `version` | string | schema 2 | Version of the extension that wrote the line, for example `"1.4.0"`. |
+| `ts` | string | 1.0 | Time of the event, UTC Unix epoch milliseconds as a decimal string (`"1792864974141"`). A string, not a number, since 1.0; kept for compatibility. |
 | `request_id` | string | 1.0 | Lowercase hex, at most 64 characters. The block response body prints the same id, so a user's report maps to its line. Every event from one request carries the same id. |
-| `layer` | integer | schema 2 | The protection layer of `rule`: `1`, `2` or `3` (table below). A future layer adds the next integer. |
+| `layer` | integer | schema 2 | The protection layer of `rule`: `1`, `2`, `3` or `4` (table below). |
 | `rule` | string | 1.0 | Rule name, the same spelling as the config keys (`max_parts`, `sql_injection`, `command_exec`, ...). |
 | `action` | string | 1.0 | `"block"` (request refused or call denied) or `"log"` (recorded, allowed). `"allow"` is reserved and not written. |
 | `client_ip` | string | 1.0 | `REMOTE_ADDR` as the SAPI reports it: the proxy's address behind a reverse proxy (`X-Forwarded-For` is not read). Empty when the SAPI reports none, as on the command line and under the built-in `php -S` server. |
@@ -40,8 +40,9 @@ order.
   do not know.
 - Removing a field, renaming it, or changing its JSON type increments
   `schema`.
-- A new rule or a new layer number is not a schema change. Treat unknown
-  `rule` values and `layer` values above 3 as valid.
+- A new rule is not a schema change. A new layer number is added to the
+  `layer` enum in the JSON Schema file without changing `schema`. Treat
+  unknown `rule` values and `layer` values above 4 as valid.
 
 ## Layers and rules
 
@@ -50,6 +51,7 @@ order.
 | 1 | Request-shape limits: multipart, input shape, request headers, and the self-test marker | `max_parts`, `max_files`, `max_part_headers`, `max_part_header_bytes`, `max_field_name_len`, `max_filename_len`, `parse_memory_budget`, `malformed_multipart`, `upload_progress_abuse`, `self_test`, `max_input_vars`, `max_input_nesting_depth`, `max_input_key_bytes`, `max_request_headers`, `max_request_header_bytes` |
 | 2 | Input inspection (log-only by default) | `sql_injection`, `path_traversal`, `command_injection` |
 | 3 | Sink hardening (log-only by default) | `command_exec`, `include`, `eval`, `unserialize`, `phar`, `ssrf` |
+| 4 | After-breach behaviour (log-only by default; inert until its lists are set) | `upload_exec`, `unexpected_binary`, `unexpected_egress`, `php_write` |
 
 The layer is computed from the rule by `rule_layer` in
 `crates/howdah-core/src/log.rs`, an exhaustive match: a new rule does not
@@ -59,6 +61,10 @@ compile until it has a layer.
 `action: "log"`, never a block. An internal error caught at the extension
 boundary is also logged as `self_test`, with the reason
 `internal panic caught at FFI boundary; failed open`.
+
+Layer 4 in observe mode (`[behavior] observe = true`) writes its proposals
+as ordinary `action: "log"` lines whose `reason` starts with `proposed: `.
+That prefix is kept stable so proposals can be told apart.
 
 ## What is never in a line
 
@@ -79,9 +85,9 @@ flood refused by `max_parts`, a Layer 2 SQL-injection shape in `?q=`, and a
 Layer 3 `system()` call that is not on the allowlist.
 
 ```json
-{"action":"block","client_ip":"203.0.113.7","layer":1,"method":"POST","reason":"multipart part count exceeds limit","request_id":"12feab0bc42ea29d0","rule":"max_parts","schema":2,"ts":"1792862615157","uri":"/index.php","version":"1.3.0"}
-{"action":"log","client_ip":"203.0.113.7","layer":2,"method":"GET","reason":"sql_injection pattern in get variable 'q'","request_id":"1aa8be308b30a2f10","rule":"sql_injection","schema":2,"ts":"1792862615161","uri":"/index.php","version":"1.3.0"}
-{"action":"log","client_ip":"203.0.113.7","layer":3,"method":"GET","reason":"non-allowlisted command via system","request_id":"16fbb40494928d080","rule":"command_exec","schema":2,"ts":"1792862615164","uri":"/index.php","version":"1.3.0"}
+{"action":"block","client_ip":"203.0.113.7","layer":1,"method":"POST","reason":"multipart part count exceeds limit","request_id":"11eccf6d90ad2987d","rule":"max_parts","schema":2,"ts":"1792864974141","uri":"/index.php","version":"1.4.0"}
+{"action":"log","client_ip":"203.0.113.7","layer":2,"method":"GET","reason":"sql_injection pattern in get variable 'q'","request_id":"1a2d239820e2f06bc","rule":"sql_injection","schema":2,"ts":"1792864974146","uri":"/index.php","version":"1.4.0"}
+{"action":"log","client_ip":"203.0.113.7","layer":3,"method":"GET","reason":"non-allowlisted command via system","request_id":"1fa7c36ea3c170856","rule":"command_exec","schema":2,"ts":"1792864974151","uri":"/index.php","version":"1.4.0"}
 ```
 
 With `destination = "syslog"` the same line is the syslog message. The frame
@@ -89,11 +95,12 @@ on the socket (same run, default facility `local0`; `<132>` is local0 +
 warning, `<133>` local0 + notice):
 
 ```
-<132>Oct 24 17:23:35 howdah[1424]: {"action":"block","client_ip":"203.0.113.7","layer":1,...}
+<132>Oct 24 18:02:54 howdah[1429]: {"action":"block","client_ip":"203.0.113.7","layer":1,...}
 ```
 
-and journald stores it as (`journalctl -t howdah -o json`, a run against a
-real journald):
+and journald stores it as (`journalctl -t howdah -o json`; a run against a
+real journald, done by hand with an earlier build because the lab images
+have no journald):
 
 ```
 SYSLOG_IDENTIFIER=howdah
@@ -104,7 +111,7 @@ MESSAGE={"action":"log","client_ip":"","layer":3,"method":"GET","reason":"non-al
 
 ## Reading schema 1 lines
 
-Lines from 1.0 to 1.3 have the eight original fields only. To treat old and
+Lines from 1.0 to 1.4.0 have the eight original fields only. To treat old and
 new lines alike, read a missing `schema` as `1` and derive `layer` from `rule`
 with the table above. `version` has no equivalent; the package version in use
 at the time is the best substitute.
@@ -116,4 +123,4 @@ at the time is the best substitute.
   if you need tamper evidence ([integrations](integrations/README.md)).
 - Only security events are logged, not every request.
 - Layers 1 and 2 write at most one line per request (the most severe hit);
-  each Layer 3 sink event is its own line.
+  each Layer 3 or Layer 4 event is its own line.

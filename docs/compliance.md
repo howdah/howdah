@@ -200,11 +200,11 @@ Each line is one JSON object with exactly these fields (from
 
 | Field | Content | PCI DSS 10.2.2 element |
 |---|---|---|
-| `schema` | Version of the line format, `2`. Lines from Howdah 1.0 to 1.3 have no `schema` key. | (format) |
+| `schema` | Version of the line format, `2`. Lines from Howdah 1.0 to 1.4.0 have no `schema` key. | (format) |
 | `version` | Version of the Howdah extension that wrote the line. | (provenance) |
 | `ts` | UTC time of the event, Unix epoch milliseconds, as a string. Taken from the system clock, so keep NTP running (10.6.1). | Date and time |
 | `request_id` | An id for the request. The block response body prints it, so a user's report maps to one line. | (correlation) |
-| `layer` | Which protection layer the rule belongs to: 1 request-shape limits, 2 input inspection, 3 sinks. | Type of event |
+| `layer` | Which protection layer the rule belongs to: 1 request-shape limits, 2 input inspection, 3 sinks, 4 after-breach behaviour. | Type of event |
 | `rule` | The rule or sink that fired, for example `max_parts`, `sql_injection`, `command_exec`. | Type of event |
 | `action` | `block` (refused) or `log` (allowed and recorded). | Success and failure indication |
 | `client_ip` | `REMOTE_ADDR` as PHP sees it. Behind a proxy or CDN this is the proxy's address. | Origination of event |
@@ -220,9 +220,9 @@ Sample lines from a lab run (PHP 7.4, php-fpm; keys are written in sorted
 order):
 
 ```json
-{"action":"block","client_ip":"203.0.113.7","layer":1,"method":"POST","reason":"multipart part count exceeds limit","request_id":"12feab0bc42ea29d0","rule":"max_parts","schema":2,"ts":"1792862615157","uri":"/index.php","version":"1.3.0"}
-{"action":"log","client_ip":"203.0.113.7","layer":2,"method":"GET","reason":"sql_injection pattern in get variable 'q'","request_id":"1aa8be308b30a2f10","rule":"sql_injection","schema":2,"ts":"1792862615161","uri":"/index.php","version":"1.3.0"}
-{"action":"log","client_ip":"203.0.113.7","layer":3,"method":"GET","reason":"non-allowlisted command via system","request_id":"16fbb40494928d080","rule":"command_exec","schema":2,"ts":"1792862615164","uri":"/index.php","version":"1.3.0"}
+{"action":"block","client_ip":"203.0.113.7","layer":1,"method":"POST","reason":"multipart part count exceeds limit","request_id":"11eccf6d90ad2987d","rule":"max_parts","schema":2,"ts":"1792864974141","uri":"/index.php","version":"1.4.0"}
+{"action":"log","client_ip":"203.0.113.7","layer":2,"method":"GET","reason":"sql_injection pattern in get variable 'q'","request_id":"1a2d239820e2f06bc","rule":"sql_injection","schema":2,"ts":"1792864974146","uri":"/index.php","version":"1.4.0"}
+{"action":"log","client_ip":"203.0.113.7","layer":3,"method":"GET","reason":"non-allowlisted command via system","request_id":"1fa7c36ea3c170856","rule":"command_exec","schema":2,"ts":"1792864974151","uri":"/index.php","version":"1.4.0"}
 ```
 
 Layers 1 and 2 write at most one line per request: the most severe hit. Each

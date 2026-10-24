@@ -155,7 +155,7 @@ const compare = [
           <p>Layer 2 has its own <code>inspect.mode</code>, which defaults to <code>detect</code> (log only). It is independent of the global <code>howdah.mode</code>: setting <code>howdah.mode = block</code> does <strong>not</strong> arm it. To block, an operator sets <code>inspect.mode</code>, or one class, to <code>block</code> explicitly.</p>
           <h3 style="margin-top:1.5rem">What a detection looks like</h3>
           <p>One JSON log line carrying the rule class, the source (<code>get</code>, <code>post</code>, <code>cookie</code> or <code>path</code>) and the variable name. The matched value is never logged.</p>
-          <pre tabindex="0" data-sample="event"><code>{`{"action":"log","client_ip":"203.0.113.7","layer":2,"method":"GET","reason":"sql_injection pattern in get variable 'q'","request_id":"1aa8be308b30a2f10","rule":"sql_injection","schema":2,"ts":"1792862615161","uri":"/index.php","version":"1.3.0"}`}</code></pre>
+          <pre tabindex="0" data-sample="event"><code>{`{"action":"log","client_ip":"203.0.113.7","layer":2,"method":"GET","reason":"sql_injection pattern in get variable 'q'","request_id":"1a2d239820e2f06bc","rule":"sql_injection","schema":2,"ts":"1792864974146","uri":"/index.php","version":"1.4.0"}`}</code></pre>
           <p class="legend">From a lab run (PHP 7.4, php-fpm, request <code>/index.php?q=' OR 1=1 --</code>). The query string is stripped from the logged <code>uri</code>; for a path detection the path itself is the logged URI. Every field: <a href="/docs/configuration/#log">event log reference</a>.</p>
         </div>
       </div>

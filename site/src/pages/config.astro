@@ -85,6 +85,17 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
         </fieldset>
 
         <fieldset>
+          <legend>Top-level TOML key</legend>
+          {SCHEMA.top.map((k) => (
+            <div class="ctl">
+              <label for={'t-' + k.key}><code>{k.key}</code> <span class="def">default: {k.default}</span></label>
+              <select id={'t-' + k.key} name={k.key} data-type="enum">{k.values.map((v) => <option value={v} selected={v === k.default}>{v}</option>)}</select>
+              <small>{k.note}</small>
+            </div>
+          ))}
+        </fieldset>
+
+        <fieldset>
           <legend>[limits]</legend>
           <p class="small">Any limit set to 0 is rejected by the core (0 would block every request); there is no "unlimited", set a large number instead.</p>
           {limitGroups.map((g) => (

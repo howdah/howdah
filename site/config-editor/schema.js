@@ -133,8 +133,15 @@
       note: 'One per line: a hostname (exact, case-insensitive; no wildcards), a literal IP, or a CIDR such as 10.0.0.0/8 or fd00::/8 (full address required, so 10/8 is rejected). The core rejects wildcards and out-of-range prefixes.' }
   ];
 
+  // Top-level keys of the TOML file (before any [table]), besides `mode`.
+  var TOP = [
+    { key: 'on_invalid_config', type: 'enum', values: ['block', 'off'], default: 'block',
+      note: 'Mode used if this file fails to parse. Scanned from the raw file, so it must stay on a top-level line.' }
+  ];
+
   var SCHEMA = {
     ini: INI,
+    top: TOP,
     sections: [
       { id: 'limits', title: 'Limits', keys: LIMITS,
         groups: { multipart: 'Multipart body', input: 'Input shape', headers: 'Request headers' } },
@@ -161,6 +168,7 @@
     withCatalog(catalog);
     var state = {};
     INI.forEach(function (i) { state[i.key] = i.default; });
+    TOP.forEach(function (t) { state[t.key] = t.default; });
     SCHEMA.sections.forEach(function (s) {
       s.keys.forEach(function (k) {
         state[s.id + '.' + k.key] = Array.isArray(k.default) ? k.default.slice() : k.default;

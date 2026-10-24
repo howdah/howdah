@@ -90,6 +90,13 @@
       });
     });
     var out = 'mode = ' + tomlString(String(state['howdah.mode'] || 'detect')) + '\n';
+    S.top.forEach(function (k) {
+      var v = state[k.key];
+      if (v === undefined) v = k.default;
+      var isDefault = sameValue(v, k.default);
+      if (isDefault && !includeDefaults) return;
+      out += (isDefault ? '# ' : '') + k.key + ' = ' + tomlValue(k.type, v) + '\n';
+    });
     tables.forEach(function (t) {
       if (!t.lines.length) return;
       out += '\n[' + t.name + ']\n';
@@ -137,6 +144,7 @@
     if (unsupported.length) return { unsupported: unsupported };
     var state = SCHEMA_API.defaultState(catalog);
     state['howdah.mode'] = config.mode;
+    if (config.on_invalid_config) state.on_invalid_config = config.on_invalid_config;
     SCHEMA_API.SCHEMA.sections.forEach(function (sec) {
       sec.keys.forEach(function (k) {
         var path = [sec.id].concat(k.key.split('.'));

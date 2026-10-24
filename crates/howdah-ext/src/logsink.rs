@@ -8,14 +8,15 @@
 //! take PHP down: every failure falls back to stderr with a loud note.
 
 use std::collections::VecDeque;
+use std::ffi::CString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::{UnixDatagram, UnixStream};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::net::UnixDatagram;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use howdah_core::{LogConfig, LogDestination, SyslogFacility};
@@ -24,9 +25,8 @@ use howdah_core::{LogConfig, LogDestination, SyslogFacility};
 pub const SYSLOG_SOCKET: &str = "/dev/log";
 /// The only PATH a hook sees (fixed, not inherited from PHP).
 pub const HOOK_PATH_ENV: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
-/// Most hook processes that may be running at once per PHP process; beyond
-/// this an event's hook is skipped (the event is still logged).
-pub const MAX_IN_FLIGHT: usize = 64;
+/// Mode of a log file Howdah creates (the process umask still applies).
+pub const LOG_FILE_MODE: u32 = 0o640;
 
 /// A loud, un-panicking note to stderr. Never unwinds.
 pub fn loud_error(msg: &str) {
@@ -41,12 +41,13 @@ pub fn stderr_line(line: &str) {
 /// Append `line` plus a newline in ONE write on an `O_APPEND` descriptor, so
 /// lines from concurrent PHP workers never interleave. The file is opened per
 /// event (no descriptor is held), so a rotated file is picked up on the next
-/// event with no reload. A new file gets mode 0666 minus the umask.
+/// event with no reload. A new file gets mode 0640 minus the umask; an
+/// existing file keeps its mode.
 pub fn append_line(path: &str, line: &str) -> io::Result<()> {
     let mut buf = Vec::with_capacity(line.len() + 1);
     buf.extend_from_slice(line.as_bytes());
     buf.push(b'\n');
-    let mut f = OpenOptions::new().create(true).append(true).open(path)?;
+    let mut f = OpenOptions::new().create(true).append(true).mode(LOG_FILE_MODE).open(path)?;
     f.write_all(&buf)
 }
 
@@ -92,24 +93,24 @@ pub fn frame(facility: SyslogFacility, sev: u8, stamp: &str, ident: &str, pid: u
     format!("<{pri}>{stamp} {ident}[{pid}]: {line}")
 }
 
-enum Sock {
-    Dgram(UnixDatagram),
-    Stream(UnixStream),
-}
-
 /// Writes to the local syslog socket directly instead of calling openlog(3)
 /// and syslog(3). openlog state is process-wide and PHP owns it: PHP's
 /// `error_log = syslog` calls openlog with its own ident, and ext/standard
 /// calls closelog() at the end of every request (PHP 8.3
 /// `PHP_RSHUTDOWN_FUNCTION(syslog)`), which resets the ident. Sharing it
 /// would relabel PHP's messages as `howdah` or ours as `php-fpm`.
+///
+/// Datagram only. glibc falls back to a stream socket when `/dev/log` is one
+/// (some syslog-ng setups), but a stream connect or send can block the
+/// request; a non-blocking datagram cannot. Against a stream socket the
+/// connect fails at once (EPROTOTYPE) and the line goes to stderr.
 pub struct Syslog {
     facility: SyslogFacility,
     ident: String,
     path: PathBuf,
     /// (pid that connected it, socket). FPM workers fork after MINIT, so a
     /// socket is only reused by the process that opened it.
-    sock: Option<(u32, Sock)>,
+    sock: Option<(u32, UnixDatagram)>,
 }
 
 impl Syslog {
@@ -130,59 +131,21 @@ impl Syslog {
         &self.ident
     }
 
-    fn connect(&self) -> io::Result<Sock> {
+    fn connect(&self) -> io::Result<UnixDatagram> {
         let d = UnixDatagram::unbound()?;
-        match d.connect(&self.path) {
-            Ok(()) => {
-                // A full receive queue (a stalled daemon) must not stall PHP:
-                // the send fails with EWOULDBLOCK and the line goes to stderr.
-                d.set_nonblocking(true)?;
-                Ok(Sock::Dgram(d))
-            }
-            // Some syslog-ng setups listen on a stream socket; glibc falls
-            // back the same way.
-            Err(e) if e.raw_os_error() == Some(libc::EPROTOTYPE) => {
-                let s = UnixStream::connect(&self.path)?;
-                s.set_write_timeout(Some(Duration::from_millis(100)))?;
-                Ok(Sock::Stream(s))
-            }
-            Err(e) => Err(e),
-        }
+        // A full receive queue (a stalled daemon) must not stall PHP: the
+        // send fails with EWOULDBLOCK and the line goes to stderr.
+        d.set_nonblocking(true)?;
+        d.connect(&self.path)?;
+        Ok(d)
     }
 
-    fn send_on(sock: &mut Sock, msg: &[u8]) -> io::Result<()> {
-        match sock {
-            Sock::Dgram(d) => {
-                let n = d.send(msg)?;
-                if n == msg.len() {
-                    Ok(())
-                } else {
-                    Err(io::Error::other("short syslog datagram"))
-                }
-            }
-            Sock::Stream(s) => {
-                // Stream framing is NUL-terminated (as glibc sends it).
-                // MSG_NOSIGNAL: a closed peer must not raise SIGPIPE in PHP.
-                let mut buf = Vec::with_capacity(msg.len() + 1);
-                buf.extend_from_slice(msg);
-                buf.push(0);
-                let mut off = 0;
-                while off < buf.len() {
-                    // SAFETY: the pointer/length pair is a live slice of `buf`.
-                    let n = unsafe {
-                        libc::send(s.as_raw_fd(), buf[off..].as_ptr().cast(), buf.len() - off, libc::MSG_NOSIGNAL)
-                    };
-                    if n < 0 {
-                        let e = io::Error::last_os_error();
-                        if e.kind() == io::ErrorKind::Interrupted {
-                            continue;
-                        }
-                        return Err(e);
-                    }
-                    off += n as usize;
-                }
-                Ok(())
-            }
+    fn send_on(d: &UnixDatagram, msg: &[u8]) -> io::Result<()> {
+        let n = d.send(msg)?;
+        if n == msg.len() {
+            Ok(())
+        } else {
+            Err(io::Error::other("short syslog datagram"))
         }
     }
 
@@ -217,14 +180,13 @@ impl Syslog {
 /// What happened to one event's hook.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fired {
-    /// A hook process was started (it runs detached; it is not waited for).
+    /// A hook process was started. It runs detached (double-forked, so it is
+    /// never a child of the PHP worker) and is not waited for.
     Spawned,
-    /// More than `exec_rate_limit` spawns in the last second; skipped.
+    /// More than `exec_rate_limit` starts in the last second; skipped.
     RateLimited,
-    /// `MAX_IN_FLIGHT` hook processes are still running; skipped.
-    Busy,
-    /// The program is missing, not executable or world-writable. Checked once
-    /// per PHP process; a refused hook stays refused until PHP restarts.
+    /// The program failed the checks of [`open_checked`]. They run on every
+    /// event, so a fix takes effect at the next one.
     Refused(String),
     /// fork/exec failed, or the line did not fit in the pipe buffer.
     Failed(String),
@@ -235,21 +197,14 @@ pub struct Hook {
     path: String,
     limit: u32,
     recent: VecDeque<Instant>,
-    children: Vec<Child>,
-    verdict: Option<Result<(), String>>,
+    /// The refusal last reported on stderr; reported again only if it changes.
+    refused: Option<String>,
     noted: bool,
 }
 
 impl Hook {
     pub fn new(path: &str, limit: u32) -> Hook {
-        Hook {
-            path: path.to_string(),
-            limit: limit.max(1),
-            recent: VecDeque::new(),
-            children: Vec::new(),
-            verdict: None,
-            noted: false,
-        }
+        Hook { path: path.to_string(), limit: limit.max(1), recent: VecDeque::new(), refused: None, noted: false }
     }
 
     pub fn path(&self) -> &str {
@@ -258,17 +213,6 @@ impl Hook {
 
     pub fn limit(&self) -> u32 {
         self.limit
-    }
-
-    /// Hook processes started by this PHP process and not yet reaped.
-    pub fn in_flight(&self) -> usize {
-        self.children.len()
-    }
-
-    /// Collect finished hook processes (non-blocking), so none linger as
-    /// zombies. Only our own children are waited for, by pid.
-    pub fn reap(&mut self) {
-        self.children.retain_mut(|c| matches!(c.try_wait(), Ok(None)));
     }
 
     /// Sliding window: true if fewer than `limit` spawns in the last second.
@@ -290,21 +234,8 @@ impl Hook {
 
     /// Run the hook for one event line. Never waits for the hook to finish.
     pub fn fire(&mut self, line: &str) -> Fired {
-        match &self.verdict {
-            Some(Err(e)) => return Fired::Refused(e.clone()),
-            Some(Ok(())) => {}
-            None => {
-                let v = check_program(&self.path);
-                if let Err(e) = &v {
-                    loud_error(&format!("[log] exec '{}' will not be run: {e}", self.path));
-                }
-                self.verdict = Some(v.clone());
-                if let Err(e) = v {
-                    return Fired::Refused(e);
-                }
-            }
-        }
-        self.reap();
+        // The rate limit comes first, so it also bounds the checks below to
+        // `limit` per second.
         if !self.allow(Instant::now()) {
             if !self.noted {
                 self.noted = true;
@@ -315,44 +246,96 @@ impl Hook {
             }
             return Fired::RateLimited;
         }
-        if self.children.len() >= MAX_IN_FLIGHT {
-            if !self.noted {
-                self.noted = true;
-                loud_error(&format!(
-                    "[log] exec: {MAX_IN_FLIGHT} hook processes still running; skipping the hook for further events until they exit"
-                ));
+        let prog = match open_checked(&self.path) {
+            Ok(fd) => {
+                self.refused = None;
+                fd
             }
-            return Fired::Busy;
-        }
-        match spawn(&self.path, line) {
-            Ok(c) => {
-                self.children.push(c);
+            Err(e) => {
+                if self.refused.as_deref() != Some(e.as_str()) {
+                    loud_error(&format!("[log] exec '{}' will not be run: {e}", self.path));
+                    self.refused = Some(e.clone());
+                }
+                return Fired::Refused(e);
+            }
+        };
+        match spawn_checked(&self.path, prog, line) {
+            Ok(()) => {
                 self.noted = false;
                 Fired::Spawned
             }
             Err(e) => {
-                loud_error(&format!("[log] exec '{}' failed: {e}", self.path));
+                let hint = if e.kind() == io::ErrorKind::NotFound {
+                    " (it is started through /proc/self/fd, so /proc must be mounted)"
+                } else {
+                    ""
+                };
+                loud_error(&format!("[log] exec '{}' failed: {e}{hint}", self.path));
                 Fired::Failed(e.to_string())
             }
         }
     }
 }
 
-/// The hook must be an existing, executable regular file that not everyone
-/// can rewrite (it runs on attacker-triggered events as the PHP user).
-fn check_program(path: &str) -> Result<(), String> {
-    let md = fs::metadata(path).map_err(|e| format!("cannot stat it: {e}"))?;
-    if !md.is_file() {
+/// Open the hook program and check it through the descriptor, not the path,
+/// so the checks and the exec see the same inode. Refuses:
+/// - a symlink as the program path (`O_NOFOLLOW`);
+/// - anything but an executable regular file;
+/// - a group- or world-writable file, or one owned by anyone but root or the
+///   user PHP runs as;
+/// - a file in a group- or world-writable directory, where it could be
+///   swapped before the next event.
+///
+/// The descriptor is `O_PATH` and close-on-exec; [`spawn_checked`] runs it.
+pub fn open_checked(path: &str) -> Result<OwnedFd, String> {
+    let c = CString::new(path).map_err(|_| "the path contains a NUL byte".to_string())?;
+    // SAFETY: `c` is a valid NUL-terminated string for the call.
+    let raw = unsafe { libc::open(c.as_ptr(), libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+    if raw < 0 {
+        let e = io::Error::last_os_error();
+        return Err(if e.raw_os_error() == Some(libc::ELOOP) {
+            "it is a symlink; name the real file".to_string()
+        } else {
+            format!("cannot open it: {e}")
+        });
+    }
+    // SAFETY: `raw` was just opened and is owned by nobody else.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    // SAFETY: fstat writes only into `st`.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
+        return Err(format!("cannot stat it: {}", io::Error::last_os_error()));
+    }
+    // With O_PATH, O_NOFOLLOW opens a symlink itself rather than failing.
+    if st.st_mode & libc::S_IFMT == libc::S_IFLNK {
+        return Err("it is a symlink; name the real file".into());
+    }
+    if st.st_mode & libc::S_IFMT != libc::S_IFREG {
         return Err("not a regular file".into());
     }
-    let mode = md.permissions().mode();
-    if mode & 0o111 == 0 {
+    if st.st_mode & 0o111 == 0 {
         return Err("not executable".into());
     }
-    if mode & 0o002 != 0 {
-        return Err("it is world-writable; chmod o-w it (and keep it owned by root)".into());
+    if st.st_mode & 0o022 != 0 {
+        return Err("it is group- or world-writable; chmod go-w it (and keep it owned by root)".into());
     }
-    Ok(())
+    // SAFETY: geteuid has no preconditions.
+    let euid = unsafe { libc::geteuid() };
+    if st.st_uid != 0 && st.st_uid != euid {
+        return Err(format!("it is owned by uid {}, not by root or the PHP user (uid {euid})", st.st_uid));
+    }
+    let dir = Path::new(path).parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("/"));
+    let dmode = fs::metadata(dir)
+        .map_err(|e| format!("cannot stat its directory {}: {e}", dir.display()))?
+        .permissions()
+        .mode();
+    if dmode & 0o022 != 0 {
+        return Err(format!(
+            "its directory {} is group- or world-writable, so the file could be swapped",
+            dir.display()
+        ));
+    }
+    Ok(fd)
 }
 
 /// `rule` and `action` from an event line, restricted to `[a-z0-9_]` (they
@@ -370,24 +353,31 @@ pub fn rule_action(line: &str) -> (String, String) {
     (clean("rule"), clean("action"))
 }
 
-/// Descriptors open in this process (to be marked close-on-exec in the hook
-/// child). Read in the parent, where allocating is safe.
-fn open_fds() -> Vec<i32> {
+/// Descriptors to mark close-on-exec in the hook child when `close_range`
+/// is not available (Linux before 5.11). Computed in the parent, where
+/// allocating is safe.
+enum Sweep {
+    /// The descriptors listed in `/proc/self/fd`.
+    List(Vec<i32>),
+    /// No /proc (a chroot): every number from 3 below this bound.
+    Upto(i32),
+}
+
+fn sweep() -> Sweep {
     if let Ok(rd) = fs::read_dir("/proc/self/fd") {
-        return rd
-            .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
-            .filter(|&fd| fd > 2)
-            .collect();
+        return Sweep::List(
+            rd.filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok()).filter(|&fd| fd > 2).collect(),
+        );
     }
-    // No /proc (a chroot): sweep up to the soft limit, capped.
     let mut rl = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
     // SAFETY: getrlimit writes only into `rl`.
     let max = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) } == 0 {
-        rl.rlim_cur.min(4096) as i32
+        // RLIM_INFINITY is clamped to the kernel's own ceiling (NR_OPEN).
+        rl.rlim_cur.min(1 << 20) as i32
     } else {
-        1024
+        1 << 20
     };
-    (3..max).collect()
+    Sweep::Upto(max)
 }
 
 /// A close-on-exec pipe, read end first.
@@ -401,7 +391,11 @@ fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }
 
-fn spawn(path: &str, line: &str) -> io::Result<Child> {
+/// Start the program `prog` (from [`open_checked`]) with `line` on stdin, and
+/// return once it has been exec'd. It is run through `/proc/self/fd/N`, so
+/// the inode that passed the checks is the one that runs, even if `path`
+/// is replaced in between. `path` is only its `argv[0]`.
+pub fn spawn_checked(path: &str, prog: OwnedFd, line: &str) -> io::Result<()> {
     let (rule, action) = rule_action(line);
     let mut buf = Vec::with_capacity(line.len() + 1);
     buf.extend_from_slice(line.as_bytes());
@@ -426,9 +420,11 @@ fn spawn(path: &str, line: &str) -> io::Result<Child> {
     }
     drop(w); // the hook sees the line, then EOF
 
-    let fds = open_fds();
-    let mut cmd = Command::new(path);
-    cmd.env_clear()
+    let sweep = sweep();
+    let prog_fd = prog.as_raw_fd();
+    let mut cmd = Command::new(format!("/proc/self/fd/{prog_fd}"));
+    cmd.arg0(path)
+        .env_clear()
         .env("PATH", HOOK_PATH_ENV)
         .env("HOWDAH_RULE", rule)
         .env("HOWDAH_ACTION", action)
@@ -437,21 +433,56 @@ fn spawn(path: &str, line: &str) -> io::Result<Child> {
         .stdout(Stdio::null())
         // stderr is inherited: the web server or FPM error log, for debugging.
         .current_dir("/");
-    // SAFETY: runs in the forked child before exec, and calls only
-    // async-signal-safe functions (setsid, fcntl) on data prepared above.
+    // SAFETY: runs in the forked child before exec and calls only
+    // async-signal-safe functions (syscall, fcntl, fork, _exit, setsid) on
+    // data prepared above; nothing allocates.
     unsafe {
         cmd.pre_exec(move || {
+            // Whatever PHP left open without close-on-exec (client sockets,
+            // database connections, files) must not leak into the hook:
+            // close_range in one call (Linux 5.11+), else one fcntl each.
+            let all = libc::syscall(
+                libc::SYS_close_range,
+                3 as libc::c_uint,
+                libc::c_uint::MAX,
+                libc::CLOSE_RANGE_CLOEXEC,
+            );
+            if all != 0 {
+                match &sweep {
+                    Sweep::List(fds) => {
+                        for &fd in fds {
+                            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                        }
+                    }
+                    Sweep::Upto(max) => {
+                        for fd in 3..*max {
+                            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                        }
+                    }
+                }
+            }
+            // ...except the checked program: the kernel, and for a script its
+            // interpreter, open it through /proc/self/fd.
+            libc::fcntl(prog_fd, libc::F_SETFD, 0);
+            // Double fork: this middle process exits at once and is reaped
+            // below; the hook is re-parented to init (or a subreaper) and is
+            // never a child, or a zombie, of the PHP worker.
+            match libc::fork() {
+                -1 => return Err(io::Error::last_os_error()),
+                0 => {}
+                _ => libc::_exit(0),
+            }
             // Own session: no controlling terminal, not in PHP's process group.
             libc::setsid();
-            // Whatever PHP left open without close-on-exec (client sockets,
-            // database connections, files) must not leak into the hook.
-            for &fd in &fds {
-                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
-            }
             Ok(())
         });
     }
-    cmd.spawn()
+    let mut middle = cmd.spawn()?;
+    drop(prog);
+    // The middle process exits right after its fork, so this returns at once.
+    // (If PHP ignores SIGCHLD it was already reaped and this is ECHILD.)
+    let _ = middle.wait();
+    Ok(())
 }
 
 // ---- resolved settings ------------------------------------------------------
@@ -540,20 +571,12 @@ impl Settings {
             let _ = h.fire(line);
         }
     }
-
-    /// Reap finished hook processes (called at request shutdown).
-    pub fn reap(&mut self) {
-        if let Some(h) = self.hook.as_mut() {
-            h.reap();
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use howdah_core::Config;
-    use std::io::Read;
     use std::os::unix::net::UnixListener;
 
     const LINE: &str = r#"{"action":"block","client_ip":"203.0.113.7","layer":1,"method":"POST","reason":"r","request_id":"1a2b","rule":"max_parts","schema":2,"ts":"1761318132123","uri":"/upload.php","version":"1.3.0"}"#;
@@ -671,23 +694,32 @@ mod tests {
         let _ = fs::remove_file(&p);
     }
 
+    /// A stream socket at the syslog path (some syslog-ng setups) is not
+    /// used: the datagram connect fails at once and nothing waits on a
+    /// listener that never accepts.
     #[test]
-    fn syslog_stream_socket_fallback() {
+    fn stream_socket_is_refused_not_waited_on() {
         let p = tmp("stream.sock");
-        let l = UnixListener::bind(&p).unwrap();
-        let t = std::thread::spawn(move || {
-            let (mut c, _) = l.accept().unwrap();
-            let mut got = Vec::new();
-            let mut b = [0u8; 1];
-            while c.read(&mut b).unwrap() == 1 && b[0] != 0 {
-                got.push(b[0]);
-            }
-            String::from_utf8(got).unwrap()
-        });
+        let _l = UnixListener::bind(&p).unwrap(); // never accepts
         let mut s = Syslog::with_socket(SyslogFacility::Local0, "howdah", &p);
-        s.send(LINE).unwrap();
-        let msg = t.join().unwrap();
-        assert!(msg.starts_with("<132>") && msg.ends_with(LINE), "{msg}");
+        let t = Instant::now();
+        let e = s.send(LINE).unwrap_err();
+        assert!(t.elapsed() < Duration::from_millis(500), "send waited {:?}", t.elapsed());
+        assert_eq!(e.raw_os_error(), Some(libc::EPROTOTYPE), "{e}");
+        let _ = fs::remove_file(&p);
+    }
+
+    /// A log file Howdah creates is 0640 at most (the umask can only remove
+    /// bits); an existing file keeps its mode.
+    #[test]
+    fn new_log_file_is_not_world_readable() {
+        let p = tmp("mode.log");
+        append_line(&p, "{}").unwrap();
+        let mode = fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode & !LOG_FILE_MODE, 0, "mode {mode:o} has bits beyond 0640");
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o600)).unwrap();
+        append_line(&p, "{}").unwrap();
+        assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
         let _ = fs::remove_file(&p);
     }
 

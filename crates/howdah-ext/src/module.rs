@@ -202,13 +202,6 @@ unsafe extern "C" fn rshutdown(_type: c_int, _module_number: c_int) -> c_int {
             let _ = catch_unwind(AssertUnwindSafe(|| response::emit_block(status, &request_id)));
         }
     }
-    // Collect finished `[log] exec` hook processes (non-blocking; a no-op
-    // without a hook) so none linger as zombies in a long-lived worker.
-    let _ = catch_unwind(AssertUnwindSafe(|| {
-        if let Some(s) = (*ptr::addr_of_mut!(LOG)).as_mut() {
-            s.reap();
-        }
-    }));
     clear_request_state();
     SUCCESS
 }

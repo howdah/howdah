@@ -6,6 +6,8 @@
 //!
 //! One test function: it forks, which must not race other tests' threads.
 
+#![cfg(target_os = "linux")]
+
 use howdah_core::log::new_request_id;
 
 #[test]

@@ -45,7 +45,8 @@ extern "C" {
     /// swap `file_put_contents`/`move_uploaded_file`/`rename` onto their
     /// php-write trampolines (fopen is already swapped by the SSRF install, so
     /// its php-write branch goes live once these callbacks are set). Call once at
-    /// first RINIT, AFTER `howdah_install_ssrf_hooks`. Parameter order mirrors
+    /// first RINIT, AFTER `howdah_install_ssrf_hooks` (same first-RINIT install
+    /// as the phar/ssrf hooks, for shared-extension load order). Parameter order mirrors
     /// `howdah_install_behavior_hooks` in `howdah_sink.h` exactly. A NULL
     /// callback leaves that facet unguarded (fail-open).
     pub fn howdah_install_behavior_hooks(

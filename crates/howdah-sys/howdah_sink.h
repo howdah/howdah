@@ -45,8 +45,9 @@ extern howdah_behavior_php_write_t howdah_g_behavior_php_write;
 /* Set the five behavior callbacks AND swap file_put_contents / move_uploaded_file
  * / rename onto their php-write trampolines (fopen is already swapped by the SSRF
  * install, so its php-write branch goes live as soon as the callbacks are set).
- * Call once at MINIT, after howdah_install_ssrf_hooks. Implemented in
- * ssrf_hook.c. A NULL callback leaves that facet unguarded (fail-open). */
+ * Call once at first RINIT, after howdah_install_ssrf_hooks (same first-RINIT
+ * install as the phar/ssrf hooks, for shared-extension load order). Implemented
+ * in ssrf_hook.c. A NULL callback leaves that facet unguarded (fail-open). */
 void howdah_install_behavior_hooks(howdah_behavior_armed_t armed,
                                    howdah_behavior_exec_dir_t exec_dir,
                                    howdah_behavior_binary_t binary,

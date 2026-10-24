@@ -218,13 +218,20 @@ unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
                 sys::howdah_install_phar_hook(crate::sink_filter::decide);
             }
             // SSRF trampolines: install when the L3 SSRF sink is armed OR the L4
-            // behavior egress facet is armed. Egress-only operation (SSRF off)
-            // needs these trampolines in place, and `ssrf_filter::armed` is
+            // behavior egress / php-write facet is armed. Egress-only operation
+            // (SSRF off) needs these trampolines, and `ssrf_filter::armed` is
             // widened to keep the C `g_armed` short-circuit open for it. The
-            // SSRF install is also what swaps `fopen`, so it must run before the
-            // behavior install below (whose fopen php-write branch rides on it).
+            // SSRF install is ALSO what swaps `fopen`, whose php-write branch
+            // (gated on behavior_armed(PHP_WRITE)) is the only way php-write-only
+            // mode sees `fopen($p,'w')` — so a PHP_WRITE-armed config must reach
+            // here too. This runs BEFORE the behavior install below so fopen is
+            // swapped before the php-write callback goes live. In php-write-only
+            // mode `ssrf_filter::armed` still returns 0 (ssrf+egress off), so the
+            // fopen SSRF branch short-circuits before any DNS/block work; only
+            // the php-write branch activates.
             if core::howdah_sink_armed(CTX, core::HOWDAH_SINK_SSRF) != 0
                 || core::howdah_behavior_egress_active(CTX) != 0
+                || core::howdah_behavior_armed(CTX, core::HOWDAH_BEHAVIOR_PHP_WRITE) != 0
             {
                 sys::howdah_install_ssrf_hooks(
                     crate::ssrf_filter::decide,

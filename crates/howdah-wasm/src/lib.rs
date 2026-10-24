@@ -278,8 +278,10 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&rule_catalog_json()).unwrap();
         let rules = v.as_array().unwrap();
         let names: Vec<&str> = rules.iter().map(|r| r["name"].as_str().unwrap()).collect();
-        assert_eq!(names.len(), 24, "{names:?}");
+        assert_eq!(names.len(), 28, "{names:?}");
         assert!(names.contains(&"max_parts") && names.contains(&"unserialize") && names.contains(&"ssrf"));
+        // Layer 4 (1.4) rule ids must reach the wasm catalog the config editor reads.
+        assert!(names.contains(&"upload_exec") && names.contains(&"php_write"));
         assert_eq!(v[0]["name"], "max_parts");
         assert_eq!(v[0]["severity"], "critical");
         let malformed = rules.iter().find(|r| r["name"] == "malformed_multipart").unwrap();

@@ -174,6 +174,12 @@ static int howdah_include_or_eval(zend_execute_data *execute_data) {
         const char *name = is_eval ? "eval" : "include";
         int d = howdah_g_decide(sink, name, strlen(name), Z_STRVAL_P(v), Z_STRLEN_P(v));
         if (d == HOWDAH_ACTION_BLOCK) {
+            /* Free a computed op1 (IS_TMP_VAR/IS_VAR, e.g. `include $a.$b`) that
+             * the skipped opcode would otherwise have freed — avoids a bounded
+             * per-blocked-call leak. CV/CONST operands own nothing to free. */
+            if (opline->op1_type & (IS_TMP_VAR | IS_VAR)) {
+                zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+            }
             if (opline->result_type != IS_UNUSED) {
                 ZVAL_NULL(EX_VAR(opline->result.var));
             }

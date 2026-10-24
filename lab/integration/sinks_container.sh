@@ -112,6 +112,13 @@ else
   grep -q '"rule":"eval"' "$LOG" || fail "9: no eval rule"
   grep -q '"action":"block"' "$LOG" || fail "9: no action:block"
   echo "  ok   - eval block: neutralized (eval did not run, script continued)"
+
+  # 10. include block with a COMPUTED operand ($a.$b is IS_TMP_VAR): the opcode
+  # handler must free op1 before skipping (no leak) and must not crash.
+  run_php '[sinks.include]\nmode="block"\nallow_paths=["/var/www/app"]\n' '$a="/tmp/"; $b="nope.php"; $r = include $a.$b; echo "RET[".var_export($r,true)."] COMPUTED_OK\n";'
+  grep -q 'COMPUTED_OK' "$WORK/out.txt" || fail "10: computed-operand include block crashed or did not continue"
+  grep -q '"action":"block"' "$LOG" || fail "10: no action:block for computed include"
+  echo "  ok   - include block (computed operand): neutralized, freed, no crash"
 fi
 
 echo "PASS"

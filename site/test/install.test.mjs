@@ -21,7 +21,7 @@ const script = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)]
 function pick(choices) {
   const state = { os: 'debian', src_deb: 'sury', xenial: false, minor: '8.1', sapi: 'fpm', panel_os: 'el', ...choices };
   const node = () => ({ hidden: false, innerHTML: '', textContent: '' });
-  const nodes = { 'result-steps': node(), 'cgi-note': node(), 'distro-note': node(), 'layout-note': node() };
+  const nodes = { 'result-steps': node(), 'cgi-note': node(), 'distro-note': node(), 'layout-note': node(), 'docker-note': node() };
   const fieldsets = [...html.matchAll(/<fieldset data-when-os="([^"]+)"/g)]
     .map((m) => ({ when: m[1], hidden: false, getAttribute: () => m[1] }));
   let onChange = null;
@@ -40,8 +40,9 @@ function pick(choices) {
   const text = nodes['result-steps'].innerHTML.replace(/<[^>]+>/g, '\n')
     .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
   const shown = fieldsets.filter((f) => !f.hidden).map((f) => f.when);
-  return { text, shown, layoutNote: !nodes['layout-note'].hidden, distroNote: !nodes['distro-note'].hidden };
+  return { text, shown, layoutNote: !nodes['layout-note'].hidden, distroNote: !nodes['distro-note'].hidden, dockerNote: !nodes['docker-note'].hidden };
 }
+const VERSION = readFileSync(resolve(site, 'src/lib/site.ts'), 'utf8').match(/VERSION = '([^']+)'/)[1];
 const has = (t, s) => assert.ok(t.includes(s), `missing: ${s}\n--- got:\n${t}`);
 
 test('the install page is built with the picker script', () => {
@@ -49,8 +50,8 @@ test('the install page is built with the picker script', () => {
   assert.ok(script.length > 0, 'picker script not found');
 });
 
-test('the OS step offers cPanel, Plesk, CloudLinux and distribution EL PHP', () => {
-  for (const v of ['debian', 'rhel', 'el', 'cpanel', 'plesk', 'cloudlinux', 'other']) {
+test('the OS step offers cPanel, Plesk, CloudLinux, distribution EL PHP and Docker', () => {
+  for (const v of ['debian', 'rhel', 'el', 'cpanel', 'plesk', 'cloudlinux', 'docker', 'other']) {
     assert.match(html, new RegExp(`name="os" value="${v}"`), `os option ${v}`);
   }
   assert.match(html, /name="panel_os" value="el"/);
@@ -106,6 +107,34 @@ test('distribution EL PHP: one repository per minor, php-howdah', () => {
   has(text, 'sudo dnf install php-howdah');
   has(text, 'php --ri howdah');
   has(text, 'sudo systemctl reload php-fpm');
+});
+
+test('Docker: the image, the one-line COPY --from, verify, and the not-yet-published note', () => {
+  const img = `ghcr.io/howdah/howdah:${VERSION}-php8.3`;
+  let { text, shown, dockerNote, layoutNote } = pick({ os: 'docker', minor: '8.3' });
+  has(text, `FROM ${img}`);
+  has(text, 'FROM php:8.3-fpm');
+  has(text, `COPY --from=${img} /howdah/ /`);
+  has(text, `docker run --rm ${img} php --ri howdah`);
+  has(text, `${img} howdah-check web http://`);
+  has(text, `${VERSION}-php8.3-alpine`);
+  has(text, 'Not onto a');
+  assert.ok(dockerNote, 'the Docker note (publishing status, build-it-yourself, guide link) is shown');
+  assert.ok(!layoutNote, 'the panel repository note is not shown');
+  assert.ok(!shown.includes('cpanel plesk') && !shown.includes('debian'), 'no OS-source question for Docker');
+  // Apache: no ready image, the COPY --from line onto php:<minor>-apache
+  ({ text } = pick({ os: 'docker', minor: '7.4', sapi: 'apache' }));
+  has(text, 'FROM php:7.4-apache');
+  has(text, `COPY --from=ghcr.io/howdah/howdah:${VERSION}-php7.4 /howdah/ /`);
+  assert.ok(!text.includes(`FROM ghcr.io/howdah/howdah:${VERSION}-php7.4\n`), 'no fpm image offered for Apache');
+  // 5.4 / 5.5: no image, honest fallback to the tarball
+  for (const m of ['5.4', '5.5']) {
+    ({ text } = pick({ os: 'docker', minor: m }));
+    has(text, `No image for PHP ${m}`);
+    assert.ok(!text.includes('ghcr.io/howdah/howdah'), `no image tag offered for ${m}`);
+  }
+  assert.ok(!pick({ os: 'debian' }).dockerNote, 'the Docker note is hidden for other choices');
+  assert.match(html, /href="https:\/\/github.com\/howdah\/howdah\/blob\/main\/docs\/install-docker.md"/);
 });
 
 test('existing choices are unchanged', () => {

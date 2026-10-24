@@ -19,9 +19,14 @@
 #                    packaging/release.aarch64.Dockerfile under --platform linux/arm64
 #                    (QEMU locally, native on an arm64 runner); every minor uses
 #                    from-source PHP headers (Remi has no aarch64 EL7 packages).
+#   HOWDAH_LIBC      glibc (default) or musl. musl (x86_64 only) builds for Alpine
+#                    in packaging/release.musl.Dockerfile, every minor from
+#                    source headers, and names the tarball ...-linux-x86_64-musl.tar.gz.
+#                    glibc is exactly the historical behavior.
 #
 # Output: packaging/out/
 #   howdah-<version>-php<minor>-<api>-linux-<arch>.tar.gz   (per minor; arch = x86_64|aarch64)
+#   howdah-<version>-php<minor>-<api>-linux-x86_64-musl.tar.gz  (HOWDAH_LIBC=musl)
 #   howdah-check                                            (standalone, top-level)
 #   build-report.tsv                                        (what was built)
 # Signing (SHA256SUMS + detached signature) is a separate step: packaging/sign.sh
@@ -47,6 +52,21 @@ case "$ARCH" in
   *) echo "FATAL: unsupported HOWDAH_ARCH '$ARCH' (x86_64|aarch64)" >&2; exit 2 ;;
 esac
 
+# Target libc. glibc (default) changes nothing above; musl swaps in the Alpine
+# build image and the -musl tarball suffix.
+LIBC="${HOWDAH_LIBC:-glibc}"
+SUFFIX="linux-$ARCH"
+case "$LIBC" in
+  glibc) ;;
+  musl)
+    [ "$ARCH" = x86_64 ] || { echo "FATAL: HOWDAH_LIBC=musl is built for x86_64 only" >&2; exit 2; }
+    IMAGE="${HOWDAH_RELEASE_IMAGE:-howdah-release-musl}"
+    DOCKERFILE="$REPO_ROOT/packaging/release.musl.Dockerfile"
+    SUFFIX="linux-$ARCH-musl"
+    ;;
+  *) echo "FATAL: unsupported HOWDAH_LIBC '$LIBC' (glibc|musl)" >&2; exit 2 ;;
+esac
+
 # Full supported matrix (PHP 5.4 .. 8.5). Default build set when none given.
 ALL_MINORS=(5.4 5.5 5.6 7.0 7.1 7.2 7.3 7.4 8.0 8.1 8.2 8.3 8.4 8.5)
 
@@ -68,7 +88,8 @@ php_src_pin() {
 
 # aarch64 has no Remi EL7 packages, so EVERY minor builds from source headers.
 # Same rules as php_src_pin (real current patch + sha256) for the minors the
-# x86_64 path takes from Remi (5.4 .. 8.1); 8.2+ reuse php_src_pin.
+# x86_64 path takes from Remi (5.4 .. 8.1); 8.2+ reuse php_src_pin. The musl
+# build (Alpine, no Remi either) uses this list too.
 php_src_pin_aarch64() {
   case "$1" in
     5.4) echo "5.4.45 25bc4723955f4e352935258002af14a14a9810b491a19400d76fcdfa9d04b28f" ;;
@@ -91,6 +112,7 @@ MINORS=("$@")
 HOWDAH_VERSION="${HOWDAH_VERSION:-$(grep -m1 '^version' "$REPO_ROOT/Cargo.toml" | sed -E 's/.*"([^"]+)".*/\1/')}"
 echo "== Howdah release build: version $HOWDAH_VERSION, minors: ${MINORS[*]}"
 [ "$ARCH" = x86_64 ] || echo "== target arch: $ARCH"
+[ "$LIBC" = glibc ] || echo "== target libc: $LIBC"
 
 mkdir -p "$OUT"
 
@@ -113,7 +135,7 @@ for minor in "${MINORS[@]}"; do
   echo "==  building PHP $minor"
   echo "======================================================================"
   src_flag=""; src_env=()
-  pin_fn=php_src_pin; [ "$ARCH" = x86_64 ] || pin_fn=php_src_pin_aarch64
+  pin_fn=php_src_pin; [ "$ARCH" = x86_64 ] && [ "$LIBC" = glibc ] || pin_fn=php_src_pin_aarch64
   if pin="$("$pin_fn" "$minor")"; then
     src_flag="--from-source"
     src_env=(-e "HOWDAH_PHP_SRC_VERSION=${pin%% *}" -e "HOWDAH_PHP_SRC_SHA256=${pin##* }")
@@ -123,7 +145,7 @@ for minor in "${MINORS[@]}"; do
   stage="$(mktemp -d)"
   if docker run --rm \
         ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} \
-        -e "HOWDAH_ARCH=$ARCH" \
+        -e "HOWDAH_ARCH=$ARCH" -e "HOWDAH_LIBC=$LIBC" \
         -v "$REPO_ROOT":/src:ro \
         -v "$stage":/out \
         -w /src \
@@ -145,17 +167,21 @@ for minor in "${MINORS[@]}"; do
     cp "$REPO_ROOT/tools/howdah-check" "$pkgdir/$root/howdah-check"
     chmod +x "$pkgdir/$root/howdah-check"
     # Per-tarball provenance + verify note.
-    if [ "$ARCH" = x86_64 ]; then
+    built_against="glibc 2.17"
+    if [ "$LIBC" = musl ]; then
+      built_against="musl 1.2 (Alpine 3.21)"
+      distro_floor="Alpine and other musl systems; needs libgcc: apk add libgcc"
+    elif [ "$ARCH" = x86_64 ]; then
       distro_floor="runs on CentOS 7, Ubuntu 14.04+, Debian 8+ and newer"
     else
       distro_floor="runs on CentOS 7 (arm64), Ubuntu 16.04+, Debian 9+ and newer"
     fi
-    sed -E "s/@API@/$api/; s/@MINOR@/$minor/; s/@VERSION@/$HOWDAH_VERSION/; s/@ARCH@/$ARCH/; s/@FLOOR@/$distro_floor/" \
+    sed -E "s/@API@/$api/; s/@MINOR@/$minor/; s/@VERSION@/$HOWDAH_VERSION/; s/@ARCH@/$ARCH/; s/@FLOOR@/$distro_floor/; s/@BUILT@/$built_against/" \
         > "$pkgdir/$root/README.txt" <<'EOF'
 Howdah @VERSION@ -- PHP @MINOR@ build (Zend module API @API@)
 
 Contents:
-  howdah.so     the extension for linux-@ARCH@, built against glibc 2.17
+  howdah.so     the extension for linux-@ARCH@, built against @BUILT@
                 (@FLOOR@). NTS, non-debug.
   howdah.ini    config template (copy into your PHP SAPI's config dir)
   howdah-check  read-only installer/verifier: `./howdah-check detect`
@@ -171,7 +197,7 @@ Verify this download (see packaging/howdah-release-signing.asc in the repo):
   gpg --verify SHA256SUMS.asc SHA256SUMS
   sha256sum -c SHA256SUMS
 EOF
-    tarball="$OUT/howdah-$HOWDAH_VERSION-php$minor-$api-linux-$ARCH.tar.gz"
+    tarball="$OUT/howdah-$HOWDAH_VERSION-php$minor-$api-$SUFFIX.tar.gz"
     tar -C "$pkgdir" -czf "$tarball" "$root"
     rm -rf "$pkgdir"
 
@@ -181,7 +207,8 @@ EOF
     bd="$(grep -m1 '^build=' "$meta" | cut -d= -f2)"
     ft="$(grep -m1 '^feature=' "$meta" | cut -d= -f2)"
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$minor" "$api" "$ft" "$ts" "$bd" "$gmax" "$(basename "$tarball")" >> "$REPORT"
-    echo "== PHP $minor OK -> $(basename "$tarball")  (api $api, $ts, $bd, glibc<=$gmax)"
+    libc_note="glibc<=$gmax"; [ "$LIBC" = musl ] && libc_note="musl"
+    echo "== PHP $minor OK -> $(basename "$tarball")  (api $api, $ts, $bd, $libc_note)"
     built=$((built+1))
   else
     echo "!! PHP $minor FAILED"; failed="$failed $minor"

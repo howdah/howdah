@@ -31,6 +31,20 @@ esac
 if [ "$ARCH" = aarch64 ] && [ "$FROM_SOURCE" -ne 1 ]; then
   echo "FATAL [$MINOR]: aarch64 builds need --from-source (no Remi EL7 aarch64 packages)" >&2; exit 1
 fi
+# Target libc (build-release.sh passes it). musl runs in the Alpine image
+# (packaging/release.musl.Dockerfile): from-source headers only, the build
+# deps are already in the image, and step 5 checks the musl link instead of
+# the glibc-2.17 symbol versions.
+LIBC="${HOWDAH_LIBC:-glibc}"
+case "$LIBC" in
+  glibc) ;;
+  musl)
+    [ "$FROM_SOURCE" -eq 1 ] || { echo "FATAL [$MINOR]: musl builds need --from-source (no Remi on Alpine)" >&2; exit 1; }
+    # a cdylib must link musl dynamically (rustup's musl target defaults to crt-static)
+    export RUSTFLAGS="-C target-feature=-crt-static"
+    ;;
+  *) echo "FATAL: unsupported HOWDAH_LIBC '$LIBC'"; exit 2 ;;
+esac
 
 # version -> cargo feature (php5 / php7 / php8)
 case "$MINOR" in
@@ -52,8 +66,10 @@ if [ "$FROM_SOURCE" -eq 1 ]; then
   note "PHP $SRCVER headers from source (Remi EL7 has no php$XY)"
   PREFIX="/opt/php-$MINOR"
   if [ ! -x "$PREFIX/bin/php-config" ]; then
-    yum install -y --setopt=base.skip_if_unavailable=true libxml2-devel sqlite-devel bzip2 \
-      >/dev/null 2>/tmp/yum.err || { tail -10 /tmp/yum.err >&2; die "could not install PHP build deps"; }
+    if [ "$LIBC" = glibc ]; then
+      yum install -y --setopt=base.skip_if_unavailable=true libxml2-devel sqlite-devel bzip2 \
+        >/dev/null 2>/tmp/yum.err || { tail -10 /tmp/yum.err >&2; die "could not install PHP build deps"; }
+    fi
     cd /tmp; rm -f php.tgz
     # Durable + verified fetch: try www.php.net/distributions (current patches),
     # then museum.php.net (long-term archive). The pinned sha256 is enforced
@@ -164,9 +180,27 @@ SO=/tmp/t/release/libhowdah_ext.so
 # empty parse can never silently pass), require that we actually parsed some
 # GLIBC_ references, and rank versions with `sort -V` so 2.9 < 2.17.
 file "$SO" | grep -q "$FILE_ARCH" || die "$SO is not a $ARCH ELF: $(file "$SO")"
-note "objdump -T glibc symbol-version check (baseline 2.17, $ARCH)"
 DYN=/tmp/dynsyms.$MINOR.txt
 objdump -T "$SO" > "$DYN" 2>/tmp/objdump.err || { tail -5 /tmp/objdump.err >&2; die "objdump -T failed on $SO"; }
+if [ "$LIBC" = musl ]; then
+  # musl has no symbol versions. Instead: the only shared libraries the .so
+  # may need are musl's libc and libgcc_s (the unwinder panic = "unwind"
+  # uses); anything else would be missing on a stock Alpine PHP.
+  note "musl link check: NEEDED must be libc.musl-$ARCH.so.1 (+ libgcc_s.so.1)"
+  NEEDED=$(objdump -p "$SO" | awk '$1 == "NEEDED" { print $2 }' | sort -u)
+  [ -n "$NEEDED" ] || die "no NEEDED entries parsed from $SO -- refusing to pass fail-open"
+  printf '%s\n' "$NEEDED" | grep -qx "libc.musl-$ARCH.so.1" || die "$SO does not link musl libc: $NEEDED"
+  for lib in $NEEDED; do
+    case "$lib" in
+      "libc.musl-$ARCH.so.1"|libgcc_s.so.1) ;;
+      *) die "$SO needs $lib, which a stock Alpine PHP does not have" ;;
+    esac
+  done
+  if grep -q 'GLIBC_' "$DYN"; then die "musl build references glibc symbol versions"; fi
+  MAXREF=musl
+  note "musl OK: NEEDED $(printf '%s ' $NEEDED)"
+else
+note "objdump -T glibc symbol-version check (baseline 2.17, $ARCH)"
 REFS=$(grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' "$DYN" | sort -u -V)
 [ -n "$REFS" ] || die "no GLIBC_ symbol-version references parsed from $SO -- refusing to pass fail-open"
 MAXREF=$(printf '%s\n' "$REFS" | sort -V | tail -1)
@@ -180,6 +214,7 @@ if [ -n "$BAD" ]; then
   die "glibc symbols newer than 2.17 referenced: $BAD"
 fi
 note "glibc OK: highest referenced version is $MAXREF (<= 2.17)"
+fi
 
 # Also fail on any libstdc++ (GLIBCXX/CXXABI) dependency: the extension must not
 # drag in a C++ runtime the host may lack.
@@ -198,6 +233,7 @@ feature=$FEATURE
 thread_safety=$zts
 build=$dbg
 glibc_max_ref=$MAXREF
+libc=$LIBC
 php_config_version=$("$PHP_CONFIG" --version)
 META
 note "wrote $OUTSO (api $API, $zts, $dbg)"

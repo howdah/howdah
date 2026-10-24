@@ -1,0 +1,155 @@
+name: docker
+
+# Runtime images: ghcr.io/howdah/howdah:<version>-php<minor>[-alpine], the
+# official php:<minor>-fpm[-alpine] image with the release's signed howdah.so
+# installed (docker/Dockerfile). The images are built FROM THE PUBLISHED
+# RELEASE, never from a fresh compile: docker/fetch.sh checks SHA256SUMS
+# against the committed key and each tarball against SHA256SUMS.
+#
+# Triggers:
+#   - a tag push v*, via the release workflow: release.yml runs on the tag and
+#     publishes the signed assets at its end, so this workflow starts when that
+#     run completes (a job started by the tag push itself would race the
+#     assets). Pre-release tags publish draft releases and get no images.
+#   - workflow_dispatch: (re)build any published release.
+#   - weekly: rebuild the newest release on the refreshed upstream php images
+#     (Debian security updates for the bases that still get them).
+on:
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release to build, e.g. 1.4.0 (default: the newest release)"
+        required: false
+      floating:
+        description: "Also move the php<minor> tags (only for the newest release)"
+        type: boolean
+        default: false
+  schedule:
+    - cron: '41 5 * * 2'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.event.workflow_run.head_branch || inputs.version || 'latest' }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      matrix: ${{ steps.m.outputs.matrix }}
+      skip: ${{ steps.v.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve the release
+        id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_FLOATING: ${{ inputs.floating }}
+        run: |
+          latest="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
+          case "$GITHUB_EVENT_NAME" in
+            workflow_run) tag="$RUN_TAG" ;;
+            workflow_dispatch) tag="${INPUT_VERSION:+v${INPUT_VERSION#v}}"; tag="${tag:-$latest}" ;;
+            *) tag="$latest" ;;
+          esac
+          version="${tag#v}"
+          skip=false
+          case "$version" in *-*) skip=true; echo "pre-release $tag: draft release, no images" ;; esac
+          floating=0
+          if [ "$tag" = "$latest" ]; then
+            case "$GITHUB_EVENT_NAME" in
+              workflow_dispatch) [ "$INPUT_FLOATING" = true ] && floating=1 ;;
+              *) floating=1 ;;
+            esac
+          fi
+          echo "tag=$tag version=$version latest=$latest floating=$floating skip=$skip"
+          { echo "version=$version"; echo "floating=$floating"; echo "skip=$skip"; } >> "$GITHUB_OUTPUT"
+      - name: Plan one image per PHP minor and libc the release has tarballs for
+        id: m
+        if: steps.v.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.v.outputs.version }}
+          FLOATING: ${{ steps.v.outputs.floating }}
+        run: |
+          gh release download "v$VERSION" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --dir /tmp/rel
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/howdah" sh docker/matrix.sh "$VERSION" "$FLOATING" < /tmp/rel/SHA256SUMS > /tmp/matrix.json
+          cat /tmp/matrix.json
+          echo "matrix=$(cat /tmp/matrix.json)" >> "$GITHUB_OUTPUT"
+
+  image:
+    needs: plan
+    if: needs.plan.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write   # push to ghcr.io with the repo's GITHUB_TOKEN
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    name: php${{ matrix.minor }} ${{ matrix.variant }} (${{ matrix.platforms }})
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      # Smoke test BEFORE anything is pushed: build the amd64 image into the
+      # local daemon and run docker/smoke.sh (php -m, the lab self-test on the
+      # CLI server, howdah-check web through nginx -> php-fpm).
+      - name: Build amd64 for the smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: howdah-smoke:local
+          build-args: |
+            HOWDAH_VERSION=${{ env.VERSION }}
+            PHP_MINOR=${{ matrix.minor }}
+            PHP_VARIANT=${{ matrix.variant }}
+            HOWDAH_LIBC=${{ matrix.libc }}
+          cache-to: type=gha,mode=max,scope=php${{ matrix.minor }}-${{ matrix.variant }}
+      - name: Smoke test (amd64)
+        run: sh docker/smoke.sh howdah-smoke:local
+      - name: Smoke test (arm64, emulated)
+        if: contains(matrix.platforms, 'linux/arm64')
+        run: |
+          docker buildx build --load --platform linux/arm64 -f docker/Dockerfile \
+            --build-arg HOWDAH_VERSION="$VERSION" --build-arg PHP_MINOR="${{ matrix.minor }}" \
+            --build-arg PHP_VARIANT="${{ matrix.variant }}" --build-arg HOWDAH_LIBC="${{ matrix.libc }}" \
+            -t howdah-smoke:arm64 .
+          sh docker/smoke.sh howdah-smoke:arm64 linux/arm64
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Build and push ${{ matrix.tags }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: ${{ matrix.platforms }}
+          push: true
+          tags: ${{ matrix.tags }}
+          build-args: |
+            HOWDAH_VERSION=${{ env.VERSION }}
+            PHP_MINOR=${{ matrix.minor }}
+            PHP_VARIANT=${{ matrix.variant }}
+            HOWDAH_LIBC=${{ matrix.libc }}
+          cache-from: type=gha,scope=php${{ matrix.minor }}-${{ matrix.variant }}
+          provenance: true
+          sbom: true

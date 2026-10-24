@@ -237,6 +237,53 @@ b=$(block "$(detect_in "$L/cpanel-rpm" aarch64)" "$L/cpanel-rpm/opt/cpanel/ea-ph
 has "$b" '  howdah package: not yet packaged for aarch64: use the tarball for API 20190902 (howdah-<VERSION>-php7.4-20190902-linux-aarch64.tar.gz)'
 check "a layout with no aarch64 package says so on aarch64" $?
 
+# --- detect: Docker images, Alpine (musl), LiteSpeed lsphp ---------------------
+# the official php images keep PHP in /usr/local with PHP_INI_DIR=/usr/local/etc/php
+fake_php "$L/docker" /usr/local/bin/php 8.3.36 20230831 disabled \
+  /usr/local/lib/php/extensions/no-debug-non-zts-20230831 /usr/local/etc/php/conf.d
+deb "$L/docker"
+out=$(detect_in "$L/docker")
+has "$out" 'host libc: glibc'; check "glibc host says so" $?
+b=$(block "$out" "$L/docker/usr/local/bin/php")
+has "$b" '  matching release asset: howdah-<VERSION>-php8.3-20230831-linux-x86_64.tar.gz' && has "$b" '  layout: docker' && \
+  has "$b" '  howdah package: image ghcr.io/howdah/howdah:<VERSION>-php8.3, or in your Dockerfile: COPY --from=ghcr.io/howdah/howdah:<VERSION>-php8.3 /howdah/ /'
+check "official Docker php image: docker layout, the image and the COPY --from line" $?
+fake_php "$L/alpine" /usr/local/bin/php 8.3.36 20230831 disabled \
+  /usr/local/lib/php/extensions/no-debug-non-zts-20230831 /usr/local/etc/php/conf.d
+mkdir -p "$L/alpine/lib"; : > "$L/alpine/lib/ld-musl-x86_64.so.1"
+out=$(detect_in "$L/alpine")
+has "$out" 'host libc: musl'; check "musl host says so" $?
+b=$(block "$out" "$L/alpine/usr/local/bin/php")
+has "$b" '  matching release asset: howdah-<VERSION>-php8.3-20230831-linux-x86_64-musl.tar.gz'
+check "musl host: the -musl tarball" $?
+has "$b" '  howdah package: image ghcr.io/howdah/howdah:<VERSION>-php8.3-alpine, or in your Dockerfile: COPY --from=ghcr.io/howdah/howdah:<VERSION>-php8.3-alpine /howdah/ /'
+check "official Alpine php image: the -alpine image" $?
+mkdir -p "$L/alpine-arm/lib"; cp -R "$L/alpine/usr" "$L/alpine-arm/"; : > "$L/alpine-arm/lib/ld-musl-aarch64.so.1"
+b=$(block "$(detect_in "$L/alpine-arm" aarch64)" "$L/alpine-arm/usr/local/bin/php")
+has "$b" '  matching release asset: none: musl builds are x86_64 only' && \
+  has "$b" '  howdah package: none: musl builds are x86_64 only'
+check "aarch64 musl: no asset, no image (never a glibc tarball)" $?
+fake_php "$L/docker54" /usr/local/bin/php 5.4.45 20100525 disabled \
+  /usr/local/lib/php/extensions/no-debug-non-zts-20100525 /usr/local/etc/php/conf.d
+b=$(block "$(detect_in "$L/docker54")" "$L/docker54/usr/local/bin/php")
+has "$b" '  layout: docker' && \
+  has "$b" '  howdah package: no image for PHP 5.4: use the tarball for API 20100525 (howdah-<VERSION>-php5.4-20100525-linux-x86_64.tar.gz)'
+check "docker layout for a minor with no image falls back to the tarball" $?
+# Alpine's own PHP (apk add php83): /usr/lib/php83/modules + /etc/php83/conf.d
+fake_php "$L/alpine-apk" /usr/bin/php83 8.3.36 20230831 disabled /usr/lib/php83/modules /etc/php83/conf.d
+mkdir -p "$L/alpine-apk/lib"; : > "$L/alpine-apk/lib/ld-musl-x86_64.so.1"
+b=$(block "$(detect_in "$L/alpine-apk")" "$L/alpine-apk/usr/bin/php83")
+has "$b" '  layout: alpine' && \
+  has "$b" '  howdah package: not yet packaged for musl: use the tarball for API 20230831 (howdah-<VERSION>-php8.3-20230831-linux-x86_64-musl.tar.gz)'
+check "Alpine apk PHP: alpine layout, the musl tarball" $?
+fake_php "$L/litespeed" /usr/local/lsws/lsphp83/bin/php 8.3.36 20230831 disabled \
+  /usr/local/lsws/lsphp83/lib/php/20230831 /usr/local/lsws/lsphp83/etc/php/8.3/mods-available/
+deb "$L/litespeed"
+b=$(block "$(detect_in "$L/litespeed")" "$L/litespeed/usr/local/lsws/lsphp83/bin/php")
+has "$b" '  layout: litespeed' && \
+  has "$b" '  howdah package: not yet packaged: use the tarball for API 20230831 (howdah-<VERSION>-php8.3-20230831-linux-x86_64.tar.gz)'
+check "LiteSpeed lsphp: litespeed layout, tarball" $?
+
 # The packaging table and detect agree: every row of packaging/layouts.tsv, for
 # PHP 7.4, is the package + repo detect names for that layout and format.
 TSV=$D/../packaging/layouts.tsv

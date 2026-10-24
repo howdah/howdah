@@ -96,11 +96,41 @@ jobs:
           path: packaging/out/*.tar.gz
           if-no-files-found: error
 
+  # ---- musl (Alpine) x86_64 tarballs: BEST-EFFORT, never blocks the release --
+  # Same source, built on Alpine 3.21 (packaging/release.musl.Dockerfile) with
+  # from-source PHP headers; named ...-linux-x86_64-musl.tar.gz. docker.yml
+  # builds the -alpine images from these. A failed cell means no musl tarball
+  # (and no -alpine image) for that minor.
+  build-musl:
+    needs: check
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        minor: ["5.4", "5.5", "5.6", "7.0", "7.1", "7.2", "7.3", "7.4", "8.0", "8.1", "8.2", "8.3", "8.4", "8.5"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build musl tarball for PHP ${{ matrix.minor }}
+        run: |
+          HOWDAH_VERSION="${GITHUB_REF_NAME#v}"
+          export HOWDAH_VERSION
+          HOWDAH_ARCH=x86_64 HOWDAH_LIBC=musl packaging/build-release.sh "${{ matrix.minor }}"
+
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: howdah-php${{ matrix.minor }}-x86_64-musl
+          path: packaging/out/*.tar.gz
+          if-no-files-found: error
+
   # ---- hash, sign, and publish the whole set -------------------------------
   # Publishes whenever the gating x86_64 build is green, even if some (or all)
-  # best-effort aarch64 cells failed; whatever aarch64 tarballs uploaded ship.
+  # best-effort aarch64 or musl cells failed; whatever tarballs uploaded ship.
   release:
-    needs: [build, build-aarch64]
+    needs: [build, build-aarch64, build-musl]
     if: ${{ always() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:

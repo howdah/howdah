@@ -28,7 +28,8 @@ const MINORS = ['5.4','5.5','5.6','7.0','7.1','7.2','7.3','7.4','8.0','8.1','8.2
           <label><input type="radio" name="os" value="cpanel" /> cPanel (EasyApache 4) <small>cPanel's <code>ea-php</code> versions — installs with <b>dnf/yum</b> or <b>apt</b>, not the EasyApache 4 screen</small></label>
           <label><input type="radio" name="os" value="plesk" /> Plesk <small>Plesk's PHP versions in <code>/opt/plesk/php</code> — installs with <b>dnf/yum</b> or <b>apt</b></small></label>
           <label><input type="radio" name="os" value="cloudlinux" /> CloudLinux alt-php <small>PHP Selector versions in <code>/opt/alt</code> — installs with <b>yum</b></small></label>
-          <label><input type="radio" name="os" value="other" /> DirectAdmin / other <small>DirectAdmin CustomBuild, self-built PHP, older distros — install from the <b>signed tarball</b></small></label>
+          <label><input type="radio" name="os" value="docker" /> Docker <small>The official <code>php</code> images — a ready <b>image</b>, or one <code>COPY --from</code> line in your own Dockerfile</small></label>
+          <label><input type="radio" name="os" value="other" /> DirectAdmin / other <small>DirectAdmin CustomBuild, LiteSpeed lsphp, self-built PHP, older distros — install from the <b>signed tarball</b></small></label>
         </fieldset>
 
         <fieldset data-when-os="cpanel plesk" hidden>
@@ -103,6 +104,8 @@ sudo systemctl reload php8.1-fpm</code></pre>
 
       <p id="layout-note" class="legend" hidden>These panel and distribution repositories are new and are published with the next release of the repositories. If the repository URL does not answer yet, use the signed tarball (<b>DirectAdmin / other</b> above); <code>howdah-check detect</code> names the right one either way. Paths, sources and what was tested: <a href="https://github.com/howdah/howdah/blob/main/docs/packaging-layouts.md">packaging layouts</a>.</p>
 
+      <p id="docker-note" class="legend" hidden>The images are published to <code>ghcr.io/howdah/howdah</code> by the project's Docker workflow, starting with the next release. Until the first publish, build the same image from a checkout of the repository: <code>docker buildx build -f docker/Dockerfile --build-arg HOWDAH_VERSION={VERSION} --build-arg PHP_MINOR=8.3 -t howdah:php8.3 .</code> Tags, Alpine, arm64, how to verify an image against the signed release, and what was tested: <a href="https://github.com/howdah/howdah/blob/main/docs/install-docker.md">Docker install guide</a>.</p>
+
       <div class="note" id="cgi-note" hidden>
         <h3>A note for php-cgi / FastCGI</h3>
         <p>Howdah protects the request-parsing path the same way under CGI. It cannot cover <strong>CVE-2012-1823</strong> (php-cgi argument injection): that query string is consumed by php-cgi during its own startup, <em>before</em> any PHP extension loads, so no in-PHP firewall can act on it. Use a web-server or front-proxy rule, or a patched php-cgi, for that one. See the <a href="/coverage/">coverage page</a>.</p>
@@ -119,6 +122,7 @@ sudo systemctl reload php8.1-fpm</code></pre>
   const cgiNote = document.getElementById('cgi-note');
   const distroNote = document.getElementById('distro-note');
   const layoutNote = document.getElementById('layout-note');
+  const dockerNote = document.getElementById('docker-note');
   const jsNote = document.querySelector('[data-nojs]');
   if (jsNote) jsNote.textContent = 'These commands update as you change the choices above. One build per PHP minor version.';
 
@@ -145,6 +149,7 @@ sudo systemctl reload php8.1-fpm</code></pre>
     cgiNote.hidden = sapi !== 'cgi';
     distroNote.hidden = !(os === 'debian' && val('src_deb') === 'distro');
     layoutNote.hidden = !['el', 'cpanel', 'plesk', 'cloudlinux'].includes(os);
+    dockerNote.hidden = os !== 'docker';
 
     // show/hide os-conditional fieldsets (data-when-os lists the os values,
     // space-separated) + the xenial question
@@ -258,6 +263,26 @@ sudo systemctl reload php8.1-fpm</code></pre>
          'sh howdah-check web https://your.site/']);
       steps += step('Roll back at any time', '',
         [`sudo selectorctl --version=${minor} --disable-extensions=howdah`, `sudo yum remove ${pkg}`]);
+    } else if (os === 'docker') {
+      const img = `ghcr.io/howdah/howdah:${VERSION}-php${minor}`;
+      const base = sapi === 'apache' ? `php:${minor}-apache` : `php:${minor}-fpm`;
+      if (minor === '5.4' || minor === '5.5') {
+        steps += step(`No image for PHP ${minor}`,
+          `Current Docker cannot pull the official <code>php:${minor}</code> images (5.4 is an old manifest format, 5.5 has a missing layer), so there is no Howdah image for ${minor}. Copy the tarball's <code>howdah.so</code> and <code>howdah.ini</code> into your own image instead (<b>DirectAdmin / other</b> above has the download and verify steps).`,
+          ['./howdah-check detect      # inside your container: the tarball for its API']);
+      } else {
+        if (sapi !== 'apache') {
+          steps += step('Start from the Howdah image', `The official <code>php:${minor}-fpm</code> image with Howdah installed and enabled in detect mode, for amd64 and arm64.`,
+            [`FROM ${img}`, 'COPY . /var/www/html']);
+        }
+        steps += step(sapi === 'apache' ? 'Add Howdah to your image' : 'Or add Howdah to your own image',
+          `One line copies the extension, its ini and <code>howdah-check</code> onto any official PHP ${minor} image (fpm, apache or cli). Not onto a <code>-zts</code> image; on an <code>-alpine</code> base use the <code>${VERSION}-php${minor}-alpine</code> tag.`,
+          [`FROM ${base}`, `COPY --from=${img} /howdah/ /`]);
+        steps += step('Verify it is loaded, then check it over HTTP', 'The web check sends two harmless requests to your site.',
+          [`docker run --rm ${img} php --ri howdah     # Howdah => enabled, Mode => detect`,
+           `docker run --rm --network <your network> ${img} howdah-check web http://<your web container>/`]);
+        steps += step('Roll back', 'Remove the <code>COPY --from</code> line, or go back to the plain image, and rebuild.', [`FROM ${base}`]);
+      }
     } else {
       // tarball / manual
       const reload = sapi === 'apache' ? 'sudo systemctl reload apache2   # or httpd'

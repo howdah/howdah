@@ -105,10 +105,33 @@ for (const sp of Object.values(cells)) for (const sc of Object.values(sp)) for (
 // comment for them): these repeat a tested generation but were not run.
 const notRunMinors = ALL_MINORS.filter((m) => !cellsByMinor[m]);
 
+// ---- runtimes and SAPIs outside the matrix --------------------------------
+// lab/integration/runtime-results.tsv: one row per run of a named script
+// (LSAPI, the Docker images, Alpine, arm64, ZTS). Runs that differ only in the
+// PHP version are shown as one row listing every version.
+const runtimeRuns = [];
+for (const line of readFileSync(resolve(repo, 'lab/integration/runtime-results.tsv'), 'utf8').split('\n')) {
+  if (!line.trim() || line.startsWith('##')) continue;
+  const [date, runtime, sapi, php, arch, script, result, detail = ''] = line.split('\t');
+  if (!['PASS', 'FAIL'].includes(result)) throw new Error(`runtime-results.tsv: result must be PASS or FAIL: ${line}`);
+  runtimeRuns.push({ date, runtime, sapi, php, arch, script, result, detail });
+}
+const runtimes = [];
+for (const r of runtimeRuns) {
+  const same = runtimes.find((g) => ['runtime', 'sapi', 'arch', 'script', 'result', 'detail'].every((k) => g[k] === r[k]));
+  if (same) {
+    same.php.push(r.php);
+    if (r.date > same.date) same.date = r.date;
+  } else {
+    runtimes.push({ ...r, php: [r.php] });
+  }
+}
+
 const data = {
   generated, source: 'lab/integration/matrix-results.tsv',
   totals: { pass: P, fail: F, skip: S }, corpusFalsePositives: corpusBad,
   rows, notRunMinors,
+  runtimeSource: 'lab/integration/runtime-results.tsv', runtimes,
 };
 mkdirSync(resolve(here, '../src/data'), { recursive: true });
 writeFileSync(resolve(here, '../src/data/coverage.json'), JSON.stringify(data, null, 2) + '\n');
@@ -255,6 +278,29 @@ that populate superglobals lazily. See caveats 5–7.
 | **Array-nesting DoS** (deep \`a[b][c]…\`) | \`max_input_nesting_depth\` (64) | Var-dropped + logged, then best-effort 403; Enforced on the SAPIs in Table 3's nesting column. |
 | **CVE-2012-1823** — php-cgi argument injection | *(none — out of reach)* | **NOT protected.** The exploit works only under the php-cgi SAPI, where php-cgi consumes the argv-injection query string during its **own startup — before any PHP extension, module, or request (RINIT) hook loads** — so no in-PHP check can ever fire for the attack shape. Like CVE-2019-11043, this happens before extension code runs and is outside what a PHP extension can defend. See caveat 7. |
 
+## Table 5: other SAPIs and runtimes
+
+From [\`lab/integration/runtime-results.tsv\`](../lab/integration/runtime-results.tsv),
+one row per run of the named script, **not** from the matrix above. These runs
+are one scenario each (the self-test: a marker request, a request one part
+over \`max_parts\`, a normal form; the lab rows add the block-shaped script),
+not the matrix's 27, so a PASS here says the extension loads and refuses the
+over-limit shape on that runtime and nothing more. A FAIL is a run that went
+wrong and is why that runtime is not supported.
+
+| Runtime / SAPI | Arch | PHP | Result | Script | What ran |
+|---|---|---|---|---|---|
+`;
+for (const r of runtimes) {
+  md += `| ${r.runtime} (\`${r.sapi}\`) | ${r.arch} | ${r.php.join(', ')} | ${r.result === 'PASS' ? 'PASS' : '**FAIL**'} (${r.date}) | \`${r.script}\` | ${r.detail} |\n`;
+}
+md += `
+Not covered by any row: LiteSpeed Enterprise, lsphp other than 8.3 and lsphp
+from LiteSpeed's rpm repository, Apache \`mod_php\` with the event or worker
+MPM, any ZTS build (see [zts.md](zts.md)), and aarch64 musl (there is no
+aarch64 musl build). The Alpine rows ran a musl build of the 1.4.0 source
+made locally; no release carried musl tarballs when they ran.
+
 ## Honest caveats
 
 1. **The exact defense is the count and length rules**: \`max_parts\` (2000),
@@ -303,10 +349,13 @@ that populate superglobals lazily. See caveats 5–7.
    \`config.guess\` cannot identify an aarch64 host, so the build passes an
    explicit \`--build\` triple (releases before 1.2.2 shipped no 5.4 arm64
    tarball for that reason). The release assets are the definitive per-arch
-   list. The core is arch-agnostic pure Rust, but arm64 is **build-verified
-   only** (PHP 5.4, 7.4 and 8.4 locally under QEMU; the rest in CI). Every
-   matrix result in the tables above was recorded on x86_64; the scenario
-   matrix has not been run on arm64.
+   list. The core is arch-agnostic pure Rust. Every matrix result in the
+   tables above was recorded on x86_64; the scenario matrix has not been run
+   on arm64. On arm64 only the lab's block-shaped and self-test scripts have
+   run, for 7.4 and 8.3, under QEMU and on native arm64 CI runners (Table 5;
+   the non-blocking \`lab-aarch64\` job runs them on every pull request).
+   A musl (Alpine) build exists for x86_64 only, from the release after 1.4.0.
+   ZTS PHP has no build: [zts.md](zts.md).
 
 ## Reproduce
 

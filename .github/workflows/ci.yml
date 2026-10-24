@@ -85,6 +85,45 @@ jobs:
           echo "glibc max ref: $max"
           [ "$(printf '%s\n2.17\n' "$max" | sort -V | tail -1)" = 2.17 ]
 
+  # Per-PR musl (Alpine) build smoke: the HOWDAH_LIBC=musl release path for one
+  # minor, then the .so must load in the official Alpine image of that minor.
+  # Non-blocking, like the aarch64 smoke: the release's musl cells are
+  # best-effort too.
+  musl-build-smoke:
+    name: musl build PHP 8.3
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the musl tarball
+        run: HOWDAH_LIBC=musl packaging/build-release.sh 8.3
+      - name: Load it in php:8.3-fpm-alpine
+        run: |
+          docker run --rm -i php:8.3-fpm-alpine sh -ec '
+            tar -xzf - -C /tmp
+            php -d extension="$(ls /tmp/*/howdah.so)" -m | grep -qx howdah
+            php -d extension="$(ls /tmp/*/howdah.so)" --ri howdah | grep "^Version"
+          ' < "$(ls packaging/out/*-linux-x86_64-musl.tar.gz)"
+
+  # Runtime image (docker/Dockerfile) from a fixed published release, smoke
+  # tested the way docker.yml gates a push. Pinned to 1.4.0 so the result does
+  # not change under the PR; FPM_BLOCK=bailout pins that release's php-fpm
+  # refusal behaviour (see docker/smoke.sh).
+  docker-image:
+    name: docker image (1.4.0, PHP 8.3)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: sh docker/matrix.test.sh
+      - run: sh docker/fetch.test.sh 1.4.0
+      - name: Build and smoke-test the PHP 8.3 image
+        run: |
+          docker buildx build --load -f docker/Dockerfile \
+            --build-arg HOWDAH_VERSION=1.4.0 --build-arg PHP_MINOR=8.3 -t howdah-ci:php8.3 .
+          FPM_BLOCK=bailout sh docker/smoke.sh howdah-ci:php8.3
+
   wasm:
     name: wasm build
     runs-on: ubuntu-24.04
@@ -163,6 +202,37 @@ jobs:
             echo "$out"
             echo "$out" | grep -E "Panic guard.*=> yes" || { echo "panic guard NOT active (panic=abort regression?)"; exit 1; }
           '
+
+  # The lab scenarios on native arm64 (ubuntu-24.04-arm, the runner the
+  # aarch64 build smoke already uses). The lab images for 7.4 (bullseye) and
+  # 8.3 (trixie) build from multi-arch php:*-fpm bases with the distro clang,
+  # so nothing in them is amd64-only. Non-blocking while it earns a record;
+  # docs/coverage.md says what it does and does not cover.
+  lab-aarch64:
+    name: lab aarch64 PHP ${{ matrix.php }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { php: '7.4', feature: php7 }
+          - { php: '8.3', feature: php8 }
+    env:
+      IMAGE: howdah-dev-php${{ matrix.php }}
+      BASE: lab-php-${{ matrix.php }}
+      FEATURE: ${{ matrix.feature }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build lab base image
+        run: docker build -f lab/images/php-${{ matrix.php }}.Dockerfile -t "$BASE" lab/images
+      - name: Runs on aarch64
+        run: docker run --rm "$BASE" uname -m | tee /dev/stderr | grep -qx aarch64
+      - name: Shaped upload is blocked
+        run: lab/integration/block_shaped.sh
+      - name: Self-test flags the server
+        run: lab/integration/selftest.sh
 
   shell:
     name: howdah-check + package layout tests

@@ -113,6 +113,24 @@ test('load refuses a config with [log]', () => {
   assert.deepEqual(E.loadFromCanonical(v.config, catalog), { unsupported: ['log'] });
 });
 
+test('load refuses every [log] key, not only path', () => {
+  // The form has no [log] controls, so a round trip would silently drop any
+  // of these.
+  for (const toml of [
+    '[log]\ndestination = "syslog"',
+    '[log]\nsyslog_facility = "daemon"',
+    '[log]\nsyslog_ident = "shop"',
+    '[log]\nexec = "/usr/local/sbin/howdah-alert"',
+    '[log]\nexec = "/h"\nexec_rate_limit = 3',
+  ]) {
+    const v = validate(toml);
+    assert.equal(v.ok, true, toml);
+    assert.deepEqual(E.loadFromCanonical(v.config, catalog), { unsupported: ['log'] }, toml);
+  }
+  // An empty [log] table is nothing to lose.
+  assert.ok(E.loadFromCanonical(validate('[log]\n').config, catalog).state);
+});
+
 test('load then emit reproduces a non-trivial config', () => {
   const toml = [
     'mode = "detect"',

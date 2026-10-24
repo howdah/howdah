@@ -118,6 +118,7 @@ version = "1.4.0"
 dependencies = [
  "howdah-core",
  "howdah-sys",
+ "libc",
  "serde_json",
 ]
 

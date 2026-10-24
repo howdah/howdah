@@ -18,6 +18,9 @@ php8 = ["howdah-sys/php8"]
 howdah-core = { path = "../howdah-core" }
 howdah-sys = { path = "../howdah-sys" }
 serde_json = "1"
+# The log writer: local time for syslog framing, and setsid/fcntl/pipe2 for
+# the [log] exec hook. Already in the lock file via bindgen; no new crate.
+libc = "0.2"
 
 [lib]
 # cdylib: the loadable `howdah.so`. rlib: lets the pure-Rust reconstructor be

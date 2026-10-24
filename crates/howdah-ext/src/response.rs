@@ -7,11 +7,12 @@
 //! afterwards (see `rfc1867::bail`).
 
 use std::ffi::{c_char, c_int, c_void};
-use std::io::Write;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
 use howdah_sys as sys;
 
+use crate::logsink;
 use crate::module;
 
 /// HTTP status for a rule name (as emitted in the core's JSON log line).
@@ -54,28 +55,28 @@ pub unsafe fn emit_block(status: c_int, request_id: &str) {
     }
 }
 
-/// Append one JSON line to the configured log file; on any failure fall back to
-/// stderr with a loud note and keep serving (carry-forward #4).
+/// Write one JSON event line to the configured destination (`[log]
+/// destination`: the log file, syslog or stderr) and run the `[log] exec`
+/// hook if one is set. Any failure falls back to stderr with a loud note and
+/// keeps serving (carry-forward #4); a panic in the writer is caught here.
 pub fn write_log_line(line: &str) {
-    let path = unsafe { (*ptr::addr_of!(module::LOG_PATH)).clone() };
-    if let Some(path) = path {
-        if let Ok(p) = path.into_string() {
-            match std::fs::OpenOptions::new().create(true).append(true).open(&p) {
-                Ok(mut f) => {
-                    if writeln!(f, "{line}").is_ok() {
-                        return;
-                    }
-                    loud_error(&format!("failed writing to howdah.log '{p}'"));
-                }
-                Err(e) => loud_error(&format!("cannot open howdah.log '{p}': {e}")),
+    let written = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: NTS worker: process-global state, never touched concurrently.
+        match unsafe { (*ptr::addr_of_mut!(module::LOG)).as_mut() } {
+            Some(s) => {
+                s.emit(line);
+                true
             }
+            None => false,
         }
+    }));
+    if !matches!(written, Ok(true)) {
+        // No settings (before MINIT finished) or a caught panic: stderr.
+        logsink::stderr_line(line);
     }
-    // Fallback: stderr (still structured, still one line).
-    let _ = writeln!(std::io::stderr(), "howdah-event {line}");
 }
 
 /// A loud, un-panicking error note to stderr. Never unwinds across the boundary.
 pub fn loud_error(msg: &str) {
-    let _ = writeln!(std::io::stderr(), "howdah: ERROR: {msg} (continuing to serve)");
+    logsink::loud_error(msg);
 }

@@ -19,6 +19,8 @@
 
 pub mod ini_config;
 pub mod ini_risk;
+#[cfg(target_os = "linux")]
+pub mod logsink;
 
 #[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]
 mod behavior_filter;

@@ -137,10 +137,12 @@
 
   // Build a state from the config the core parsed. Refuses (with the key
   // names) anything the form cannot represent, so a load-then-download round
-  // trip never silently drops a setting. Today that is only [log].
+  // trip never silently drops a setting. Today that is only [log] (any key:
+  // path, destination, syslog_*, exec, exec_rate_limit).
   function loadFromCanonical(config, catalog) {
     var unsupported = [];
-    if (config.log && config.log.path != null) unsupported.push('log');
+    var log = config.log || {};
+    if (Object.keys(log).some(function (k) { return log[k] != null; })) unsupported.push('log');
     if (unsupported.length) return { unsupported: unsupported };
     var state = SCHEMA_API.defaultState(catalog);
     state['howdah.mode'] = config.mode;

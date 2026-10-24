@@ -210,7 +210,7 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
       <ul class="legend-list">
         <li>Validation is the extension's own <code>Config::from_toml</code>, built to WebAssembly from the same source as the release. The error text you see is the core's.</li>
         <li>Nothing leaves your browser except the URL you copy. The fetch service at <code>cfg.howdah.org</code> keeps no copies and no logs of configs.</li>
-        <li>The <code>[log]</code> TOML table is not offered: the extension reads the log path only from the <code>howdah.log</code> ini directive.</li>
+        <li>The <code>[log]</code> TOML table (destination, syslog, the per-event hook) is not offered yet; write it by hand from the <a href="/docs/configuration/#log">event log reference</a>. A file that has one is refused on load, so a round trip never drops it.</li>
         <li>A malformed <code>howdah.config</code> on a server makes Howdah fall back to its safe defaults (block mode, or off with <code>on_invalid_config = "off"</code>) and keep serving, with a line in the PHP error log and an INVALID row in <code>php --ri howdah</code>; using this page is how you avoid finding that out in production. Source: <a href={REPO + '/blob/main/docs/config.md'}>docs/config.md</a>.</li>
       </ul>
     </div>

@@ -1,0 +1,13 @@
+<!--
+  Wazuh decoder for Howdah events sent with [log] destination = "syslog".
+  Install as /var/ossec/etc/decoders/howdah_decoders.xml on the manager.
+  The syslog pre-decoder takes the program name from "howdah[pid]:" and the
+  JSON plugin decodes the message. Lines from the event FILE need no decoder:
+  read the file with <log_format>json</log_format> and the built-in json
+  decoder handles them. Tested with wazuh/wazuh-manager:4.12.0
+  (lab/integration/siem_snippets.sh).
+-->
+<decoder name="howdah">
+  <program_name>^howdah</program_name>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>

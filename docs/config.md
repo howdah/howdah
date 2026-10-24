@@ -8,7 +8,7 @@ setting. Two more ini settings pick the global mode and the log destination:
 extension=howdah.so
 howdah.config=/etc/howdah/howdah.toml   ; path to the TOML below (optional)
 howdah.mode=block                       ; block | detect | off (TOML can override)
-howdah.log=/var/log/howdah.log          ; where JSON event lines are written
+howdah.log=/var/log/howdah.log          ; event log file (wins over [log] path)
 ```
 
 If `howdah.config` is unset, or the file is missing or unreadable, Howdah uses
@@ -79,8 +79,11 @@ max_input_key_bytes      = 1024      # bytes of any single variable name / array
 max_request_headers      = 200       # request headers in one request
 max_request_header_bytes = 16384     # bytes (name+value) of any one request header
 
-# A [log] table with `path` is accepted but NOT used: set the log path with the
-# howdah.log ini directive.
+[log]
+# Where event lines go: "file" (default), "syslog" or "stderr". See the [log]
+# section below. The howdah.log ini value wins over `path` when both are set.
+destination = "file"
+path = "/var/log/howdah/events.log"
 
 [rules]
 # Override the mode for a single rule by its name (see the table below).
@@ -413,6 +416,232 @@ that observe proposes without blocking.
 - On PHP 7.0+ Howdah installs a user opcode handler (for include/eval) at MINIT,
   which turns OPcache JIT off; this is unchanged since 1.3 and independent of
   Layer 4.
+
+## `[log]` — event log destination and hook
+
+Every event is one JSON line (schema 2: the fields are listed below and
+specified in [log-schema.md](log-schema.md)). `[log]` decides where the lines
+go and can run a program for each one. With no `[log]` table, Howdah behaves
+as 1.0 to 1.4.0 did: lines go to the `howdah.log` file, or to stderr when it is
+unset.
+
+```toml
+[log]
+destination = "file"            # "file" (default) | "syslog" | "stderr"
+path = "/var/log/howdah/events.log"   # for "file"; the howdah.log ini value wins
+syslog_facility = "local0"      # for "syslog"
+syslog_ident = "howdah"         # for "syslog": the tag, 1-32 characters
+# exec = "/usr/local/sbin/howdah-alert"   # off unless set; see below
+# exec_rate_limit = 10          # hook starts per second per PHP process, 1-100
+```
+
+| key | default | effect |
+|---|---|---|
+| `destination` | `"file"` | `file`: append to the log file. `syslog`: send to the local syslog socket. `stderr`: write to the process's stderr. |
+| `path` | none | Log file for `destination = "file"` when the `howdah.log` ini setting is empty. |
+| `syslog_facility` | `"local0"` | `user`, `mail`, `daemon`, `auth`, `syslog`, `lpr`, `news`, `uucp`, `cron`, `authpriv`, `ftp`, `local0` to `local7`. |
+| `syslog_ident` | `"howdah"` | The syslog tag (journald's `SYSLOG_IDENTIFIER`). Printable ASCII with no spaces, `:`, `[` or `]`. |
+| `exec` | none | Absolute path of a program to run once per event, with the line on stdin. |
+| `exec_rate_limit` | `10` | Most hook starts in any one second, per PHP process. |
+
+No php.ini directive was added: these keys live only in the TOML file. A
+config file that does not parse is ignored as a whole (see
+`on_invalid_config` above), `[log]` included, so the destination falls back
+to `howdah.log` or stderr and no hook runs.
+
+**Precedence.** `destination` decides where lines go. For `file`, the path is
+the `howdah.log` ini value if it is set, else `[log] path`, else stderr.
+`syslog` and `stderr` ignore both paths, including `howdah.log`.
+`php --ri howdah` shows the result:
+
+```
+Log destination => /var/log/howdah/events.log (from [log] path)
+Log hook ([log] exec) => /usr/local/sbin/howdah-alert (at most 10 per second)
+Log schema => 2
+```
+
+### The event line (schema 2)
+
+| field | type | content |
+|---|---|---|
+| `schema` | integer | `2`. Lines from 1.0 to 1.4.0 have no `schema` key. |
+| `version` | string | Version of the extension that wrote the line. |
+| `ts` | string | UTC Unix epoch milliseconds, as a decimal string. |
+| `request_id` | string | Lowercase hex; also printed in the block response. |
+| `layer` | integer | `1` request-shape limits, `2` input inspection, `3` sinks, `4` after-breach behaviour. |
+| `rule` | string | Rule name (the config spelling). |
+| `action` | string | `block` or `log`. |
+| `client_ip` | string | `REMOTE_ADDR`; empty when the SAPI has none (CLI, `php -S`). |
+| `method` | string | HTTP method. |
+| `uri` | string | Request path, query string removed. |
+| `reason` | string | Human-readable detail; not part of the contract. |
+
+The eight fields from 1.x keep their names and types; `schema`, `version`
+and `layer` are new. The full contract, the rule-to-layer table and the
+compatibility rules are in [log-schema.md](log-schema.md);
+[howdah-event.schema.json](howdah-event.schema.json) is the JSON Schema.
+
+### File destination
+
+- **One write per line.** The line and its newline go out in one `write()` on
+  a descriptor opened with `O_APPEND`, so lines from concurrent workers do not
+  interleave on a local filesystem. (NFS does not make `O_APPEND` atomic.)
+- **Opened per event.** Howdah opens the file for each line and closes it
+  again; it holds no descriptor. Rotation therefore needs no signal or
+  reload, and Howdah does not handle `SIGHUP`. Rename-based rotation
+  (logrotate's default, with `create`) works: the next event creates a new
+  file. `copytruncate` also works.
+
+  ```
+  # /etc/logrotate.d/howdah
+  /var/log/howdah/events.log {
+      daily
+      rotate 90
+      compress
+      delaycompress
+      missingok
+      notifempty
+      create 0640 www-data adm
+  }
+  ```
+
+- **Permissions.** The PHP worker user writes the file. If the file does not
+  exist, the worker creates it, owned by that user, with mode 0640 minus the
+  process umask (so not world-readable); an existing file keeps its mode. To
+  choose the owner, group and mode, create it first:
+
+  ```sh
+  sudo install -d -m 0750 -o www-data -g adm /var/log/howdah
+  sudo install -m 0640 -o www-data -g adm /dev/null /var/log/howdah/events.log
+  ```
+
+  The PHP user can rewrite its own log. If you need tamper evidence, ship the
+  lines off the host ([integrations](integrations/README.md)).
+- **Failure.** If the file cannot be opened or written, Howdah prints
+  `howdah: ERROR: cannot write the event log '<path>': <error> (continuing to
+  serve)` and writes the line to stderr as `howdah-event {...}`. Apache sends
+  stderr to its error log. **php-fpm discards worker stderr unless the pool
+  sets `catch_workers_output = yes`**, so on FPM a log path the workers cannot
+  write loses events. The `syslog` destination avoids file permissions
+  altogether.
+
+### Syslog destination
+
+- Howdah sends each line to `/dev/log`, the socket journald and rsyslog read,
+  framed the way glibc's `syslog()` frames it:
+  `<PRI>Oct 24 18:02:54 howdah[1429]: {"action":"block",...}`. The message
+  is exactly the JSON line. Severity is `warning` for `block` and `notice` for
+  `log`. With journald, `journalctl -t howdah -o cat` prints one JSON line
+  per event.
+- Howdah does not call `openlog(3)`. openlog state is per process and PHP
+  owns it: `error_log = syslog` and PHP's own `openlog()` set it, and PHP
+  (8.3, for one) calls `closelog()` at the end of every request, which resets
+  the tag.
+  Sharing it would label PHP's messages `howdah`, or Howdah's `php-fpm`.
+- The socket is a non-blocking datagram socket, opened in each worker on
+  first use (never in the parent process); it reconnects once if the daemon
+  restarted. The send never blocks: if `/dev/log` is missing (a container or
+  chroot without a syslog daemon), the daemon's queue is full, or the send
+  fails, Howdah prints a note and writes the line to stderr. In a container,
+  mount the host's socket: `-v /dev/log:/dev/log`.
+- Datagram only. glibc falls back to a stream socket when `/dev/log` is one
+  (some syslog-ng configurations); Howdah does not, because a stream connect
+  or send can block the request. Against a stream socket every line goes to
+  stderr with a note. journald and rsyslog use a datagram socket.
+- rsyslog truncates messages longer than its `$MaxMessageSize` (8 KiB by
+  default). Event lines are rarely over 1 KiB; the request path is the field
+  that can make one longer.
+- Tested by `lab/integration/log_contract.sh` against a stand-in daemon on
+  `/dev/log`, on PHP 7.4 and 8.3, under the built-in server, php-fpm and
+  Apache mod_php (prefork). A run against a real journald (PHP 7.4 and 8.3,
+  the host's socket mounted into the container) was done by hand; the lab
+  images have no journald, so it is not part of the script.
+
+### `exec`: a program per event
+
+Off unless `exec` is set. For every event line, after the line is written,
+Howdah starts the program and does not wait for it:
+
+- **stdin:** the JSON line and a newline, then end of file.
+- **argv:** the program path only. No arguments.
+- **environment:** only `HOWDAH_RULE` and `HOWDAH_ACTION` (from the line;
+  always `[a-z0-9_]`), and `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`.
+  Nothing from the PHP process or the request is inherited.
+- **stdout:** `/dev/null` (under CGI, PHP's stdout is the HTTP response).
+  **stderr:** inherited, so the program's errors reach the web server or FPM
+  error log.
+- **Descriptors:** stdin, stdout and stderr, plus a descriptor for the
+  program itself (see below). Open sockets, database connections and files of
+  the PHP worker are not inherited.
+- It runs in its own session (`setsid`), in `/`, as the PHP worker user.
+- It is not a child of the PHP worker. Howdah forks twice: the middle process
+  exits at once and Howdah reaps it, so the hook is re-parented to init (or
+  the nearest subreaper, such as php-fpm's master when that runs as PID 1 in
+  a container) and is never left as a zombie in a long-lived worker. A
+  userland `pcntl` `SIGCHLD` handler in the application can see that short
+  middle process exit; if it reaps it first, nothing breaks.
+
+**Checks, on every event.** Before each start Howdah opens the program
+without following a symlink and checks the open file: it must be a regular,
+executable file, not group- or world-writable, owned by root or by the user
+PHP runs as, and its directory must not be group- or world-writable (whoever
+can write the directory can swap the file). Then Howdah runs that same open
+file through `/proc/self/fd/N`, so the file that passed the checks is the
+file that runs, even if the path is replaced in between. If a check fails the
+hook is skipped and a note goes to stderr (again only when the reason
+changes); a fix takes effect at the next event. Two consequences: `/proc`
+must be mounted, and a script sees `$0` as `/proc/self/fd/N`, so use absolute
+paths inside it rather than `dirname "$0"`. The program path must name the
+real file, not a symlink.
+
+**Limits,** per PHP process (each FPM worker or Apache child counts on its
+own): at most `exec_rate_limit` starts in any one-second window (default
+10). Over it the hook is skipped for that event (the event is still logged)
+and one note goes to stderr. The checks above count toward the same limit, so
+they run at most that often. A line that does not fit in the pipe buffer
+(64 KiB by default) is not passed to the hook.
+
+An example that forwards blocks to a chat webhook, passing the line as data
+and never through a shell:
+
+```sh
+#!/bin/sh
+# /usr/local/sbin/howdah-alert (root:root, mode 0755)
+[ "$HOWDAH_ACTION" = block ] || exit 0
+exec curl -fsS -m 5 -H 'Content-Type: application/json' --data-binary @- https://hooks.example.com/howdah
+```
+
+**Security caveats.**
+
+- The program runs as the PHP worker user, on events that attackers trigger
+  at will. The rate limit bounds how often; keep the program quick.
+- The line contains attacker-influenced text (`uri`, and names in `reason`).
+  Treat stdin as untrusted input: do not `eval` it or paste fields into a
+  shell command.
+- Keep the program and its directory owned by root and not writable by the
+  PHP user. Howdah refuses a program that is group- or world-writable or in
+  such a directory, but it accepts one owned by the PHP user itself (for CLI
+  use), and a compromised application could rewrite that one.
+- Each start costs the request one `fork` and `exec` of the PHP worker (the
+  request waits for the `exec`, not for the program). The cost grows with the
+  worker's memory size; it has not been benchmarked.
+
+**SAPIs.** Starting a process from inside PHP is safe on the SAPIs Howdah
+supports, all of them single-threaded (NTS): php-fpm, Apache mod_php with the
+prefork MPM, CGI and the CLI. Between `fork` and `exec` the children only
+call `close_range`/`fcntl`, `fork`, `_exit` and `setsid`. Howdah does not
+support threaded (ZTS) builds such as mod_php under the worker or event MPM
+or FrankenPHP, so neither does the hook. Tested by
+`lab/integration/log_contract.sh` on PHP 7.4 and 8.3, under the built-in
+server, php-fpm and Apache mod_php prefork. Not tested: SELinux-enforcing
+hosts, where the policy may stop the web server domain from executing the
+program until it is labelled for that.
+
+### Shipping events to a SIEM
+
+[integrations/](integrations/README.md) has a Wazuh decoder and rules and a
+Promtail pipeline for Loki, tested against the real tools by
+`lab/integration/siem_snippets.sh`.
 
 ## Enforcement timing (honest caveat)
 

@@ -1329,6 +1329,20 @@ pub unsafe extern "C" fn howdah_free(ctx: *mut howdah_ctx) {
     }
 }
 
+/// The context's parsed `[log]` table (a copy). Rust-only, not part of the C
+/// ABI: the glue reads it once at startup to set up the log destination and
+/// hook. A NULL ctx or a caught panic gives the defaults, matching the safe
+/// defaults an unparseable config falls back to.
+///
+/// # Safety
+/// `ctx` NULL or live.
+pub unsafe fn howdah_log_config(ctx: *const howdah_ctx) -> crate::config::LogConfig {
+    if ctx.is_null() {
+        return crate::config::LogConfig::default();
+    }
+    catch_unwind(AssertUnwindSafe(|| (*ctx).config.log.clone())).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2160,6 +2174,22 @@ mod tests {
         let c = init("[sinks.ssrf]\nmode=\"block\"");
         begin(c);
         assert_eq!(unsafe { howdah_sink_check_ssrf(c, n, 0, n, 0, 0, std::ptr::null(), 5) }, HOWDAH_ALLOW);
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn log_config_accessor() {
+        use crate::config::LogDestination;
+        assert_eq!(unsafe { howdah_log_config(std::ptr::null()) }, crate::config::LogConfig::default());
+        let c = init("[log]\ndestination = \"syslog\"\nsyslog_ident = \"shop\"\nexec = \"/usr/local/bin/h\"");
+        let l = unsafe { howdah_log_config(c) };
+        assert_eq!(l.destination(), LogDestination::Syslog);
+        assert_eq!(l.ident(), "shop");
+        assert_eq!(l.exec.as_deref(), Some("/usr/local/bin/h"));
+        unsafe { howdah_free(c) };
+        // A config the core rejects falls back to safe defaults, [log] included.
+        let c = init("[log]\nexec = \"relative\"");
+        assert_eq!(unsafe { howdah_log_config(c) }, crate::config::LogConfig::default());
         unsafe { howdah_free(c) };
     }
 

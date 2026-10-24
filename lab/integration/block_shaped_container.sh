@@ -169,4 +169,32 @@ grep -q '"action":"block"' "$LOG" || fail "detect-critical: no block line in log
 echo "detect-critical OK (status $ccode, critical blocked in detect mode)"
 stop_server
 
+# ---- 4. Part DATA cannot switch the count rules off (regression) ------------
+# Before 1.2.1 the glue reconstructed multipart framing with a fixed public
+# boundary and fed part DATA through the same byte parser, so a chunk carrying
+# that boundary wedged the parser and every later part went uncounted. Shipped
+# defaults (detect, max_files=200): one small file whose CONTENT is the old
+# boundary token, then 250 empty file parts, must still be refused as max_files.
+: > "$LOG"
+printf 'mode = "detect"\n' > "$WORK/defaults.toml"
+POISONED="$WORK/poisoned.bin"; : > "$POISONED"
+printf -- '--PoisonB0\r\n' >> "$POISONED"
+printf 'Content-Disposition: form-data; name="avatar"; filename="a.png"\r\n' >> "$POISONED"
+printf 'Content-Type: image/png\r\n\r\n' >> "$POISONED"
+printf 'png\r\n--HdHbndYy7Qk3Zx1Lp9Wf2Rszz garbage\r\n' >> "$POISONED"
+_i=0
+while [ "$_i" -lt 250 ]; do
+  printf -- '--PoisonB0\r\n' >> "$POISONED"
+  printf 'Content-Disposition: form-data; name="f%s"; filename="f%s.bin"\r\n\r\n\r\n' "$_i" "$_i" >> "$POISONED"
+  _i=$((_i+1))
+done
+printf -- '--PoisonB0--\r\n' >> "$POISONED"
+start_server 8083 "$WORK/defaults.toml"
+pcode=$(post 8083 PoisonB0 "$POISONED" "$WORK/resp_poison.txt")
+echo "== [detect-defaults] poisoned flood -> HTTP $pcode =="; cat "$WORK/resp_poison.txt"; echo
+echo "$pcode" | grep -qE '^(413|403)$' || fail "poisoned-flood: data carrying the old internal boundary disabled the count rules; expected 403, got $pcode"
+grep -q '"rule":"max_files"' "$LOG" || { echo "log was:"; cat "$LOG"; fail "poisoned-flood: expected a max_files block line"; }
+echo "poisoned-flood OK (status $pcode, max_files still enforced)"
+stop_server
+
 echo "PASS"

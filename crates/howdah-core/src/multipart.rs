@@ -80,6 +80,13 @@ pub struct MultipartState {
     max_filename: usize,
     max_part_data: u64,
     total_fed: u64,
+    /// The caller reports parts structurally (`note_part`/`note_data`) instead
+    /// of feeding bytes: set by an empty boundary in `new`, or by the first
+    /// `note_*` call. The PHP glue works this way: it receives already-parsed
+    /// events from PHP, never request bytes, so there is no framing for
+    /// `finish` to find missing and no `Failed` phase that could stop the
+    /// counters.
+    structured: bool,
 }
 
 impl MultipartState {
@@ -121,7 +128,46 @@ impl MultipartState {
             max_filename: 0,
             max_part_data: 0,
             total_fed: 0,
+            // An empty boundary means the caller has no bytes to feed and will
+            // report parts with `note_part`/`note_data` instead (`feed` stays
+            // an error, as before).
+            structured: boundary.is_empty(),
         }
+    }
+
+    /// Record one already-parsed part (a `FORMDATA` or `FILE_START` event from
+    /// PHP). `filename_len` is `Some` for a file part. Counts are updated
+    /// unconditionally: nothing fed to `feed` or `note_data` can stop them,
+    /// which is the property the DoS defence rests on.
+    ///
+    /// The header high-water marks are set from the one `Content-Disposition`
+    /// header PHP exposes (`form-data; name="…"[; filename="…"]`), so the
+    /// header-based limits see the same lower bound they always did.
+    pub fn note_part(&mut self, name_len: usize, filename_len: Option<usize>) {
+        self.structured = true;
+        self.parts = self.parts.saturating_add(1);
+        self.max_part_data = self.max_part_data.max(self.data_len);
+        self.data_len = 0;
+        self.headers = 1;
+        self.max_headers = self.max_headers.max(1);
+        // "Content-Disposition" + `form-data; name=""` [+ `; filename=""`]
+        let mut hb = 19usize.saturating_add(18).saturating_add(name_len);
+        self.max_field_name = self.max_field_name.max(name_len);
+        if let Some(fl) = filename_len {
+            hb = hb.saturating_add(13).saturating_add(fl);
+            self.max_filename = self.max_filename.max(fl);
+            self.files = self.files.saturating_add(1);
+        }
+        self.max_header_bytes = self.max_header_bytes.max(hb);
+    }
+
+    /// Record `len` bytes of the current part's data (a `FORMDATA` value or
+    /// one `FILE_DATA` chunk). The bytes themselves are never looked at.
+    pub fn note_data(&mut self, len: u64) {
+        self.structured = true;
+        self.data_len = self.data_len.saturating_add(len);
+        self.max_part_data = self.max_part_data.max(self.data_len);
+        self.total_fed = self.total_fed.saturating_add(len);
     }
 
     pub fn parts(&self) -> u64 {
@@ -160,7 +206,12 @@ impl MultipartState {
     }
 
     /// Signal end of input. Errors if the closing boundary was never seen.
+    /// A structurally reported request (see `note_part`) has no closing
+    /// boundary to see and is never truncated or malformed.
     pub fn finish(&mut self) -> Result<Vec<Event>, MalformedBody> {
+        if self.structured {
+            return Ok(Vec::new());
+        }
         if let Phase::Failed(m) = self.phase {
             return Err(MalformedBody(m));
         }

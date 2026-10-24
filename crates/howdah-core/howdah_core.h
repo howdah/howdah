@@ -19,6 +19,42 @@
 #define HOWDAH_BLOCK 2
 
 /**
+ * Part kinds for `howdah_part`: a plain form field, or a file upload.
+ */
+#define HOWDAH_PART_FIELD 0
+
+#define HOWDAH_PART_FILE 1
+
+/**
+ * Input sources for `howdah_inspect_value`.
+ */
+#define HOWDAH_SRC_GET 0
+
+#define HOWDAH_SRC_POST 1
+
+#define HOWDAH_SRC_COOKIE 2
+
+#define HOWDAH_SRC_PATH 3
+
+#define HOWDAH_SINK_COMMAND_EXEC 0
+
+#define HOWDAH_SINK_INCLUDE 1
+
+#define HOWDAH_SINK_EVAL 2
+
+#define HOWDAH_SINK_UNSERIALIZE 3
+
+/**
+ * Maximum number of class names reported by `unserialize_classes`.
+ */
+#define MAX_CLASSES 64
+
+/**
+ * Maximum bytes of a single reported class name.
+ */
+#define MAX_CLASS_NAME 256
+
+/**
  * Opaque context: config plus per-request state.
  */
 typedef struct howdah_ctx howdah_ctx;
@@ -77,6 +113,69 @@ int32_t howdah_feed(struct howdah_ctx *ctx, const char *chunk, size_t len);
 int32_t howdah_request_end(struct howdah_ctx *ctx);
 
 /**
+ * Report one already-parsed multipart part: `kind` is `HOWDAH_PART_FIELD` or
+ * `HOWDAH_PART_FILE`; `name_len` is the form field name's byte length and
+ * `filename_len` the upload filename's (ignored for a field). This is how the
+ * PHP glue reports parts: PHP hands it parsed events, never request bytes, so
+ * nothing in the part data can influence the count. Returns the most severe
+ * action so far (0 Allow, 1 Log, 2 Block); `Block` for a part means the
+ * caller must not let PHP allocate it. Panic or NULL ctx returns 0.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_part(struct howdah_ctx *ctx, int32_t kind, size_t name_len, size_t filename_len);
+
+/**
+ * Report `len` bytes of data for the current part (a field value or one file
+ * chunk). Only the length is used, so the bytes are not passed. Returns the
+ * most severe action so far. Panic or NULL ctx returns 0.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_part_data(struct howdah_ctx *ctx, size_t len);
+
+/**
+ * Record one request variable name (GET/POST/COOKIE key) and run the
+ * input-shape checks. The name is inspected, never logged. Returns the most
+ * severe action so far this request (0 Allow, 1 Log, 2 Block). Panic or NULL
+ * ctx returns 0.
+ *
+ * # Safety
+ * `ctx` NULL or live; `name` NULL or valid for `name_len` bytes.
+ */
+int32_t howdah_input_var(struct howdah_ctx *ctx, const char *name, size_t name_len);
+
+/**
+ * Inspect one request value (Layer 2). `source` is a `HOWDAH_SRC_*` code.
+ * The value is scanned binary-safe and NEVER logged; the log carries only the
+ * class, source and (truncated) variable name. Resolved against the
+ * independent `[inspect]` mode, so a global `block` never arms blocking here.
+ * Returns the action for this value (0 Allow, 1 Log, 2 Block); it never drops
+ * the variable. NULL ctx, unknown source or panic returns 0.
+ *
+ * # Safety
+ * `ctx` NULL or live; `name`/`val` NULL or valid for their lengths.
+ */
+int32_t howdah_inspect_value(struct howdah_ctx *ctx,
+                             int32_t source,
+                             const char *name,
+                             size_t name_len,
+                             const char *val,
+                             size_t val_len);
+
+/**
+ * Record one request header by LENGTHS ONLY (names and values never cross the
+ * ABI) and run the header count/size checks. Returns the most severe action so
+ * far this request (0 Allow, 1 Log, 2 Block). Panic or NULL ctx returns 0.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_request_header(struct howdah_ctx *ctx, size_t name_len, size_t value_len);
+
+/**
  * Take the pending JSON log line (single line, no newline), or NULL if none.
  * Caller owns the string; free with `howdah_free_str`.
  *
@@ -84,6 +183,43 @@ int32_t howdah_request_end(struct howdah_ctx *ctx);
  * `ctx` NULL or live.
  */
 char *howdah_take_log_line(struct howdah_ctx *ctx);
+
+/**
+ * Layer-3 sink check: `sink` is a `HOWDAH_SINK_*` id, `name` the guarded
+ * function/construct, `arg` the sink argument (binary-safe; scanned, never
+ * logged). Returns 0 Allow / 1 Log / 2 Block. NULL ctx, unknown sink or panic
+ * returns 0 (fail-open: a sink-check bug must never neutralize a legitimate
+ * call). A hit is retrievable with `howdah_take_sink_log_line`.
+ *
+ * # Safety
+ * `ctx` NULL or live; `name`/`arg` NULL or valid for their lengths.
+ */
+int32_t howdah_sink_check(struct howdah_ctx *ctx,
+                          int32_t sink,
+                          const char *name,
+                          size_t name_len,
+                          const char *arg,
+                          size_t arg_len);
+
+/**
+ * Take the pending sink log line, or NULL if none. Same ownership contract as
+ * `howdah_take_log_line`; free with `howdah_free_str`.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+char *howdah_take_sink_log_line(struct howdah_ctx *ctx);
+
+/**
+ * Report that the request carried the self-test marker (see
+ * `limits::SELFTEST_FIELD`): stashes one `self_test` Log line, never a block.
+ * Returns the resulting action code (Log=1; 0 if Howdah is off, the ctx is
+ * NULL or a panic occurred; 2 if the request was already blocked).
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_selftest(struct howdah_ctx *ctx);
 
 /**
  * Free a string from `howdah_take_log_line`. NULL is a no-op.

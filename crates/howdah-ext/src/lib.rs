@@ -12,10 +12,11 @@
 //! the workspace dev+release profiles). `panic_unwinds` below is a runtime
 //! self-check proving a panic is actually caught, surfaced in `phpinfo()`.
 //!
-//! With no `phpN` feature only the pure [`feeder`] is compiled (host-testable,
-//! no PHP headers needed); the PHP glue is feature-gated.
+//! With no `phpN` feature only the pure [`ini_config`] is compiled
+//! (host-testable, no PHP headers needed); the PHP glue is feature-gated. The
+//! glue's use of the core ABI is exercised on the host by
+//! `tests/multipart_events.rs`, which drives the same calls the glue makes.
 
-pub mod feeder;
 pub mod ini_config;
 
 #[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]

@@ -1,0 +1,1581 @@
+{
+  "schema": 1,
+  "meta": {
+    "date_utc": "2026-10-24T17:27:57Z",
+    "php": "8.3.36",
+    "sapi": "php-fpm behind nginx",
+    "howdah_version": "1.3.0",
+    "howdah_config": "shipped defaults (howdah.mode = detect, no TOML; Layer 2 detect)",
+    "gotestwaf_version": "v0.5.8",
+    "gotestwaf_image": "wallarm/gotestwaf@sha256:ff7184da90029a98c87bfdbadcee544c979b999593175d17b2d38f642ee29977",
+    "git_commit": "2e3109efc754",
+    "git_commit_note": "Measured tree: 2e3109efc754 (Howdah 1.3.0, before #42) plus this branch's lab/bench files, not yet committed at the time; the field was added when the run was published."
+  },
+  "totals": {
+    "attack": {
+      "cases": 43,
+      "sent": 675,
+      "reached": 674,
+      "flagged": 26,
+      "in_scope_reached": 257,
+      "in_scope_flagged": 26,
+      "rate_pct": 3.9,
+      "in_scope_rate_pct": 10.1
+    },
+    "benign": {
+      "cases": 1,
+      "sent": 141,
+      "reached": 141,
+      "flagged": 0,
+      "in_scope_reached": 94,
+      "in_scope_flagged": 0,
+      "rate_pct": 0,
+      "in_scope_rate_pct": 0
+    }
+  },
+  "by_class": {
+    "sql_injection": {
+      "cases": 7,
+      "sent": 65,
+      "reached": 65,
+      "flagged": 1,
+      "in_scope_reached": 23,
+      "in_scope_flagged": 1,
+      "rate_pct": 1.5,
+      "in_scope_rate_pct": 4.3
+    },
+    "path_traversal": {
+      "cases": 3,
+      "sent": 30,
+      "reached": 30,
+      "flagged": 5,
+      "in_scope_reached": 12,
+      "in_scope_flagged": 5,
+      "rate_pct": 16.7,
+      "in_scope_rate_pct": 41.7
+    },
+    "command_injection": {
+      "cases": 11,
+      "sent": 62,
+      "reached": 62,
+      "flagged": 13,
+      "in_scope_reached": 27,
+      "in_scope_flagged": 13,
+      "rate_pct": 21,
+      "in_scope_rate_pct": 48.1
+    },
+    "other": {
+      "cases": 22,
+      "sent": 518,
+      "reached": 517,
+      "flagged": 7,
+      "in_scope_reached": 195,
+      "in_scope_flagged": 7,
+      "rate_pct": 1.4,
+      "in_scope_rate_pct": 3.6
+    }
+  },
+  "by_placement": {
+    "urlencoded form": {
+      "reached": 42,
+      "flagged": 9,
+      "rate_pct": 21.4
+    },
+    "multipart form": {
+      "reached": 31,
+      "flagged": 0,
+      "rate_pct": 0
+    },
+    "query string": {
+      "reached": 29,
+      "flagged": 6,
+      "rate_pct": 20.7
+    },
+    "JSON body": {
+      "reached": 29,
+      "flagged": 0,
+      "rate_pct": 0
+    },
+    "URL path": {
+      "reached": 15,
+      "flagged": 4,
+      "rate_pct": 26.7
+    },
+    "headers": {
+      "reached": 11,
+      "flagged": 0,
+      "rate_pct": 0
+    }
+  },
+  "by_encoder": {
+    "URL": {
+      "reached": 96,
+      "flagged": 18,
+      "rate_pct": 18.8
+    },
+    "Plain": {
+      "reached": 11,
+      "flagged": 1,
+      "rate_pct": 9.1
+    },
+    "Base64Flat": {
+      "reached": 50,
+      "flagged": 0,
+      "rate_pct": 0
+    }
+  },
+  "cases": [
+    {
+      "set": "community",
+      "name": "community-128kb-rce",
+      "type": "128KB RCE",
+      "howdah_class": "command_injection",
+      "benign": false,
+      "sent": 1,
+      "reached_php": 1,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 1,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "URL": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "urlencoded form": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": 0
+    },
+    {
+      "set": "community",
+      "name": "community-128kb-sqli",
+      "type": "128KB SQL Injection",
+      "howdah_class": "sql_injection",
+      "benign": false,
+      "sent": 1,
+      "reached_php": 1,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 1,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "URL": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "urlencoded form": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": 0
+    },
+    {
+      "set": "community",
+      "name": "community-128kb-xss",
+      "type": "128KB XSS",
+      "howdah_class": null,
+      "benign": false,
+      "sent": 1,
+      "reached_php": 1,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 1,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "URL": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "urlencoded form": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": 0
+    },
+    {
+      "set": "community",
+      "name": "community-16kb-rce",
+      "type": "16KB RCE",
+      "howdah_class": "command_injection",
+      "benign": false,
+      "sent": 1,
+      "reached_php": 1,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 1,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "URL": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "urlencoded form": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": 0
+    },
+    {
+      "set": "community",
+      "name": "community-16kb-sqli",
+      "type": "16KB SQL Injection",
+      "howdah_class": "sql_injection",
+      "benign": false,
+      "sent": 1,
+      "reached_php": 1,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 1,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "URL": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "urlencoded form": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": 0
+    },
+    {
+      "set": "community",
+      "name": "community-16kb-xss",
+      "type": "16KB XSS",
+      "howdah_class": null,
+      "benign": false,
+      "sent": 1,
+      "reached_php": 1,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 1,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "URL": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "urlencoded form": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": 0
+    },
+    {
+      "set": "community",
+      "name": "community-32kb-rce",
+      "type": "32KB RCE",
+      "howdah_class": "command_injection",
+      "benign": false,
+      "sent": 1,
+      "reached_php": 1,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 1,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "URL": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "urlencoded form": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": 0
+    },
+    {
+      "set": "community",
+      "name": "community-32kb-sqli",
+      "type": "32KB SQL Injection",
+      "howdah_class": "sql_injection",
+      "benign": false,
+      "sent": 1,
+      "reached_php": 1,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 1,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "URL": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "urlencoded form": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": 0
+    },
+    {
+      "set": "community",
+      "name": "community-32kb-xss",
+      "type": "32KB XSS",
+      "howdah_class": null,
+      "benign": false,
+      "sent": 1,
+      "reached_php": 1,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 1,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "URL": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "urlencoded form": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": 0
+    },
+    {
+      "set": "community",
+      "name": "community-64kb-rce",
+      "type": "64KB RCE",
+      "howdah_class": "command_injection",
+      "benign": false,
+      "sent": 1,
+      "reached_php": 1,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 1,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "URL": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "urlencoded form": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": 0
+    },
+    {
+      "set": "community",
+      "name": "community-64kb-sqli",
+      "type": "64KB SQL Injection",
+      "howdah_class": "sql_injection",
+      "benign": false,
+      "sent": 1,
+      "reached_php": 1,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 1,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "URL": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "urlencoded form": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": 0
+    },
+    {
+      "set": "community",
+      "name": "community-64kb-xss",
+      "type": "64KB XSS",
+      "howdah_class": null,
+      "benign": false,
+      "sent": 1,
+      "reached_php": 1,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 1,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "URL": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "urlencoded form": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": 0
+    },
+    {
+      "set": "community",
+      "name": "community-8kb-rce",
+      "type": "8KB RCE",
+      "howdah_class": "command_injection",
+      "benign": false,
+      "sent": 1,
+      "reached_php": 1,
+      "flagged": 1,
+      "flagged_same_class": 1,
+      "in_scope_reached": 1,
+      "in_scope_flagged": 1,
+      "by_encoder": {
+        "URL": {
+          "reached": 1,
+          "flagged": 1
+        }
+      },
+      "by_placement": {
+        "urlencoded form": {
+          "reached": 1,
+          "flagged": 1
+        }
+      },
+      "by_rule": {
+        "command_injection": 1
+      },
+      "rate_pct": 100,
+      "in_scope_rate_pct": 100
+    },
+    {
+      "set": "community",
+      "name": "community-8kb-sqli",
+      "type": "8KB SQL Injection",
+      "howdah_class": "sql_injection",
+      "benign": false,
+      "sent": 1,
+      "reached_php": 1,
+      "flagged": 1,
+      "flagged_same_class": 1,
+      "in_scope_reached": 1,
+      "in_scope_flagged": 1,
+      "by_encoder": {
+        "URL": {
+          "reached": 1,
+          "flagged": 1
+        }
+      },
+      "by_placement": {
+        "urlencoded form": {
+          "reached": 1,
+          "flagged": 1
+        }
+      },
+      "by_rule": {
+        "sql_injection": 1
+      },
+      "rate_pct": 100,
+      "in_scope_rate_pct": 100
+    },
+    {
+      "set": "community",
+      "name": "community-8kb-xss",
+      "type": "8KB XSS",
+      "howdah_class": null,
+      "benign": false,
+      "sent": 1,
+      "reached_php": 1,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 1,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "URL": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "urlencoded form": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": 0
+    },
+    {
+      "set": "community",
+      "name": "community-lfi-multipart",
+      "type": "community-lfi-multipart",
+      "howdah_class": "path_traversal",
+      "benign": false,
+      "sent": 2,
+      "reached_php": 2,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 2,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "Plain": {
+          "reached": 2,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "multipart form": {
+          "reached": 2,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": 0
+    },
+    {
+      "set": "community",
+      "name": "community-lfi",
+      "type": "LFI",
+      "howdah_class": "path_traversal",
+      "benign": false,
+      "sent": 8,
+      "reached_php": 8,
+      "flagged": 2,
+      "flagged_same_class": 2,
+      "in_scope_reached": 4,
+      "in_scope_flagged": 2,
+      "by_encoder": {
+        "URL": {
+          "reached": 8,
+          "flagged": 2
+        }
+      },
+      "by_placement": {
+        "query string": {
+          "reached": 2,
+          "flagged": 1
+        },
+        "urlencoded form": {
+          "reached": 2,
+          "flagged": 1
+        },
+        "multipart form": {
+          "reached": 2,
+          "flagged": 0
+        },
+        "JSON body": {
+          "reached": 2,
+          "flagged": 0
+        }
+      },
+      "by_rule": {
+        "path_traversal": 2
+      },
+      "rate_pct": 25,
+      "in_scope_rate_pct": 50
+    },
+    {
+      "set": "community",
+      "name": "community-rce-rawrequests",
+      "type": "RawRequest test",
+      "howdah_class": "command_injection",
+      "benign": false,
+      "sent": 3,
+      "reached_php": 3,
+      "flagged": 1,
+      "flagged_same_class": 0,
+      "in_scope_reached": 3,
+      "in_scope_flagged": 1,
+      "by_encoder": {
+        "Plain": {
+          "reached": 3,
+          "flagged": 1
+        }
+      },
+      "by_placement": {
+        "urlencoded form": {
+          "reached": 3,
+          "flagged": 1
+        }
+      },
+      "by_rule": {
+        "path_traversal": 1
+      },
+      "rate_pct": 33.3,
+      "in_scope_rate_pct": 33.3
+    },
+    {
+      "set": "community",
+      "name": "community-rce",
+      "type": "RCE",
+      "howdah_class": "command_injection",
+      "benign": false,
+      "sent": 4,
+      "reached_php": 4,
+      "flagged": 2,
+      "flagged_same_class": 2,
+      "in_scope_reached": 2,
+      "in_scope_flagged": 2,
+      "by_encoder": {
+        "URL": {
+          "reached": 4,
+          "flagged": 2
+        }
+      },
+      "by_placement": {
+        "query string": {
+          "reached": 1,
+          "flagged": 1
+        },
+        "urlencoded form": {
+          "reached": 1,
+          "flagged": 1
+        },
+        "multipart form": {
+          "reached": 1,
+          "flagged": 0
+        },
+        "JSON body": {
+          "reached": 1,
+          "flagged": 0
+        }
+      },
+      "by_rule": {
+        "command_injection": 2
+      },
+      "rate_pct": 50,
+      "in_scope_rate_pct": 100
+    },
+    {
+      "set": "community",
+      "name": "community-sqli",
+      "type": "SQL Injection",
+      "howdah_class": "sql_injection",
+      "benign": false,
+      "sent": 12,
+      "reached_php": 12,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 6,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "URL": {
+          "reached": 12,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "query string": {
+          "reached": 3,
+          "flagged": 0
+        },
+        "urlencoded form": {
+          "reached": 3,
+          "flagged": 0
+        },
+        "multipart form": {
+          "reached": 3,
+          "flagged": 0
+        },
+        "JSON body": {
+          "reached": 3,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": 0
+    },
+    {
+      "set": "community",
+      "name": "community-user-agent",
+      "type": "UserAgent",
+      "howdah_class": null,
+      "benign": false,
+      "sent": 9,
+      "reached_php": 9,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 0,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "Plain": {
+          "reached": 9,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "headers": {
+          "reached": 9,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": null
+    },
+    {
+      "set": "community",
+      "name": "community-xss",
+      "type": "XSS",
+      "howdah_class": null,
+      "benign": false,
+      "sent": 104,
+      "reached_php": 104,
+      "flagged": 4,
+      "flagged_same_class": 0,
+      "in_scope_reached": 52,
+      "in_scope_flagged": 4,
+      "by_encoder": {
+        "URL": {
+          "reached": 104,
+          "flagged": 4
+        }
+      },
+      "by_placement": {
+        "query string": {
+          "reached": 26,
+          "flagged": 2
+        },
+        "urlencoded form": {
+          "reached": 26,
+          "flagged": 2
+        },
+        "multipart form": {
+          "reached": 26,
+          "flagged": 0
+        },
+        "JSON body": {
+          "reached": 26,
+          "flagged": 0
+        }
+      },
+      "by_rule": {
+        "command_injection": 4
+      },
+      "rate_pct": 3.8,
+      "in_scope_rate_pct": 7.7
+    },
+    {
+      "set": "community",
+      "name": "community-xxe",
+      "type": "XXE",
+      "howdah_class": null,
+      "benign": false,
+      "sent": 2,
+      "reached_php": 2,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 0,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "Plain": {
+          "reached": 2,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "XML/SOAP body": {
+          "reached": 2,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": null
+    },
+    {
+      "set": "false-pos",
+      "name": "texts",
+      "type": null,
+      "howdah_class": null,
+      "benign": true,
+      "sent": 141,
+      "reached_php": 141,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 94,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "URL": {
+          "reached": 141,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "query string": {
+          "reached": 47,
+          "flagged": 0
+        },
+        "urlencoded form": {
+          "reached": 47,
+          "flagged": 0
+        },
+        "multipart form": {
+          "reached": 47,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": 0
+    },
+    {
+      "set": "owasp",
+      "name": "crlf",
+      "type": "CRLF Injection",
+      "howdah_class": null,
+      "benign": false,
+      "sent": 7,
+      "reached_php": 7,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 7,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "Plain": {
+          "reached": 7,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "URL path": {
+          "reached": 7,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": 0
+    },
+    {
+      "set": "owasp",
+      "name": "ldap-injection",
+      "type": "LDAP Injection",
+      "howdah_class": null,
+      "benign": false,
+      "sent": 24,
+      "reached_php": 24,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 6,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "Base64Flat": {
+          "reached": 12,
+          "flagged": 0
+        },
+        "URL": {
+          "reached": 12,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "query string": {
+          "reached": 6,
+          "flagged": 0
+        },
+        "urlencoded form": {
+          "reached": 6,
+          "flagged": 0
+        },
+        "multipart form": {
+          "reached": 6,
+          "flagged": 0
+        },
+        "JSON body": {
+          "reached": 6,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": 0
+    },
+    {
+      "set": "owasp",
+      "name": "mail-injection",
+      "type": "Mail Injection",
+      "howdah_class": null,
+      "benign": false,
+      "sent": 24,
+      "reached_php": 24,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 9,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "Base64Flat": {
+          "reached": 12,
+          "flagged": 0
+        },
+        "URL": {
+          "reached": 12,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "URL path": {
+          "reached": 6,
+          "flagged": 0
+        },
+        "query string": {
+          "reached": 6,
+          "flagged": 0
+        },
+        "urlencoded form": {
+          "reached": 6,
+          "flagged": 0
+        },
+        "multipart form": {
+          "reached": 6,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": 0
+    },
+    {
+      "set": "owasp",
+      "name": "nosql-injection",
+      "type": "NoSQL Injection",
+      "howdah_class": null,
+      "benign": false,
+      "sent": 50,
+      "reached_php": 50,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 15,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "Base64Flat": {
+          "reached": 25,
+          "flagged": 0
+        },
+        "URL": {
+          "reached": 25,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "URL path": {
+          "reached": 10,
+          "flagged": 0
+        },
+        "query string": {
+          "reached": 10,
+          "flagged": 0
+        },
+        "urlencoded form": {
+          "reached": 10,
+          "flagged": 0
+        },
+        "multipart form": {
+          "reached": 10,
+          "flagged": 0
+        },
+        "JSON body": {
+          "reached": 10,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": 0
+    },
+    {
+      "set": "owasp",
+      "name": "path-traversal",
+      "type": "Path Traversal",
+      "howdah_class": "path_traversal",
+      "benign": false,
+      "sent": 20,
+      "reached_php": 20,
+      "flagged": 3,
+      "flagged_same_class": 3,
+      "in_scope_reached": 6,
+      "in_scope_flagged": 3,
+      "by_encoder": {
+        "Base64Flat": {
+          "reached": 10,
+          "flagged": 0
+        },
+        "URL": {
+          "reached": 10,
+          "flagged": 3
+        }
+      },
+      "by_placement": {
+        "URL path": {
+          "reached": 4,
+          "flagged": 1
+        },
+        "query string": {
+          "reached": 4,
+          "flagged": 1
+        },
+        "urlencoded form": {
+          "reached": 4,
+          "flagged": 1
+        },
+        "multipart form": {
+          "reached": 4,
+          "flagged": 0
+        },
+        "JSON body": {
+          "reached": 4,
+          "flagged": 0
+        }
+      },
+      "by_rule": {
+        "path_traversal": 3
+      },
+      "rate_pct": 15,
+      "in_scope_rate_pct": 50
+    },
+    {
+      "set": "owasp",
+      "name": "rce-urlparam",
+      "type": "RCE",
+      "howdah_class": "command_injection",
+      "benign": false,
+      "sent": 9,
+      "reached_php": 9,
+      "flagged": 2,
+      "flagged_same_class": 0,
+      "in_scope_reached": 6,
+      "in_scope_flagged": 2,
+      "by_encoder": {
+        "URL": {
+          "reached": 9,
+          "flagged": 2
+        }
+      },
+      "by_placement": {
+        "query string": {
+          "reached": 3,
+          "flagged": 1
+        },
+        "urlencoded form": {
+          "reached": 3,
+          "flagged": 1
+        },
+        "multipart form": {
+          "reached": 3,
+          "flagged": 0
+        }
+      },
+      "by_rule": {
+        "path_traversal": 2
+      },
+      "rate_pct": 22.2,
+      "in_scope_rate_pct": 33.3
+    },
+    {
+      "set": "owasp",
+      "name": "rce-urlpath",
+      "type": "RCE",
+      "howdah_class": "command_injection",
+      "benign": false,
+      "sent": 3,
+      "reached_php": 3,
+      "flagged": 3,
+      "flagged_same_class": 3,
+      "in_scope_reached": 3,
+      "in_scope_flagged": 3,
+      "by_encoder": {
+        "URL": {
+          "reached": 3,
+          "flagged": 3
+        }
+      },
+      "by_placement": {
+        "URL path": {
+          "reached": 3,
+          "flagged": 3
+        }
+      },
+      "by_rule": {
+        "command_injection": 3
+      },
+      "rate_pct": 100,
+      "in_scope_rate_pct": 100
+    },
+    {
+      "set": "owasp",
+      "name": "rce",
+      "type": "RCE",
+      "howdah_class": "command_injection",
+      "benign": false,
+      "sent": 6,
+      "reached_php": 6,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 0,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "Plain": {
+          "reached": 6,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "JSON body": {
+          "reached": 3,
+          "flagged": 0
+        },
+        "headers": {
+          "reached": 3,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": null
+    },
+    {
+      "set": "owasp",
+      "name": "shell-injection",
+      "type": "Shell",
+      "howdah_class": "command_injection",
+      "benign": false,
+      "sent": 32,
+      "reached_php": 32,
+      "flagged": 4,
+      "flagged_same_class": 4,
+      "in_scope_reached": 8,
+      "in_scope_flagged": 4,
+      "by_encoder": {
+        "Base64Flat": {
+          "reached": 16,
+          "flagged": 0
+        },
+        "URL": {
+          "reached": 16,
+          "flagged": 4
+        }
+      },
+      "by_placement": {
+        "JSON body": {
+          "reached": 8,
+          "flagged": 0
+        },
+        "query string": {
+          "reached": 8,
+          "flagged": 2
+        },
+        "urlencoded form": {
+          "reached": 8,
+          "flagged": 2
+        },
+        "multipart form": {
+          "reached": 8,
+          "flagged": 0
+        }
+      },
+      "by_rule": {
+        "command_injection": 4
+      },
+      "rate_pct": 12.5,
+      "in_scope_rate_pct": 50
+    },
+    {
+      "set": "owasp",
+      "name": "sql-injection",
+      "type": "SQL Injection",
+      "howdah_class": "sql_injection",
+      "benign": false,
+      "sent": 48,
+      "reached_php": 48,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 12,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "Base64Flat": {
+          "reached": 24,
+          "flagged": 0
+        },
+        "URL": {
+          "reached": 24,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "URL path": {
+          "reached": 8,
+          "flagged": 0
+        },
+        "query string": {
+          "reached": 8,
+          "flagged": 0
+        },
+        "JSON body": {
+          "reached": 8,
+          "flagged": 0
+        },
+        "headers": {
+          "reached": 8,
+          "flagged": 0
+        },
+        "urlencoded form": {
+          "reached": 8,
+          "flagged": 0
+        },
+        "multipart form": {
+          "reached": 8,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": 0
+    },
+    {
+      "set": "owasp",
+      "name": "ss-include",
+      "type": "SS Injection",
+      "howdah_class": null,
+      "benign": false,
+      "sent": 24,
+      "reached_php": 24,
+      "flagged": 3,
+      "flagged_same_class": 0,
+      "in_scope_reached": 9,
+      "in_scope_flagged": 3,
+      "by_encoder": {
+        "Base64Flat": {
+          "reached": 12,
+          "flagged": 0
+        },
+        "URL": {
+          "reached": 12,
+          "flagged": 3
+        }
+      },
+      "by_placement": {
+        "URL path": {
+          "reached": 6,
+          "flagged": 1
+        },
+        "query string": {
+          "reached": 6,
+          "flagged": 1
+        },
+        "urlencoded form": {
+          "reached": 6,
+          "flagged": 1
+        },
+        "multipart form": {
+          "reached": 6,
+          "flagged": 0
+        }
+      },
+      "by_rule": {
+        "sql_injection": 3
+      },
+      "rate_pct": 12.5,
+      "in_scope_rate_pct": 33.3
+    },
+    {
+      "set": "owasp",
+      "name": "sst-injection",
+      "type": "SST Injection",
+      "howdah_class": null,
+      "benign": false,
+      "sent": 24,
+      "reached_php": 24,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 9,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "Base64Flat": {
+          "reached": 12,
+          "flagged": 0
+        },
+        "URL": {
+          "reached": 12,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "URL path": {
+          "reached": 6,
+          "flagged": 0
+        },
+        "query string": {
+          "reached": 6,
+          "flagged": 0
+        },
+        "urlencoded form": {
+          "reached": 6,
+          "flagged": 0
+        },
+        "multipart form": {
+          "reached": 6,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": 0
+    },
+    {
+      "set": "owasp",
+      "name": "xml-injection",
+      "type": "XXE",
+      "howdah_class": null,
+      "benign": false,
+      "sent": 7,
+      "reached_php": 7,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 0,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "Plain": {
+          "reached": 7,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "XML/SOAP body": {
+          "reached": 7,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": null
+    },
+    {
+      "set": "owasp",
+      "name": "xss-scripting",
+      "type": "XSS",
+      "howdah_class": null,
+      "benign": false,
+      "sent": 224,
+      "reached_php": 223,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 83,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "Base64Flat": {
+          "reached": 112,
+          "flagged": 0
+        },
+        "URL": {
+          "reached": 111,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "URL path": {
+          "reached": 55,
+          "flagged": 0
+        },
+        "query string": {
+          "reached": 56,
+          "flagged": 0
+        },
+        "urlencoded form": {
+          "reached": 56,
+          "flagged": 0
+        },
+        "multipart form": {
+          "reached": 56,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": 0
+    },
+    {
+      "set": "owasp-api",
+      "name": "graphql-post",
+      "type": "GraphQL",
+      "howdah_class": null,
+      "benign": false,
+      "sent": 0,
+      "reached_php": 0,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 0,
+      "in_scope_flagged": 0,
+      "by_encoder": {},
+      "by_placement": {},
+      "by_rule": {},
+      "rate_pct": null,
+      "in_scope_rate_pct": null
+    },
+    {
+      "set": "owasp-api",
+      "name": "graphql",
+      "type": "GraphQL",
+      "howdah_class": null,
+      "benign": false,
+      "sent": 0,
+      "reached_php": 0,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 0,
+      "in_scope_flagged": 0,
+      "by_encoder": {},
+      "by_placement": {},
+      "by_rule": {},
+      "rate_pct": null,
+      "in_scope_rate_pct": null
+    },
+    {
+      "set": "owasp-api",
+      "name": "grpc",
+      "type": "gRPC",
+      "howdah_class": null,
+      "benign": false,
+      "sent": 0,
+      "reached_php": 0,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 0,
+      "in_scope_flagged": 0,
+      "by_encoder": {},
+      "by_placement": {},
+      "by_rule": {},
+      "rate_pct": null,
+      "in_scope_rate_pct": null
+    },
+    {
+      "set": "owasp-api",
+      "name": "non-crud",
+      "type": "REST non-CRUD",
+      "howdah_class": null,
+      "benign": false,
+      "sent": 2,
+      "reached_php": 2,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 0,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "Plain": {
+          "reached": 2,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "other body": {
+          "reached": 2,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": null
+    },
+    {
+      "set": "owasp-api",
+      "name": "rest",
+      "type": "REST",
+      "howdah_class": null,
+      "benign": false,
+      "sent": 7,
+      "reached_php": 7,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 0,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "Plain": {
+          "reached": 7,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "JSON body": {
+          "reached": 7,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": null
+    },
+    {
+      "set": "owasp-api",
+      "name": "soap",
+      "type": "SOAP",
+      "howdah_class": null,
+      "benign": false,
+      "sent": 5,
+      "reached_php": 5,
+      "flagged": 0,
+      "flagged_same_class": 0,
+      "in_scope_reached": 0,
+      "in_scope_flagged": 0,
+      "by_encoder": {
+        "Plain": {
+          "reached": 5,
+          "flagged": 0
+        }
+      },
+      "by_placement": {
+        "XML/SOAP body": {
+          "reached": 5,
+          "flagged": 0
+        }
+      },
+      "by_rule": {},
+      "rate_pct": 0,
+      "in_scope_rate_pct": null
+    }
+  ]
+}

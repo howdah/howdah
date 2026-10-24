@@ -289,3 +289,35 @@ jobs:
         continue-on-error: true
         working-directory: site
         run: npm audit --omit=dev --json | node scripts/audit-summary.mjs
+
+  # Latency regression gate (lab/bench/README.md). Short mode: PHP 8.3,
+  # php-fpm behind nginx, every configuration x workload, one 10 s round per
+  # cell. Fails if Howdah adds more than 50 us to the median GET with no body,
+  # or if any cell's p50 relative to the same run's no-extension cell grows
+  # more than 25% over lab/bench/baseline-ci.json. GitHub-hosted runners are
+  # shared VMs with noisy timings, so both limits are deliberately loose: this
+  # catches a gross regression, not a small one. No other job depends on it.
+  bench:
+    name: bench (latency gate, PHP 8.3)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Bench reporter unit tests
+        run: node --test lab/bench/bench.test.mjs
+      - name: Build lab base image
+        run: docker build -f lab/images/php-8.3.Dockerfile -t lab-php-8.3 lab/images
+      - name: Latency harness (short mode)
+        run: MODE=ci OUT="$PWD/lab/bench/out/ci" sh lab/bench/run.sh
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: lab/bench/out/ci/
+          if-no-files-found: warn
+      - name: Regression gate
+        run: node lab/bench/bench.mjs gate lab/bench/out/ci/results.json lab/bench/baseline-ci.json

@@ -1,0 +1,13 @@
+# Benchmark config "l1": Layer 1 only (request-shape limits at their defaults).
+# Layers 2, 3 and 4 are switched off with their master switches. (Layer 4,
+# new in 1.4, is off in every benchmark config: it is not measured here.)
+mode = "detect"
+
+[inspect]
+enabled = false
+
+[sinks]
+enabled = false
+
+[behavior]
+enabled = false

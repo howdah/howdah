@@ -81,7 +81,7 @@ sudo dnf remove ea-php81-php-howdah    <span class="c"># or plesk-php81-howdah, 
         <dd>Non-thread-safe (NTS) PHP 5.4 through 8.5 on Linux x86_64 and aarch64, one build per minor version. ZTS builds are not supported. See <a href="/coverage/">coverage</a> for what has been tested.</dd>
 
         <dt>What is the performance cost?</dt>
-        <dd>Howdah counts parts and variables as PHP already parses them; there is no second parse of the body. It adds bounded bookkeeping per request and does not buffer the whole body itself.</dd>
+        <dd>Howdah counts parts and variables as PHP already parses them; there is no second parse of the body. It adds bounded bookkeeping per request and does not buffer the whole body itself. Measured on one machine, a request with no body took a few microseconds longer with Howdah loaded, and Layer 2 adds time in proportion to the form values it scans (tens of microseconds for a 1&nbsp;KB form). The numbers, the method and the OPcache JIT result are on the <a href="/docs/performance/">performance page</a>.</dd>
 
         <dt>How do I report a security issue?</dt>
         <dd>Privately, through GitHub's vulnerability reporting — see the <a href={`${REPO}/security/policy`}>security policy</a>. Please do not open a public issue for a suspected vulnerability.</dd>

@@ -1,0 +1,326 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import perf from '../../data/performance.json';
+import { REPO } from '../../lib/site';
+
+// Every number on this page is read from src/data/performance.json, which
+// `node lab/bench/bench.mjs publish` writes from a real run (see
+// lab/bench/README.md). Nothing here is typed by hand.
+const L = perf.latency;
+const m = L.machine;
+const p = m.params;
+const cells = L.cells as any[];
+const runDate = m.date_utc.slice(0, 10);
+
+const CONFIG_LABEL: Record<string, string> = { noext: 'No extension', l1: 'Layer 1', l12: 'Layers 1+2', l123: 'Layers 1+2+3' };
+const WORKLOAD_LABEL: Record<string, string> = {
+  get_nobody: 'GET, no body',
+  post_form_1k: 'POST, 1 KB form',
+  post_multipart_50k: 'POST, 50 KB multipart (10 parts)',
+  sink_exec_include: "GET, system('true') + include",
+};
+const SAPI_LABEL: Record<string, string> = { fpm: 'php-fpm behind nginx', apache: 'Apache mod_php (prefork)' };
+const HOWDAH = ['l1', 'l12', 'l123'];
+
+const groups: { minor: string; sapi: string; php: string }[] = [];
+for (const c of cells) {
+  if (!groups.find((g) => g.minor === c.minor && g.sapi === c.sapi)) groups.push({ minor: c.minor, sapi: c.sapi, php: c.php });
+}
+const versions = [...new Set(cells.map((c) => c.php))];
+const cell = (minor: string, sapi: string, w: string, cfg: string) =>
+  cells.find((c) => c.minor === minor && c.sapi === sapi && c.workload === w && c.config === cfg);
+
+const n1 = (x: number | null) => (x == null ? 'n/a' : Number.isInteger(x) ? String(x) : x.toFixed(1));
+const signed = (x: number | null) => (x == null ? 'n/a' : (x > 0 ? '+' : x < 0 ? '−' : '±') + n1(Math.abs(x)));
+const range = (xs: number[]) => `${signed(Math.min(...xs))} to ${signed(Math.max(...xs))}`;
+const median = (xs: number[]) => {
+  const a = [...xs].sort((x, y) => x - y);
+  const h = Math.floor(a.length / 2);
+  return a.length % 2 ? a[h] : (a[h - 1] + a[h]) / 2;
+};
+const added = (w: string, cfgs: string[]) =>
+  cells.filter((c) => c.workload === w && cfgs.includes(c.config)).map((c) => c.added_p50_us as number);
+const getAdded = added('get_nobody', HOWDAH);
+const getSpread = median(cells.filter((c) => c.workload === 'get_nobody').map((c) => c.p50_spread_us));
+const formL2 = added('post_form_1k', ['l12', 'l123']);
+const mpL2 = added('post_multipart_50k', ['l12', 'l123']);
+const mpL1 = added('post_multipart_50k', ['l1']);
+const sinkAll = added('sink_exec_include', ['l123']);
+const sinkBase = cells.filter((c) => c.workload === 'sink_exec_include' && c.config === 'noext').map((c) => c.p50_us);
+const sinkSpread = Math.max(...cells.filter((c) => c.workload === 'sink_exec_include').map((c) => c.p50_spread_us));
+const getBase = cells.filter((c) => c.workload === 'get_nobody' && c.config === 'noext').map((c) => c.p50_us);
+
+const jit = perf.jit;
+// jit.sh's output gained the default/opcode split after the published run;
+// read either shape.
+const jitDefaultOff = (r: any) =>
+  (r.jit_on.cli_default ?? r.jit_on.cli_with_howdah) === false && (r.jit_on.fpm_default ?? r.jit_on.fpm_with_howdah) === false;
+const jitOff = jit.results.filter(jitDefaultOff);
+const jitHasOpcode = jit.results.some((r: any) => 'cli_opcode_hook' in r.jit_on);
+const jitWarning = jit.results.map((r: any) => r.startup_warning ?? r.startup_warning_opcode_hook).find(Boolean) ?? '';
+const yesNo = (b: boolean | null) => (b === true ? 'on' : b === false ? 'off' : 'n/a');
+
+const C = perf.corpus;
+const cm = C.meta;
+const CLASS_LABEL: Record<string, string> = {
+  sql_injection: 'SQL injection',
+  path_traversal: 'Path traversal / LFI',
+  command_injection: 'Command injection / RCE',
+  other: 'Not a Layer 2 class (XSS, LDAP, NoSQL, SSTI, XXE, ...)',
+};
+const frac = (f: number, n: number) => `${f}/${n}` + (n ? ` (${n1(Math.round((f / n) * 1000) / 10)}%)` : '');
+const l2 = ['sql_injection', 'path_traversal', 'command_injection'].map((k) => C.by_class[k]);
+const l2InScope = l2.reduce((a: any, t: any) => ({ f: a.f + t.in_scope_flagged, n: a.n + t.in_scope_reached }), { f: 0, n: 0 });
+const benign = C.totals.benign;
+---
+<Layout
+  title="Howdah performance, JIT and detection measurements"
+  description="Measured request latency with and without Howdah on PHP 5.6, 7.4 and 8.3 (php-fpm and Apache mod_php), the OPcache JIT result, and what Layer 2 flags of the GoTestWAF corpus."
+  path="/docs/performance/"
+>
+  <div class="pagehead">
+    <div class="wrap">
+      <p class="crumbs"><a href="/">Home</a> / <a href="/docs/">Docs</a> / <span aria-current="page">Performance</span></p>
+      <h1>Performance: what Howdah costs, and what Layer 2 flags</h1>
+      <p class="lede">Measured on {runDate} on one machine: request latency with and without Howdah, an OPcache JIT check, and a standard attack corpus against Layer 2. Every number on this page is read from the benchmark's result files, not typed by hand.</p>
+    </div>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <h2>Summary</h2>
+      <ul class="facts">
+        <li><strong>A GET with no body:</strong> Howdah changed the median (p50) request time by {range(getAdded)}&nbsp;µs, across every layer combination, PHP version and server tested, on requests that take {n1(Math.min(...getBase))} to {n1(Math.max(...getBase))}&nbsp;µs without it. The same cell moved by about {n1(getSpread)}&nbsp;µs between rounds. The design aimed for no measurable overhead here; a few microseconds is measurable, and small next to a real application's own time.</li>
+        <li><strong>Layer 2 costs time in proportion to the values it scans.</strong> With Layer 2 on, the 1&nbsp;KB form moved by {range(formL2)}&nbsp;µs and the 50&nbsp;KB multipart body (8 text fields of about 200 bytes each, 2 files) by {range(mpL2)}&nbsp;µs. With Layer 1 alone, the multipart body moved by {range(mpL1)}&nbsp;µs: counting parts costs little, scanning values costs more.</li>
+        <li><strong>Layer 3 with every sink in detect mode:</strong> the <code>system('true')</code> + <code>include</code> request moved by {range(sinkAll)}&nbsp;µs on a request that takes {n1(Math.min(...sinkBase))} to {n1(Math.max(...sinkBase))}&nbsp;µs, most of it spent forking a shell. Those cells moved by up to {n1(sinkSpread)}&nbsp;µs between rounds, so the Layer 3 difference is inside the noise.</li>
+        <li><strong>OPcache JIT:</strong> before <a href={`${REPO}/pull/42`}>#42</a>, loading Howdah turned the JIT off on PHP 8.x ({jitOff.map((r: any) => r.php).join(', ')} measured). Since #42 the default keeps it on; that is not measured here yet. The PHP 8.3 latency numbers on this page are without the JIT. <a href="#jit">Details</a>.</li>
+        <li><strong>Layer 2 flagged {frac(l2InScope.f, l2InScope.n)}</strong> of the GoTestWAF payloads in its three classes that arrived where it looks, and {frac(benign.flagged, benign.reached)} of GoTestWAF's benign requests. That is what a narrow, log-only layer catches of a standard corpus, not a WAF score. <a href="#detection">Details</a>.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h2>How it was measured</h2>
+      <ul class="facts">
+        <li><strong>Machine:</strong> {m.cpu_model}, {m.nproc} CPUs, {Math.round(m.mem_total_kb / 1048576)}&nbsp;GiB RAM, kernel {m.kernel}, {m.os}, CPU governor <code>{m.cpu_governor}</code>, Docker {m.docker}. It is a shared workstation, not an idle benchmark box: the 1-minute load average at the end of each round ranged from {m.load1?.min} to {m.load1?.max} (median {m.load1?.median}).</li>
+        <li><strong>Software:</strong> Howdah {m.howdah_version} (commit <code>{m.git_commit}</code>, which is <code>main</code> before <a href={`${REPO}/pull/42`}>#42</a> and #44) built in each lab image; PHP {versions.join(', ')}; {m.nginx}; {m.wrk}.</li>
+        <li><strong>Servers:</strong> php-fpm (static pool of {p.fpm_workers} children) behind nginx over FastCGI, and Apache mod_php (prefork). The load generator and nginx share the PHP container's network namespace, so all traffic is loopback. CPU pinning: {m.pinning}.</li>
+        <li><strong>Configurations:</strong> no extension; Layer 1 only (<code>[inspect]</code> and <code>[sinks]</code> disabled); Layers 1+2 (input inspection in detect mode); Layers 1+2+3 (every sink in detect mode, including <code>unserialize</code>, <code>phar</code> and <code>ssrf</code>, which are off by default, with allowlists covering the benchmark script). Layer 4 (new in 1.4) is switched off in every configuration and was not measured. OPcache is on in every configuration and the JIT is off.</li>
+        <li><strong>Workloads:</strong> a GET with no body; a POST of a 1&nbsp;KB urlencoded form; a POST of a 50&nbsp;KB multipart body with 10 parts (8 text fields, 2 files); a GET of a script that calls <code>system('true')</code> and <code>include</code>s one file. The scripts read every superglobal, as a real application does.</li>
+        <li><strong>Load:</strong> wrk with {p.conns === 1 ? 'one connection, so one request at a time: each latency is that request’s own time, with no queueing in nginx or PHP' : `${p.conns} connections`}. {p.warmup_s}&nbsp;s warmup, then {p.duration_s}&nbsp;s measured, {p.rounds} rounds per cell. Each number is the median across rounds. Workloads are the outer loop and configurations the inner loop, rotated every round, so a cell and its no-extension baseline are measured minutes apart.</li>
+        <li><strong>Checks:</strong> before each cell a probe request proves which configuration is loaded (an injection-shaped value, a non-allowlisted command and a <code>phar://</code> path must log exactly for the layers that are on). After each cell the Howdah log must be empty: benign traffic wrote no events in any cell.</li>
+      </ul>
+      <pre tabindex="0"><code>sh lab/bench/run.sh      <span class="c"># latency: PHP 5.6, 7.4, 8.3 x php-fpm, Apache (about 80 minutes)</span>
+sh lab/bench/jit.sh      <span class="c"># OPcache JIT check: PHP 8.1, 8.3</span>
+sh lab/bench/corpus.sh   <span class="c"># GoTestWAF corpus against Layer 2</span></code></pre>
+      <p class="legend">The scripts, configs and raw results are in <a href={`${REPO}/tree/main/lab/bench`}>lab/bench</a>; <a href={`${REPO}/blob/main/docs/performance.md`}>docs/performance.md</a> has the same tables in the repository.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h2>GET with no body: added median latency</h2>
+      <p>Microseconds added to the median request, compared with the same PHP and server with no extension loaded. Negative numbers mean the Howdah cell happened to be faster; that is noise.</p>
+      <div class="tablewrap" tabindex="0" role="region" aria-label="Added median latency for a GET with no body (scrolls sideways on narrow screens)">
+        <table>
+          <caption class="sr-only">Added p50 latency, GET with no body, in microseconds</caption>
+          <thead>
+            <tr><th scope="col">PHP</th><th scope="col">Server</th><th scope="col" class="num">No extension, p50 µs</th>{HOWDAH.map((k) => <th scope="col" class="num">{CONFIG_LABEL[k]}</th>)}</tr>
+          </thead>
+          <tbody>
+            {groups.map((g) => (
+              <tr>
+                <th scope="row">{g.php}</th>
+                <td>{SAPI_LABEL[g.sapi]}</td>
+                <td class="num">{n1(cell(g.minor, g.sapi, 'get_nobody', 'noext')?.p50_us)}</td>
+                {HOWDAH.map((k) => <td class="num">{signed(cell(g.minor, g.sapi, 'get_nobody', k)?.added_p50_us)}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h2>All latency results</h2>
+      <p>p50 and p99 are wrk's latency percentiles. {p.conns === 1 ? 'Requests per second is for one connection, so it is roughly one second divided by the mean latency, not the server’s capacity.' : `Requests per second is over ${p.conns} connections.`} p99 moves between rounds on a shared machine; read it as a rough bound, not a comparison.</p>
+      {groups.map((g) => (
+        <>
+          <h3>PHP {g.php}, {SAPI_LABEL[g.sapi]}</h3>
+          <div class="tablewrap" tabindex="0" role="region" aria-label={`Latency, PHP ${g.php}, ${SAPI_LABEL[g.sapi]} (scrolls sideways on narrow screens)`}>
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Workload</th><th scope="col">Configuration</th>
+                  <th scope="col" class="num">p50 µs</th><th scope="col" class="num">p99 µs</th><th scope="col" class="num">Requests/s</th>
+                  <th scope="col" class="num">Added p50 µs</th><th scope="col" class="num">Added p99 µs</th><th scope="col" class="num">Requests/s change</th>
+                </tr>
+              </thead>
+              <tbody>
+                {cells.filter((c) => c.minor === g.minor && c.sapi === g.sapi).map((c) => (
+                  <tr>
+                    <td>{WORKLOAD_LABEL[c.workload]}</td>
+                    <td>{CONFIG_LABEL[c.config]}</td>
+                    <td class="num">{n1(c.p50_us)}</td>
+                    <td class="num">{n1(c.p99_us)}</td>
+                    <td class="num">{Math.round(c.rps).toLocaleString('en-US')}</td>
+                    <td class="num">{c.config === 'noext' ? '' : signed(c.added_p50_us)}</td>
+                    <td class="num">{c.config === 'noext' ? '' : signed(c.added_p99_us)}</td>
+                    <td class="num">{c.config === 'noext' ? '' : `${signed(c.rps_change_pct)}%`}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      ))}
+    </div>
+  </section>
+
+  <section id="jit">
+    <div class="wrap">
+      <h2>OPcache JIT</h2>
+      <p>Measured on {jit.date_utc.slice(0, 10)} with Howdah {jit.howdah_version} (commit <code>{jit.git_commit}</code>), <strong>before <a href={`${REPO}/pull/42`}>#42</a> was merged</strong>. With <code>opcache.jit=tracing</code> and <code>opcache.jit_buffer_size=64M</code>, the JIT was on without Howdah and off as soon as Howdah was loaded, whatever the config said. At startup PHP printed:</p>
+      {jitWarning && <pre tabindex="0"><code>Warning: {jitWarning}</code></pre>}
+      <p>The values below are <code>opcache_get_status()['jit']['on']</code>, read from the CLI and from a php-fpm worker.</p>
+      <div class="tablewrap" tabindex="0" role="region" aria-label="JIT state with and without Howdah (scrolls sideways on narrow screens)">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">PHP</th>
+              <th scope="col">JIT without Howdah (CLI / php-fpm)</th>
+              <th scope="col">JIT with Howdah, shipped defaults (CLI / php-fpm)</th>
+              {jitHasOpcode && <th scope="col">JIT with <code>hook = "opcode"</code> (CLI / php-fpm)</th>}
+              <th scope="col">Integration suite, JIT off</th>
+              <th scope="col">Integration suite, JIT configured</th>
+            </tr>
+          </thead>
+          <tbody>
+            {jit.results.map((r: any) => (
+              <tr>
+                <th scope="row">{r.php}</th>
+                <td>{yesNo(r.jit_on.cli_without_howdah)} / {yesNo(r.jit_on.fpm_without_howdah)}</td>
+                <td>{yesNo(r.jit_on.cli_default ?? r.jit_on.cli_with_howdah)} / {yesNo(r.jit_on.fpm_default ?? r.jit_on.fpm_with_howdah)}</td>
+                {jitHasOpcode && <td>{yesNo(r.jit_on.cli_opcode_hook)} / {yesNo(r.jit_on.fpm_opcode_hook)}</td>}
+                <td>cli {r.suite.jit_off.cli.pass} pass, {r.suite.jit_off.cli.fail} fail; php-fpm {r.suite.jit_off.fpm.pass} pass, {r.suite.jit_off.fpm.fail} fail</td>
+                <td>cli {r.suite.jit_on.cli.pass} pass, {r.suite.jit_on.cli.fail} fail; php-fpm {r.suite.jit_on.fpm.pass} pass, {r.suite.jit_on.fpm.fail} fail</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <ul class="facts" style="margin-top:1.5rem">
+        <li><strong>Why, at that commit:</strong> on PHP 7.0 and later, Layer 3 guarded <code>include</code>/<code>require</code> and <code>eval</code> with a user opcode handler for <code>ZEND_INCLUDE_OR_EVAL</code>, installed at startup by <code>howdah_install_sink_hooks()</code> in <code>crates/howdah-sys/sink_hook.c</code> whatever the config said. OPcache does not run its JIT while any user opcode handler is set, so even <code>[sinks] enabled = false</code> did not bring the JIT back. The integration suite passed the same number of scenarios with the JIT configured, but only because the JIT was off.</li>
+        <li><strong>Since <a href={`${REPO}/pull/42`}>#42</a></strong> (merged to <code>main</code> after this run, not yet in a release): the default <code>[sinks] hook = "auto"</code> keeps the JIT on. The JIT is off only when <code>[sinks.include] allow_paths</code> is set, when <code>[behavior] deny_exec_dirs</code> is set, or with <code>hook = "opcode"</code>. <code>lab/bench/jit.sh</code> now measures the shipped defaults and an explicit <code>hook = "opcode"</code> case, but <strong>it has not been run against #42 yet</strong>, so this page shows no measured result for the new behaviour.</li>
+        <li><strong>The latency numbers above</strong> were measured with the JIT off (<code>opcache.jit_buffer_size=0</code>) in every configuration, including no extension, so compare them with a JIT-off PHP, not a JIT-on one.</li>
+        <li><strong>Other in-PHP tools have run into the same thing:</strong> Imunify360's Proactive Defense turns the JIT off unless its JIT-compatible mode is enabled, and Snuffleupagus issue #441 reports OPcache's JIT disabling itself.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="detection">
+    <div class="wrap">
+      <h2>Layer 2 against a standard attack corpus</h2>
+      <p>Layer 2 is deliberately narrow: three classes (SQL injection, path traversal, command injection), linear-time signatures, log-only by default. This run shows what it flags of a standard corpus. <strong>It is not a WAF score:</strong> GoTestWAF scores blocking, and a log-only layer would score zero by its rules, so the counts below come from Howdah's own log.</p>
+      <ul class="facts">
+        <li><strong>Corpus:</strong> GoTestWAF {cm.gotestwaf_version} (Wallarm, MIT licence; its payloads ship in its Docker image, pinned by digest). Each test case was split by encoder and sent one request at a time.</li>
+        <li><strong>Target:</strong> PHP {cm.php}, {cm.sapi}, Howdah {cm.howdah_version} (commit <code>{cm.git_commit}</code>; the signature code in <code>crates/howdah-core/src/inspect.rs</code> is unchanged on <code>main</code> since) at the shipped defaults (<code>howdah.mode = detect</code>, no TOML, so Layer 2 is on and only logs). Run on {cm.date_utc.slice(0, 10)}.</li>
+        <li><strong>Flagged</strong> means Howdah logged a Layer 2 event for that request. <strong>In scope</strong> means the raw payload arrived where Layer 2 looks: plain or URL-encoded in the query string, a urlencoded form field or the URL path, or plain in a multipart field. Headers, JSON and XML bodies and Base64-encoded payloads are never in scope; Layer 2 does not read them.</li>
+        <li><strong>Reading the table:</strong> Layer 2 scans only the first 16&nbsp;KB of a value (<code>[inspect.limits] max_value_bytes</code>). GoTestWAF's 16 to 128&nbsp;KB community cases put their attack after that much padding, so they are not flagged (the 8&nbsp;KB ones are): padding a value past 16&nbsp;KB gets an attack past Layer 2. Many of the SQL injection payloads are WAF-evasion variants (inline comments, double encoding, JSON functions) that Layer 2's signatures do not match.</li>
+      </ul>
+      <div class="tablewrap" tabindex="0" role="region" aria-label="Layer 2 detection by payload class (scrolls sideways on narrow screens)" style="margin-top:1.5rem">
+        <table>
+          <thead>
+            <tr><th scope="col">Payload class</th><th scope="col" class="num">GoTestWAF test cases</th><th scope="col">Flagged, all requests</th><th scope="col">Flagged, in scope</th></tr>
+          </thead>
+          <tbody>
+            {Object.entries(C.by_class).map(([k, t]: [string, any]) => (
+              <tr>
+                <td>{CLASS_LABEL[k] ?? k}</td>
+                <td class="num">{t.cases}</td>
+                <td>{frac(t.flagged, t.reached)}</td>
+                <td>{frac(t.in_scope_flagged, t.in_scope_reached)}</td>
+              </tr>
+            ))}
+            <tr>
+              <td><strong>Benign requests (GoTestWAF false-positive set): false positives</strong></td>
+              <td class="num">{benign.cases}</td>
+              <td>{frac(benign.flagged, benign.reached)}</td>
+              <td>{frac(benign.in_scope_flagged, benign.in_scope_reached)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <h3 style="margin-top:2rem">Where the payload was placed, and how it was encoded</h3>
+      <p>Test cases in Layer 2's three classes only.</p>
+      <div class="cols two">
+        <div class="tablewrap" tabindex="0" role="region" aria-label="By placement">
+          <table style="min-width:0">
+            <thead><tr><th scope="col">Placement</th><th scope="col">Flagged</th></tr></thead>
+            <tbody>
+              {Object.entries(C.by_placement).sort().map(([k, v]: [string, any]) => (<tr><td>{k}</td><td>{frac(v.flagged, v.reached)}</td></tr>))}
+            </tbody>
+          </table>
+        </div>
+        <div class="tablewrap" tabindex="0" role="region" aria-label="By encoder">
+          <table style="min-width:0">
+            <thead><tr><th scope="col">GoTestWAF encoder</th><th scope="col">Flagged</th></tr></thead>
+            <tbody>
+              {Object.entries(C.by_encoder).sort().map(([k, v]: [string, any]) => (<tr><td>{k}</td><td>{frac(v.flagged, v.reached)}</td></tr>))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <details style="margin-top:1.5rem">
+        <summary>Every GoTestWAF test case</summary>
+        <div class="tablewrap" tabindex="0" role="region" aria-label="Per test case (scrolls sideways on narrow screens)">
+          <table>
+            <thead>
+              <tr><th scope="col">Test set</th><th scope="col">Test case</th><th scope="col">Layer 2 class</th><th scope="col" class="num">Sent</th><th scope="col" class="num">Reached PHP</th><th scope="col">Flagged</th><th scope="col">In scope, flagged</th></tr>
+            </thead>
+            <tbody>
+              {C.cases.map((c: any) => (
+                <tr>
+                  <td>{c.set}</td>
+                  <td>{c.name}</td>
+                  <td>{c.benign ? 'benign' : (c.howdah_class ?? 'none')}</td>
+                  <td class="num">{c.sent}</td>
+                  <td class="num">{c.reached_php}</td>
+                  <td>{c.sent || c.reached_php ? frac(c.flagged, c.reached_php) : 'not sent (needs a GraphQL or gRPC endpoint)'}</td>
+                  <td>{c.sent || c.reached_php ? frac(c.in_scope_flagged, c.in_scope_reached) : ''}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </details>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <div class="note">
+        <h3>What these numbers do not show</h3>
+        <ul class="facts">
+          <li>One machine, one day. Your hardware, PHP build and application will give different absolute numbers; the added microseconds are the part worth comparing.</li>
+          <li>The benchmark scripts are tiny. A real application spends far longer in its own code, so the same added microseconds are a smaller share of its request time.</li>
+          <li>Benign traffic only: no cell measures the cost of writing a log line or of blocking, and the SSRF sink's DNS lookup never runs because the script makes no outbound request.</li>
+          <li>Memory use was not measured. Neither were Layer 4 (off in every cell), ZTS builds, aarch64, PHP versions other than {versions.join(', ')}, or php-cgi.</li>
+          <li>wrk is a closed-loop load generator: it measures latency at the load it creates, not under an open arrival rate.</li>
+          <li>The detection run uses one corpus, on one PHP version and server. GoTestWAF's payloads lean towards WAF-evasion variants; Layer 2's signatures are listed in <a href={`${REPO}/blob/main/docs/coverage-data.md`}>docs/coverage-data.md</a>.</li>
+        </ul>
+      </div>
+      <h2 style="margin-top:2rem">The check on every pull request</h2>
+      <p>CI runs a short version of the latency benchmark (PHP 8.3, php-fpm behind nginx, every configuration and workload, 10&nbsp;s per cell) and fails if Howdah adds more than 50&nbsp;µs to the median GET with no body, or if any cell's median, taken relative to the same run's no-extension cell, grows by more than 25% over the committed baseline. GitHub's runners are shared virtual machines and their timings move a lot, so both limits are deliberately loose: the job catches a gross regression, not a small one.</p>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  details summary { cursor: pointer; font-weight: 600; margin-bottom: 1rem; }
+  h3 { margin: 2rem 0 .75rem; font-size: 1.2rem; }
+</style>

@@ -1,0 +1,122 @@
+{
+  "date_utc": "2026-10-24T18:53:19Z",
+  "howdah_version": "1.3.0",
+  "git_commit": "2e3109efc754",
+  "git_commit_note": "Measured tree: 2e3109efc754 (Howdah 1.3.0, before #42) plus this branch's lab/bench files, not yet committed at the time; the field was added when the run was published.",
+  "results": [
+    {
+      "php": "8.1.34",
+      "jit_settings": "opcache.enable=1 opcache.enable_cli=1 opcache.jit=tracing opcache.jit_buffer_size=64M",
+      "jit_on": {
+        "cli_without_howdah": true,
+        "cli_with_howdah": false,
+        "fpm_without_howdah": true,
+        "fpm_with_howdah": false
+      },
+      "startup_warning": "JIT is incompatible with third party extensions that setup user opcode handlers. JIT disabled.",
+      "suite": {
+        "jit_off": {
+          "cli": {
+            "pass": 25,
+            "fail": 0,
+            "skip": 2
+          },
+          "fpm": {
+            "pass": 27,
+            "fail": 0,
+            "skip": 0
+          }
+        },
+        "jit_on": {
+          "cli": {
+            "pass": 25,
+            "fail": 0,
+            "skip": 2
+          },
+          "fpm": {
+            "pass": 27,
+            "fail": 0,
+            "skip": 0
+          }
+        },
+        "same_counts": true
+      }
+    },
+    {
+      "php": "8.3.36",
+      "jit_settings": "opcache.enable=1 opcache.enable_cli=1 opcache.jit=tracing opcache.jit_buffer_size=64M",
+      "jit_on": {
+        "cli_without_howdah": true,
+        "cli_with_howdah": false,
+        "fpm_without_howdah": true,
+        "fpm_with_howdah": false
+      },
+      "startup_warning": "JIT is incompatible with third party extensions that setup user opcode handlers. JIT disabled.",
+      "suite": {
+        "jit_off": {
+          "cli": {
+            "pass": 25,
+            "fail": 0,
+            "skip": 2
+          },
+          "fpm": {
+            "pass": 27,
+            "fail": 0,
+            "skip": 0
+          }
+        },
+        "jit_on": {
+          "cli": {
+            "pass": 25,
+            "fail": 0,
+            "skip": 2
+          },
+          "fpm": {
+            "pass": 27,
+            "fail": 0,
+            "skip": 0
+          }
+        },
+        "same_counts": true
+      }
+    },
+    {
+      "php": "8.5.12RC1",
+      "jit_settings": "opcache.enable=1 opcache.enable_cli=1 opcache.jit=tracing opcache.jit_buffer_size=64M",
+      "jit_on": {
+        "cli_without_howdah": true,
+        "cli_with_howdah": false,
+        "fpm_without_howdah": true,
+        "fpm_with_howdah": false
+      },
+      "startup_warning": "JIT is incompatible with third party extensions that setup user opcode handlers. JIT disabled.",
+      "suite": {
+        "jit_off": {
+          "cli": {
+            "pass": 25,
+            "fail": 0,
+            "skip": 2
+          },
+          "fpm": {
+            "pass": 27,
+            "fail": 0,
+            "skip": 0
+          }
+        },
+        "jit_on": {
+          "cli": {
+            "pass": 25,
+            "fail": 0,
+            "skip": 2
+          },
+          "fpm": {
+            "pass": 27,
+            "fail": 0,
+            "skip": 0
+          }
+        },
+        "same_counts": true
+      }
+    }
+  ]
+}

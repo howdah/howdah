@@ -552,6 +552,22 @@ Limitations, stated plainly:
   caveat (two includes of one file: two events in \`opcode\` mode, one in
   \`compile\` mode); compile-mode include/eval behaviour is also checked on 7.4
   and 5.6.
+
+## Performance and the OPcache JIT
+
+Measured request latency with and without Howdah, the OPcache JIT result and
+what Layer 2 flags of the GoTestWAF corpus are in
+[docs/performance.md](performance.md) (on the site: /docs/performance/).
+
+- The published JIT run (\`lab/bench/jit.sh\`, Howdah 1.3.0 at commit
+  \`2e3109e\`, before [#42](https://github.com/howdah/howdah/pull/42))
+  measured \`opcache_get_status()['jit']['on']\` false with Howdah loaded on
+  PHP 8.1, 8.3 and 8.5 (CLI and php-fpm, \`opcache.jit=tracing\`), with PHP's
+  startup warning "JIT is incompatible with third party extensions that setup
+  user opcode handlers. JIT disabled."; the integration suite passed the same
+  scenarios with the JIT configured only because the JIT was off. The current
+  behaviour is the OPcache JIT item above (#42); \`lab/bench/jit.sh\` has **not**
+  been re-run against it yet.
 `;
 // The Layer 2 section above was first added to docs/coverage.md by hand (PR
 // #18) without this generator knowing about it; it lives here now so a

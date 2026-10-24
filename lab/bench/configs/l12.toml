@@ -1,0 +1,13 @@
+# Benchmark config "l12": Layer 1 + Layer 2 (input inspection, detect mode).
+# Layers 3 and 4 are off.
+mode = "detect"
+
+[inspect]
+enabled = true
+mode = "detect"
+
+[sinks]
+enabled = false
+
+[behavior]
+enabled = false

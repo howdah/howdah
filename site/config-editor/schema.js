@@ -141,7 +141,7 @@
       { id: 'rules', title: 'Per-rule mode', keys: [], rulesKeys: rulesKeys,
         groups: { multipart: 'Multipart', input: 'Input shape', headers: 'Request headers', inspect: 'Layer 2 names (no effect here)', sinks: 'Layer 3 names (no effect here)', other: 'Other' } },
       { id: 'inspect', title: 'Layer 2: input inspection', keys: INSPECT },
-      { id: 'sinks', title: 'Layer 3: sink hardening', keys: SINKS, php7Only: ['include', 'eval'] }
+      { id: 'sinks', title: 'Layer 3: sink hardening', keys: SINKS, php7Only: ['include'] }
     ],
     presets: {
       defaults: { 'howdah.mode': 'detect' },

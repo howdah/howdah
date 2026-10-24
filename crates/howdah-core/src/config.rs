@@ -112,6 +112,35 @@ impl Default for UnserializeConfig {
     }
 }
 
+/// Layer-3 phar-deserialization sink settings. Off by default.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PharConfig {
+    pub mode: Option<Mode>,
+    pub allow_paths: Vec<String>,
+}
+
+impl Default for PharConfig {
+    fn default() -> Self {
+        PharConfig { mode: Some(Mode::Off), allow_paths: Vec::new() }
+    }
+}
+
+/// Layer-3 SSRF sink settings. Off by default.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SsrfConfig {
+    pub mode: Option<Mode>,
+    /// Exact hostnames, literal IPs, or CIDRs.
+    pub allow_hosts: Vec<String>,
+}
+
+impl Default for SsrfConfig {
+    fn default() -> Self {
+        SsrfConfig { mode: Some(Mode::Off), allow_hosts: Vec::new() }
+    }
+}
+
 /// Layer-3 sink hardening settings. Its `mode` is independent of the global
 /// mode: a global `block` never arms a sink.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -123,6 +152,8 @@ pub struct SinkConfig {
     pub include: IncludeConfig,
     pub eval: EvalConfig,
     pub unserialize: UnserializeConfig,
+    pub phar: PharConfig,
+    pub ssrf: SsrfConfig,
 }
 
 impl Default for SinkConfig {
@@ -134,6 +165,8 @@ impl Default for SinkConfig {
             include: IncludeConfig::default(),
             eval: EvalConfig::default(),
             unserialize: UnserializeConfig::default(),
+            phar: PharConfig::default(),
+            ssrf: SsrfConfig::default(),
         }
     }
 }
@@ -150,8 +183,8 @@ impl SinkConfig {
             SinkId::Include => self.include.mode,
             SinkId::Eval => self.eval.mode,
             SinkId::Unserialize => self.unserialize.mode,
-            // TODO(task 3): per-sink mode knobs for phar/ssrf; section mode until then.
-            SinkId::Phar | SinkId::Ssrf => None,
+            SinkId::Phar => self.phar.mode,
+            SinkId::Ssrf => self.ssrf.mode,
         };
         sub.unwrap_or(self.mode)
     }
@@ -219,6 +252,13 @@ impl Config {
                         "sinks.command_exec.allow pattern {p:?}: '*' is only allowed as the final character"
                     )));
                 }
+            }
+        }
+        for h in &raw.sinks.ssrf.allow_hosts {
+            if !crate::sinks::ssrf::valid_allow_entry(h) {
+                return Err(ConfigError(format!(
+                    "sinks.ssrf.allow_hosts entry {h:?}: must be an exact hostname, an IP address, or a CIDR with an in-range prefix length (no wildcards or whitespace)"
+                )));
             }
         }
         Ok(Config {
@@ -436,5 +476,82 @@ self_test = "off"
     #[test]
     fn sinks_unknown_key_rejected() {
         assert!(Config::from_toml("[sinks]\nnope = 1").is_err());
+    }
+
+    #[test]
+    fn phar_defaults_off() {
+        use crate::sinks::SinkId;
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.sinks.phar.mode, Some(Mode::Off));
+        assert!(c.sinks.phar.allow_paths.is_empty());
+        assert_eq!(c.sinks.effective_mode(SinkId::Phar, Mode::Detect), Mode::Off);
+    }
+
+    #[test]
+    fn ssrf_defaults_off() {
+        use crate::sinks::SinkId;
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.sinks.ssrf.mode, Some(Mode::Off));
+        assert!(c.sinks.ssrf.allow_hosts.is_empty());
+        assert_eq!(c.sinks.effective_mode(SinkId::Ssrf, Mode::Detect), Mode::Off);
+    }
+
+    #[test]
+    fn phar_enable_detect() {
+        use crate::sinks::SinkId;
+        let c = Config::from_toml("[sinks.phar]\nmode=\"detect\"").unwrap();
+        assert_eq!(c.sinks.effective_mode(SinkId::Phar, Mode::Block), Mode::Detect);
+    }
+
+    #[test]
+    fn ssrf_enable_block() {
+        use crate::sinks::SinkId;
+        let c = Config::from_toml("[sinks.ssrf]\nmode=\"block\"").unwrap();
+        assert_eq!(c.sinks.effective_mode(SinkId::Ssrf, Mode::Block), Mode::Block);
+    }
+
+    #[test]
+    fn sinks_block_arms_phar_but_not_ssrf() {
+        use crate::sinks::SinkId;
+        let c = Config::from_toml("[sinks]\nmode=\"block\"\n[sinks.phar]\nmode=\"block\"").unwrap();
+        assert_eq!(c.sinks.effective_mode(SinkId::Phar, Mode::Detect), Mode::Block);
+        assert_eq!(c.sinks.effective_mode(SinkId::Ssrf, Mode::Detect), Mode::Off);
+    }
+
+    #[test]
+    fn global_block_does_not_arm_phar() {
+        use crate::sinks::SinkId;
+        let c = Config::from_toml("mode = \"block\"").unwrap();
+        assert_eq!(c.sinks.effective_mode(SinkId::Phar, Mode::Block), Mode::Off);
+    }
+
+    #[test]
+    fn ssrf_allow_hosts_parse() {
+        let c = Config::from_toml(
+            "[sinks.ssrf]\nallow_hosts=[\"api.example.com\",\"10.0.0.0/8\",\"2001:db8::/32\",\"1.2.3.4\"]",
+        )
+        .unwrap();
+        assert_eq!(c.sinks.ssrf.allow_hosts.len(), 4);
+    }
+
+    #[test]
+    fn phar_allow_paths_parse() {
+        let c = Config::from_toml("[sinks.phar]\nallow_paths=[\"/var/www/a.phar\"]").unwrap();
+        assert_eq!(c.sinks.phar.allow_paths, vec!["/var/www/a.phar".to_string()]);
+    }
+
+    #[test]
+    fn ssrf_bad_cidr_rejected() {
+        for bad in ["10.0.0.0/33", "::1/129", "", " ", "a b", "*.example.com"] {
+            let toml = format!("[sinks.ssrf]\nallow_hosts=[{bad:?}]");
+            let e = Config::from_toml(&toml).expect_err(bad);
+            assert!(e.to_string().contains("sinks.ssrf.allow_hosts"), "{e}");
+        }
+    }
+
+    #[test]
+    fn sinks_phar_ssrf_unknown_key_rejected() {
+        assert!(Config::from_toml("[sinks.phar]\nnope = 1").is_err());
+        assert!(Config::from_toml("[sinks.ssrf]\nnope = 1").is_err());
     }
 }

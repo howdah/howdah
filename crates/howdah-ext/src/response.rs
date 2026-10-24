@@ -29,8 +29,10 @@ pub fn status_for_rule(rule: &str) -> c_int {
 }
 
 /// Set the HTTP status and write the block body to the client. Does NOT
-/// terminate; the caller must `bail()` right after (with no live Rust owned
-/// values, so the longjmp drops nothing).
+/// terminate. The RINIT delivery (`module::deliver_startup_refusal`) follows
+/// it with the per-request compile swap so the script never runs; the
+/// execution-phase path (`rfc1867::emit_and_bail`) follows it with a bailout.
+/// Nothing Rust-owned survives the call either way.
 ///
 /// # Safety
 /// Must run inside an active request, before headers are sent.

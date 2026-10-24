@@ -1448,6 +1448,32 @@ pub unsafe extern "C" fn howdah_free(ctx: *mut howdah_ctx) {
     }
 }
 
+/// 1 iff Layer 2 can return Block for at least one class: the `[inspect]`
+/// effective mode is not off AND (it is `block`, or a `[inspect.rule_modes]`
+/// override is `block`). Mirrors the decision `howdah_inspect_value` makes,
+/// so the glue can decide per process whether to force `$_SERVER` at RINIT
+/// and refuse before the script. A global `block` never arms it. NULL ctx or
+/// panic is 0. Never stashes a log line.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_inspect_armed(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = &*ctx;
+        let ins = &c.config.inspect;
+        let mode = ins.effective_mode(c.config.mode);
+        if mode == Mode::Off {
+            return 0;
+        }
+        i32::from(mode == Mode::Block || ins.rule_modes.values().any(|m| *m == Mode::Block))
+    }))
+    .unwrap_or(0)
+}
+
 /// The context's parsed `[log]` table (a copy). Rust-only, not part of the C
 /// ABI: the glue reads it once at startup to set up the log destination and
 /// hook. A NULL ctx or a caught panic gives the defaults, matching the safe
@@ -2983,5 +3009,40 @@ mod tests {
         assert_eq!(strip(&a), strip(&b));
         assert_eq!(unsafe { howdah_exceptions_count(c) }, 0);
         unsafe { howdah_free(c) };
+    }
+
+    // ---- howdah_inspect_armed: "can Layer 2 return Block for some class?" ----
+
+    fn inspect_armed(toml: &str) -> i32 {
+        let c = init(toml);
+        let r = unsafe { howdah_inspect_armed(c) };
+        unsafe { howdah_free(c) };
+        r
+    }
+
+    #[test]
+    fn inspect_armed_follows_the_inspect_mode_not_the_global_mode() {
+        assert_eq!(inspect_armed(""), 0, "default: detect, log-only");
+        assert_eq!(inspect_armed("mode = \"block\""), 0, "a global block never arms Layer 2");
+        assert_eq!(inspect_armed("[inspect]\nmode = \"block\""), 1);
+        assert_eq!(inspect_armed("mode = \"detect\"\n[inspect]\nmode = \"block\""), 1);
+    }
+
+    #[test]
+    fn inspect_armed_by_one_class_override() {
+        assert_eq!(inspect_armed("[inspect.rule_modes]\nsql_injection = \"block\""), 1);
+        assert_eq!(inspect_armed("[inspect.rule_modes]\nsql_injection = \"detect\""), 0);
+    }
+
+    #[test]
+    fn inspect_armed_is_off_when_layer_or_global_is_off() {
+        assert_eq!(inspect_armed("[inspect]\nenabled = false\nmode = \"block\""), 0);
+        assert_eq!(inspect_armed("mode = \"off\"\n[inspect]\nmode = \"block\""), 0);
+        assert_eq!(
+            inspect_armed("[inspect]\nmode = \"off\"\n[inspect.rule_modes]\nsql_injection = \"block\""),
+            0,
+            "an explicit inspect off is absolute; no override re-arms it"
+        );
+        assert_eq!(unsafe { howdah_inspect_armed(std::ptr::null_mut()) }, 0);
     }
 }

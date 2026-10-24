@@ -10,6 +10,7 @@
 # Lab/build artifacts
 /lab/**/vendor
 /lab/integration/.matrix-out
+/lab/integration/.refusal-out
 /packaging/out
 # cargo-fuzz crash inputs and corpora
 /fuzz/artifacts

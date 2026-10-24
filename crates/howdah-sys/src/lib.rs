@@ -66,6 +66,31 @@ extern "C" {
         egress: HowdahBehaviorEgress,
         php_write: HowdahBehaviorPhpWrite,
     );
+
+    /// Deferred refusal (see `refuse_hook.c`): swap `zend_compile_file` for
+    /// the rest of this request so the main script (and auto_prepend/append)
+    /// compile to NULL and never run. No longjmp. Idempotent per request.
+    pub fn howdah_refuse_arm();
+
+    /// Restore the compile function saved by `howdah_refuse_arm`. No-op when
+    /// not armed. Called from the ext's `clear_request_state` (RSHUTDOWN).
+    pub fn howdah_refuse_disarm();
+
+    /// 1 while PHP is inside `php_request_startup()` (`PG(during_request_startup)`):
+    /// a `zend_bailout` there is fatal under php-fpm (exit 70), so a refusal
+    /// decided then is recorded for RINIT instead.
+    pub fn howdah_during_request_startup() -> ::std::ffi::c_int;
+
+    /// Build `$_SERVER` now if `auto_globals_jit` deferred it, so its variables
+    /// pass through the chained `input_filter` before the script. No-op when it
+    /// already exists.
+    pub fn howdah_force_server_global();
+
+    /// `php_output_discard_all()`: drop every active output handler. Called
+    /// right after the refusal body went out, so a handler started at request
+    /// startup (`output_handler = ob_gzhandler`) cannot add headers later and
+    /// warn "headers already sent".
+    pub fn howdah_sys_output_discard_all();
 }
 
 extern "C" {

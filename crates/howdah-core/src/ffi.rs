@@ -377,8 +377,10 @@ impl howdah_ctx {
         let Some(crate::behavior::BehaviorHit { rule, detail }) = hit(&self.config.behavior) else {
             return Action::Allow;
         };
+        // Observe is propose-only: never block, and mark the line as a proposal.
+        let observe = self.config.behavior.observe;
         let action = match mode {
-            Mode::Block => Action::Block,
+            Mode::Block if !observe => Action::Block,
             _ => Action::Log,
         };
         let rec = EventRecord {
@@ -389,7 +391,7 @@ impl howdah_ctx {
             client_ip: self.meta.client_ip.clone(),
             method: self.meta.method.clone(),
             uri: self.meta.uri.clone(),
-            reason: detail,
+            reason: if observe { format!("proposed: {detail}") } else { detail },
         };
         self.sink_log = Some(log_line(&rec));
         action
@@ -1969,6 +1971,27 @@ mod tests {
         assert!(take_sink(c).is_none());
         unsafe { howdah_free(c) };
         assert_eq!(unsafe { howdah_behavior_check_exec_dir(std::ptr::null_mut(), p.as_ptr() as _, p.len()) }, 0);
+    }
+
+    #[test]
+    fn behavior_observe_never_blocks_and_proposes() {
+        let p = "/u/x.php";
+        let c = init("[behavior]\nobserve=true\nmode=\"block\"\ndeny_exec_dirs=[\"/u\"]");
+        assert_eq!(unsafe { howdah_behavior_check_exec_dir(c, p.as_ptr() as _, p.len()) }, HOWDAH_LOG);
+        let line = take_sink(c).unwrap();
+        assert!(line.contains("proposed"), "{line}");
+        assert!(!line.contains("x.php"));
+        unsafe { howdah_free(c) };
+        let c = init("[behavior]\nobserve=true\nallow_exec_binaries=[]");
+        let (caller, prog) = ("/var/www/a.php", "/usr/bin/gs");
+        let r = unsafe { howdah_behavior_check_binary(c, caller.as_ptr() as _, caller.len(), prog.as_ptr() as _, prog.len()) };
+        assert_eq!(r, HOWDAH_LOG);
+        assert!(take_sink(c).unwrap().contains("proposed"));
+        unsafe { howdah_free(c) };
+        let c = init("[behavior]\nmode=\"block\"\ndeny_exec_dirs=[\"/u\"]");
+        assert_eq!(unsafe { howdah_behavior_check_exec_dir(c, p.as_ptr() as _, p.len()) }, HOWDAH_BLOCK);
+        assert!(!take_sink(c).unwrap().contains("proposed"));
+        unsafe { howdah_free(c) };
     }
 
     #[test]

@@ -244,3 +244,41 @@ jobs:
       # row must render a valid spec/control (no docker needed)
       - run: sh tools/howdah-check.test.sh
       - run: sh packaging/layouts.test.sh
+      # reproducible-build helpers (deterministic tar, SOURCE_DATE_EPOCH,
+      # Installed-Size) and the package attestation subject list
+      - run: sh packaging/reproducible.test.sh
+      - run: sh packaging/repo/attest-subjects.test.sh
+
+  # Dependency hygiene, reported on every PR, never gating a merge: RustSec
+  # advisories, licences, bans and sources for the Rust workspace (deny.toml),
+  # and npm audit of the site's production dependencies (the Astro site and
+  # the cfg.howdah.org worker share site/package-lock.json). A finding shows as
+  # a failed job here; fix it in its own change.
+  deps:
+    name: dependency checks (cargo deny, npm audit)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-deny (pinned release, sha256-verified)
+        run: |
+          set -euo pipefail
+          v=0.20.2
+          cd "$(mktemp -d)"
+          curl -fsSLO "https://github.com/EmbarkStudios/cargo-deny/releases/download/$v/cargo-deny-$v-x86_64-unknown-linux-musl.tar.gz"
+          # sha256 from the release's cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz.sha256
+          echo "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  cargo-deny-$v-x86_64-unknown-linux-musl.tar.gz" | sha256sum -c -
+          tar -xzf "cargo-deny-$v-x86_64-unknown-linux-musl.tar.gz"
+          sudo install -m 0755 "cargo-deny-$v-x86_64-unknown-linux-musl/cargo-deny" /usr/local/bin/cargo-deny
+          cargo-deny --version
+      - name: cargo deny check (advisories, licenses, bans, sources)
+        run: cargo-deny --color always check
+      - uses: actions/setup-node@v4
+        if: ${{ !cancelled() }}
+        with:
+          node-version: 22
+      - name: npm audit (site and worker, production dependencies)
+        if: ${{ !cancelled() }}
+        working-directory: site
+        run: npm audit --omit=dev

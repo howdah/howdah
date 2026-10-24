@@ -1,0 +1,53 @@
+# cargo-deny policy for the Rust workspace: known vulnerabilities, licences,
+# duplicate or wildcard dependencies, and where crates may come from.
+# CI runs `cargo deny check` in the non-blocking `deps` job of ci.yml; run it
+# locally with `cargo deny check` (https://embarkstudios.github.io/cargo-deny/).
+# The fuzz/ crate is not a workspace member and is not checked.
+
+[graph]
+# What we build: the extension on both release arches, the core as wasm for
+# the site. All features, so php5/php7/php8 (bindgen, cc) are included.
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+  "wasm32-unknown-unknown",
+]
+all-features = true
+
+[advisories]
+version = 2
+# RustSec advisory database, fetched when the check runs. Every vulnerability
+# advisory fails the check; an exception goes in `ignore` with the advisory id
+# and a reason, e.g. { id = "RUSTSEC-0000-0000", reason = "..." }.
+yanked = "warn"
+ignore = []
+
+[licenses]
+version = 2
+# Howdah ships as MIT OR Apache-2.0; every crate linked into howdah.so or the
+# wasm, or run at build time, must be under one of these.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Unlicense",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Two versions of one crate are reported, not refused (some are unavoidable
+# while the ecosystem moves, e.g. winnow 0.7 and 1.0 today).
+multiple-versions = "warn"
+# A `*` version requirement is reported. Not "deny" yet: cargo-deny also counts
+# the workspace's own path dependencies (howdah-core, howdah-sys) as wildcards
+# unless the crates set `publish = false`, which this change does not make.
+wildcards = "warn"
+allow-wildcard-paths = true
+
+[sources]
+# crates.io only: no other registry and no git dependencies.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

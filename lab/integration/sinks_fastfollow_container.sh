@@ -142,6 +142,8 @@ fi
 run_php '[sinks.phar]\nmode="block"\nallow_paths=["'"$WORK"'"]\n' "$TR $PHACC"
 no_events || fail "A3b: allowlisted phar produced an event"
 if [ "$FEATURE" != php8 ]; then grep -q WOKE "$WORK/out.txt" || fail "A3b: allowlisted phar was denied"; fi
+run_php '[sinks.phar]\nmode="block"\nallow_paths=["'"$WORK"'"]\n' "$TR "'echo "GOT[".@file_get_contents("phar://".getenv("PH")."/x")."]\n"; echo "CONT\n";'
+grep -q 'GOT\[hi\]' "$WORK/out.txt" || fail "A3b: allowlisted phar read did not return its content"
 echo "  ok   - phar allow_paths: allowlisted archive silent and not denied"
 
 # A3c. global block does not arm the phar sink.
@@ -165,6 +167,7 @@ echo "  ok   - phar direct API (documented gap): new Phar()+getMetadata() fires 
 # phar:// directory open, so the constructor throws (script continues, no crash).
 run_php '[sinks.phar]\nmode="block"\n' "$TR $DIRECT"
 grep -q CONT "$WORK/out.txt" || fail "A4b: script did not continue / crashed"
+if [ "$FEATURE" = php8 ]; then grep -q EXC "$WORK/out.txt" || fail "A4b: ctor was not refused (no EXC)"; fi
 if [ "$FEATURE" = php8 ]; then
   if grep -q WOKE "$WORK/out.txt"; then fail "A4b: tracer fired under block on 8.x"; fi
   echo "  ok   - phar direct API under block (8.x): no auto-unserialize; ctor refused by the wrapper guard, script continued"
@@ -343,6 +346,7 @@ if [ "$FEATURE" = php5 ]; then
   if out_has 'Fatal\|segfault'; then fail "C4: include_once block raised a fatal"; fi
   grep -q CONT "$WORK/out.txt" || fail "C4: script did not continue after include_once block"
   grep -q '"action":"block"' "$LOG" || fail "C4: no block event for include_once"
+  grep -q 'RET\[false\]' "$WORK/out.txt" || fail "C4: include_once block did not return false"
   C4RET=$(grep -o 'RET\[[a-z0-9]*\]' "$WORK/out.txt" | head -1)
   echo "  ok   - php5 include_once block: not run, no fatal/crash, script continued (observed return: $C4RET)"
 

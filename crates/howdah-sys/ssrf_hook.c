@@ -26,7 +26,8 @@
  * blocked curl_exec returns false with an empty curl_error().
  *
  * State (handle map, resolution cache) is bounded, in C statics, and cleared by
- * howdah_ssrf_request_reset() at RSHUTDOWN since FPM workers persist.
+ * howdah_ssrf_request_reset() at request teardown (RSHUTDOWN, and the bailout
+ * path via clear_request_state) since FPM workers persist.
  * NTS only, like the rest of Howdah.
  */
 #include "main/php.h"
@@ -446,7 +447,8 @@ void howdah_install_ssrf_hooks(howdah_ssrf_decide_t decide, howdah_ssrf_armed_t 
 }
 
 /* Clear all per-request state: the curl handle->URL map, the resolution cache
- * and the ctx. Call at RSHUTDOWN. */
+ * and the ctx. Call at request teardown (RSHUTDOWN, and the bailout path via
+ * clear_request_state). */
 void howdah_ssrf_request_reset(void) {
     int i;
     for (i = 0; i < HOWDAH_MAP_SLOTS; i++) {

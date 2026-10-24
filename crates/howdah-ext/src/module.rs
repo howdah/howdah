@@ -239,6 +239,10 @@ unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
 /// emitting a stale 403 with no fresh log line. Resetting here makes a skipped
 /// RSHUTDOWN harmless; when RSHUTDOWN does run it simply resets again (idempotent).
 ///
+/// It also calls `howdah_ssrf_request_reset()`, so both the normal RSHUTDOWN
+/// path and the `emit_and_bail` path clear the per-request SSRF handle map and
+/// resolution cache.
+///
 /// # Safety
 /// Single-threaded (NTS) request teardown; the statics are request-local.
 pub(crate) unsafe fn clear_request_state() {

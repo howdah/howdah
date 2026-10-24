@@ -511,7 +511,7 @@ self_test = "off"
     }
 
     #[test]
-    fn sinks_block_arms_phar_but_not_ssrf() {
+    fn explicit_phar_block_arms_phar_only() {
         use crate::sinks::SinkId;
         let c = Config::from_toml("[sinks]\nmode=\"block\"\n[sinks.phar]\nmode=\"block\"").unwrap();
         assert_eq!(c.sinks.effective_mode(SinkId::Phar, Mode::Detect), Mode::Block);

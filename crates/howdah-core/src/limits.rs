@@ -12,13 +12,13 @@
 //! built by hand (bypassing `from_toml`) can still contain zeros; `check` then
 //! blocks everything but never panics.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::input::InputState;
 use crate::multipart::{Event, MultipartState};
 
 /// Resource limits applied to multipart bodies.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Limits {
     /// Maximum number of parts in one body.
@@ -290,7 +290,7 @@ pub fn selftest_hit() -> LimitHit {
 }
 
 /// Identifier of a detection rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuleId {
     MaxParts,
@@ -344,8 +344,44 @@ impl RuleId {
     }
 }
 
+/// Every rule, in declaration order. The config editor builds its `[rules]`
+/// section from this (names come from `RuleId`'s serde spelling, severities
+/// from [`RuleId::severity`]), so it can never offer a rule the core rejects
+/// or miss one it accepts. `rule_catalog_covers_every_variant` fails to
+/// compile when a variant is added here but not to the list.
+pub fn rule_catalog() -> &'static [RuleId] {
+    const ALL: [RuleId; 24] = [
+        RuleId::MaxParts,
+        RuleId::MaxFiles,
+        RuleId::MaxPartHeaders,
+        RuleId::MaxPartHeaderBytes,
+        RuleId::MaxFieldNameLen,
+        RuleId::MaxFilenameLen,
+        RuleId::ParseMemoryBudget,
+        RuleId::MalformedMultipart,
+        RuleId::UploadProgressAbuse,
+        RuleId::SelfTest,
+        RuleId::MaxInputVars,
+        RuleId::MaxInputNestingDepth,
+        RuleId::MaxInputKeyBytes,
+        RuleId::MaxRequestHeaders,
+        RuleId::MaxRequestHeaderBytes,
+        RuleId::SqlInjection,
+        RuleId::PathTraversal,
+        RuleId::CommandInjection,
+        RuleId::CommandExec,
+        RuleId::Include,
+        RuleId::Eval,
+        RuleId::Unserialize,
+        RuleId::Phar,
+        RuleId::Ssrf,
+    ];
+    &ALL
+}
+
 /// How severe a rule's finding is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Severity {
     Critical,
     Standard,
@@ -495,6 +531,48 @@ mod tests {
         assert_eq!(RuleId::Ssrf.severity(), Severity::Standard);
         assert_eq!(serde_json::from_str::<RuleId>("\"phar\"").unwrap(), RuleId::Phar);
         assert_eq!(serde_json::from_str::<RuleId>("\"ssrf\"").unwrap(), RuleId::Ssrf);
+    }
+
+    #[test]
+    fn rule_catalog_covers_every_variant() {
+        let all = rule_catalog();
+        // Exhaustive match: adding a RuleId variant without listing it in
+        // rule_catalog() fails here at compile time.
+        for r in all {
+            match r {
+                RuleId::MaxParts
+                | RuleId::MaxFiles
+                | RuleId::MaxPartHeaders
+                | RuleId::MaxPartHeaderBytes
+                | RuleId::MaxFieldNameLen
+                | RuleId::MaxFilenameLen
+                | RuleId::ParseMemoryBudget
+                | RuleId::MalformedMultipart
+                | RuleId::UploadProgressAbuse
+                | RuleId::SelfTest
+                | RuleId::MaxInputVars
+                | RuleId::MaxInputNestingDepth
+                | RuleId::MaxInputKeyBytes
+                | RuleId::MaxRequestHeaders
+                | RuleId::MaxRequestHeaderBytes
+                | RuleId::SqlInjection
+                | RuleId::PathTraversal
+                | RuleId::CommandInjection
+                | RuleId::CommandExec
+                | RuleId::Include
+                | RuleId::Eval
+                | RuleId::Unserialize
+                | RuleId::Phar
+                | RuleId::Ssrf => {}
+            }
+        }
+        let mut sorted = all.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), all.len(), "duplicate in rule_catalog");
+        assert_eq!(all[0], RuleId::MaxParts);
+        assert_eq!(serde_json::to_string(&RuleId::MaxParts).unwrap(), "\"max_parts\"");
+        assert_eq!(serde_json::to_string(&Severity::Critical).unwrap(), "\"critical\"");
     }
 
     #[test]

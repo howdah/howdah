@@ -1,0 +1,68 @@
+name: worker
+
+# Deploys the cfg.howdah.org Worker (site/worker) whenever main changes
+# anything it is built from, on every release tag, and on demand. The site
+# (pages.yml) deploys from every push to main with a wasm built from that
+# commit; deploying the Worker on the same pushes keeps the page and the
+# service validating with the same core, so a config the page calls valid is
+# never refused by the service.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'Cargo.*'
+      - 'site/worker/**'
+      - 'site/config-editor/**'
+      - 'site/demo/howdah-wasm.js'
+      - 'packaging/build-wasm.sh'
+      - '.github/workflows/worker.yml'
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Bundle only; do not deploy
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: worker
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: worker-wasm-${{ hashFiles('Cargo.lock') }}
+      - name: Build the core as wasm
+        run: packaging/build-wasm.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Handler tests against the fresh wasm
+        working-directory: site
+        run: node --test test/worker.test.mjs
+      - name: Bundle check
+        working-directory: site/worker
+        run: npx --yes wrangler@4 deploy --dry-run --outdir /tmp/howdah-cfg
+      - name: Deploy
+        if: github.event_name == 'push' || inputs.dry_run != true
+        working-directory: site/worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes wrangler@4 deploy

@@ -11,9 +11,23 @@ howdah.mode=block                       ; block | detect | off (TOML can overrid
 howdah.log=/var/log/howdah.log          ; where JSON event lines are written
 ```
 
-If `howdah.config` is unset, or the file is missing or malformed, Howdah falls
-back to its **safe defaults** (block mode, the limits below) and keeps serving —
-a bad config never takes PHP down.
+If `howdah.config` is unset, or the file is missing or unreadable, Howdah uses
+`howdah.mode` with the built-in limits below. If the file is present but
+malformed, Howdah falls back to its **safe defaults** (block mode, the limits
+below) and keeps serving — a bad config never takes PHP down, but note that
+`phpinfo()` still names the file, so validate it before deploying (the
+[config editor](https://howdah.org/config/) does this with the extension's own
+parser).
+
+## Build a config in the browser
+
+[howdah.org/config/](https://howdah.org/config/) builds `howdah.ini` and
+`howdah.toml` from a form, with every setting's default and effect next to it,
+and validates the TOML with the extension's own parser (`howdah-core` compiled
+to WebAssembly), so what it calls valid is what the extension accepts. The
+result can be copied, downloaded, or fetched with one `curl` command from
+`cfg.howdah.org`, a stateless service that re-validates the config with the
+same core and stores nothing (the URL carries the whole file).
 
 ## The TOML file
 
@@ -41,8 +55,8 @@ max_input_key_bytes      = 1024      # bytes of any single variable name / array
 max_request_headers      = 200       # request headers in one request
 max_request_header_bytes = 16384     # bytes (name+value) of any one request header
 
-[log]
-path = "/var/log/howdah.log"         # same as the howdah.log ini; TOML wins if both set
+# A [log] table with `path` is accepted but NOT used: set the log path with the
+# howdah.log ini directive.
 
 [rules]
 # Override the mode for a single rule by its name (see the table below).
@@ -85,6 +99,11 @@ Rule names: `max_parts`, `max_files`, `max_part_headers`, `max_part_header_bytes
 `max_input_nesting_depth`, `max_input_key_bytes`, `max_request_headers`,
 `max_request_header_bytes`. (A few byte-limit **rule**
 names end `_len` where the matching `[limits]` **directive** ends `_bytes`.)
+The core also accepts the Layer 2 and 3 names (`sql_injection`,
+`path_traversal`, `command_injection`, `command_exec`, `include`, `eval`,
+`unserialize`) under `[rules]`, but the extension does not read them there:
+set Layer 2 classes in `[inspect.rule_modes]` and sinks in `[sinks.<sink>]
+mode`.
 
 Rules carry a **severity**:
 

@@ -42,6 +42,7 @@ howdah.config=/etc/howdah/howdah.toml   <span class="c">; path to the TOML (opti
 howdah.mode=block                       <span class="c">; block | detect | off (TOML can override)</span>
 howdah.log=/var/log/howdah.log          <span class="c">; where JSON event lines are written</span></code></pre>
       <p>If <code>howdah.config</code> is unset, or the file is missing or malformed, Howdah uses its safe defaults (block mode, the limits below) and keeps serving.</p>
+      <p class="note"><strong>Prefer not to hand-write the TOML?</strong> The <a href="/config/">config editor</a> builds both files from a form, explains each setting next to its control, and validates the result with the extension's own parser, so a typo cannot silently turn into block mode on your server.</p>
 
       <h2>The TOML file</h2>
       <pre tabindex="0"><code>mode = "block"   <span class="c"># block refuses, detect logs only, off disables</span>
@@ -63,8 +64,7 @@ max_input_key_bytes      = 1024
 max_request_headers      = 200
 max_request_header_bytes = 16384
 
-[log]
-path = "/var/log/howdah.log"
+<span class="c"># [log] path is accepted but not used: set the log path with the howdah.log ini</span>
 
 [rules]
 <span class="c"># override the mode for a single rule by name</span>

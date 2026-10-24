@@ -1,0 +1,460 @@
+---
+// The config editor. The form, the TOML/ini output and the notes are generated
+// from site/config-editor/schema.js; the output is validated by the real core
+// (howdah-wasm). Everything below is rendered server-side with the shipped
+// defaults so the page is a complete reference without JavaScript; the script
+// at the bottom makes it live.
+import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import Layout from '../layouts/Layout.astro';
+import { CFG, REPO, VERSION } from '../lib/site';
+
+const require = createRequire(import.meta.url);
+const H = require('../../demo/howdah-wasm.js');
+const { SCHEMA, defaultState, withCatalog } = require('../../config-editor/schema.js');
+const E = require('../../config-editor/editor.js');
+
+const wasm = readFileSync(fileURLToPath(new URL('../../demo/howdah_wasm.wasm', import.meta.url)));
+const x = await H.loadFrom(wasm);
+const catalog = H.ruleCatalogWith(x);
+const coreVersion = H.versionWith(x);
+withCatalog(catalog);
+const state = defaultState(catalog);
+const toml = E.emitToml(state, {});
+const ini = E.emitIni(state);
+const curl = E.curlCommand(await E.encodePayload(toml), state['howdah.config']);
+
+const sections = SCHEMA.sections;
+const rules = sections.find((s) => s.id === 'rules');
+const ruleGroups = Object.entries(rules.groups)
+  .map(([layer, title]) => ({ layer, title, keys: rules.keys.filter((k) => k.layer === layer) }))
+  .filter((g) => g.keys.length);
+const limits = sections.find((s) => s.id === 'limits');
+const limitGroups = Object.entries(limits.groups).map(([g, title]) => ({ title, keys: limits.keys.filter((k) => k.group === g) }));
+const labelFor = (key: string) => key.split('.').pop();
+const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.default.join(', ') : 'empty') : String(k.default);
+---
+<Layout
+  title="Howdah config editor — build and validate howdah.toml"
+  description="Build Howdah's php.ini settings and howdah.toml from a form, validated by the extension's own parser, then copy, download or fetch the file with curl."
+  path="/config/"
+>
+  <div class="pagehead">
+    <div class="wrap">
+      <p class="crumbs"><a href="/">Home</a> / <a href="/docs/">Docs</a> / <span aria-current="page">Config editor</span></p>
+      <h1>Build your Howdah config</h1>
+      <p class="lede">Pick what you want, read what each setting does, and take the files as copy, download or one <code>curl</code> command. The TOML is checked by the same parser the extension uses, compiled to WebAssembly: what this page calls valid, Howdah {coreVersion} accepts.</p>
+    </div>
+  </div>
+
+  <section>
+    <div class="wrap editor">
+      <form id="cfg" aria-label="Howdah configuration" autocomplete="off">
+        <div class="presets" role="group" aria-label="Start from">
+          <span class="presets-label">Start from</span>
+          <button type="button" class="btn ghost" data-preset="defaults">Shipped defaults</button>
+          <button type="button" class="btn ghost" data-preset="enforcing">Enforcing</button>
+          <a class="btn ghost jump" href="#out">Your files ↓</a>
+          <details class="load">
+            <summary class="btn ghost">Load existing…</summary>
+            <p class="small">Paste a <code>howdah.toml</code> or choose the file. It is parsed by the core first; if the core rejects it, you see the exact error and the form is left as it is.</p>
+            <label for="load-text" class="sr-only">Existing howdah.toml</label>
+            <textarea id="load-text" rows="6" spellcheck="false" placeholder='mode = "detect"&#10;[limits]&#10;max_files = 50'></textarea>
+            <div class="row">
+              <label class="btn ghost file"><input type="file" id="load-file" accept=".toml,text/plain,text/toml" /> Choose file</label>
+              <button type="button" class="btn primary" id="load-btn">Load into the form</button>
+            </div>
+            <p id="load-msg" class="msg" aria-live="polite"></p>
+          </details>
+        </div>
+        <p class="js-note" data-nojs>Showing the shipped defaults. With JavaScript, the files on the right update as you change the controls, and each change is validated by the real core. Without it, this page is still the full reference: every setting, its default and what it does.</p>
+
+        <fieldset>
+          <legend>php.ini</legend>
+          <p class="small">Read once per PHP process at startup: per-pool, <code>.htaccess</code> or <code>ini_set()</code> values have no effect. Once <code>howdah.config</code> names a readable file, the file's <code>mode</code> wins over <code>howdah.mode</code>; this page keeps the two in step.</p>
+          {SCHEMA.ini.map((k) => (
+            <div class="ctl">
+              <label for={'i-' + k.key}><code>{k.key}</code> <span class="def">{k.suggested ? 'suggested' : 'default'}: {k.default}</span></label>
+              {k.type === 'enum'
+                ? <select id={'i-' + k.key} name={k.key} data-type="enum">{k.values.map((v) => <option value={v} selected={v === k.default}>{v}</option>)}</select>
+                : <input id={'i-' + k.key} name={k.key} data-type="path" type="text" value={k.default} />}
+              <small>{k.note}</small>
+            </div>
+          ))}
+        </fieldset>
+
+        <fieldset>
+          <legend>[limits]</legend>
+          <p class="small">Any limit set to 0 is rejected by the core (0 would block every request); there is no "unlimited", set a large number instead.</p>
+          {limitGroups.map((g) => (
+            <div class="group">
+              <h3>{g.title}</h3>
+              {g.keys.map((k) => (
+                <div class="ctl">
+                  <label for={'l-' + k.key}><code>{k.key}</code> <span class="def">default: {k.default}</span></label>
+                  <input id={'l-' + k.key} name={'limits.' + k.key} data-type="int" type="number" inputmode="numeric" min={k.min} step="1" value={k.default} />
+                  <small>{k.note}</small>
+                </div>
+              ))}
+            </div>
+          ))}
+        </fieldset>
+
+        <fieldset>
+          <legend>[rules]: per-rule mode</legend>
+          <p class="small"><strong>Critical</strong> rules block even when the mode is <code>detect</code>; <strong>Standard</strong> rules log in detect and block only in block mode. "inherit" leaves the rule at the global behaviour; <code>off</code> disables it entirely. Every rule name the core accepts is listed, so a loaded file never has a rule this form cannot show; the Layer 2 and 3 names are accepted by the core but not read by the extension, so they sit under their own heading.</p>
+          {ruleGroups.filter((g) => !g.keys[0].noop).map((g) => (
+            <div class="group">
+              <h3>{g.title}</h3>
+              <div class="rules">
+                {g.keys.map((k) => (
+                  <div class="ctl rule">
+                    <label for={'r-' + k.key}><code>{k.key}</code> <span class={'tag ' + k.severity}>{k.severity}</span></label>
+                    <select id={'r-' + k.key} name={'rules.' + k.key} data-type="enum" data-rule={k.key} data-severity={k.severity} data-noop="false">{k.values.map((v) => <option value={v} selected={v === k.default}>{v}</option>)}</select>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+          <details class="noop">
+            <summary>Layer 2 and 3 rule names: accepted by the core, no effect in the extension</summary>
+            <p class="small">The extension reads Layer 2 overrides only from <code>[inspect.rule_modes]</code> and sink modes only from each <code>[sinks.&lt;sink&gt;]</code> table (both are in the sections below). A <code>[rules]</code> entry for these names is valid TOML that changes nothing; they are listed so a file that contains one can still be loaded, and the load message says so.</p>
+            {ruleGroups.filter((g) => g.keys[0].noop).map((g) => (
+              <div class="group">
+                <h3>{g.title}</h3>
+                <div class="rules">
+                  {g.keys.map((k) => (
+                    <div class="ctl rule">
+                      <label for={'r-' + k.key}><code>{k.key}</code> <span class="tag">no effect</span></label>
+                      <select id={'r-' + k.key} name={'rules.' + k.key} data-type="enum" data-rule={k.key} data-severity={k.severity} data-noop="true">{k.values.map((v) => <option value={v} selected={v === k.default}>{v}</option>)}</select>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </details>
+        </fieldset>
+
+        {sections.filter((s) => s.id === 'inspect' || s.id === 'sinks').map((sec) => (
+          <fieldset>
+            <legend>[{sec.id}]: {sec.title.replace(/^Layer \d: /, '')}</legend>
+            <p class="small">{sec.id === 'inspect'
+              ? 'Layer 2 only logs by default and is independent of the global mode: a global block does not arm it. Signature inspection is best-effort and can be bypassed; use the log to find application bugs rather than relying on it. In block mode the request is refused after the script has run (see Enforcement timing in the configuration reference).'
+              : 'Layer 3 only logs by default and is independent of the global mode: a global block does not arm any sink. Set a sink’s allowlist first, then arm block. include/require and eval are PHP 7.0+ only. The sink argument is never logged.'}</p>
+            {sec.keys.map((k) => (
+              <div class={'ctl' + (sec.php7Only && sec.php7Only.some((p) => k.key.startsWith(p + '.')) ? ' php7' : '')}>
+                <label for={sec.id + '-' + k.key}><code>{k.key}</code> <span class="def">default: {fmtDefault(k)}</span>{sec.php7Only && sec.php7Only.some((p) => k.key.startsWith(p + '.')) ? <span class="tag php">PHP 7.0+</span> : null}</label>
+                {k.type === 'bool'
+                  ? <input id={sec.id + '-' + k.key} name={sec.id + '.' + k.key} data-type="bool" type="checkbox" checked={k.default} />
+                  : k.type === 'int'
+                    ? <input id={sec.id + '-' + k.key} name={sec.id + '.' + k.key} data-type="int" type="number" inputmode="numeric" min={k.min} step="1" value={k.default} />
+                    : k.type === 'list'
+                      ? <textarea id={sec.id + '-' + k.key} name={sec.id + '.' + k.key} data-type="list" rows="3" spellcheck="false" placeholder="one per line"></textarea>
+                      : <select id={sec.id + '-' + k.key} name={sec.id + '.' + k.key} data-type="enum">{k.values.map((v) => <option value={v} selected={v === k.default}>{v}</option>)}</select>}
+                <small>{k.note}</small>
+              </div>
+            ))}
+          </fieldset>
+        ))}
+      </form>
+
+      <aside id="out" aria-labelledby="out-h">
+        <h2 id="out-h">Your files</h2>
+        <p id="valid" class="valid" aria-live="polite">Shipped defaults: valid for Howdah {coreVersion}.</p>
+        <div class="tabs" role="tablist" aria-label="Output file">
+          <button type="button" role="tab" id="tab-toml" aria-selected="true" aria-controls="panel-toml">howdah.toml</button>
+          <button type="button" role="tab" id="tab-ini" aria-selected="false" aria-controls="panel-ini" tabindex="-1">howdah.ini</button>
+        </div>
+        <div id="panel-toml" role="tabpanel" aria-labelledby="tab-toml">
+          <pre tabindex="0"><code id="out-toml">{toml}</code></pre>
+          <div class="row">
+            <button type="button" class="btn ghost" data-copy="out-toml">Copy</button>
+            <button type="button" class="btn ghost" data-download="out-toml" data-name="howdah.toml">Download howdah.toml</button>
+          </div>
+        </div>
+        <div id="panel-ini" role="tabpanel" aria-labelledby="tab-ini" hidden>
+          <pre tabindex="0"><code id="out-ini">{ini}</code></pre>
+          <div class="row">
+            <button type="button" class="btn ghost" data-copy="out-ini">Copy</button>
+            <button type="button" class="btn ghost" data-download="out-ini" data-name="howdah.ini">Download howdah.ini</button>
+          </div>
+        </div>
+        <label class="opt"><input type="checkbox" id="include-defaults" /> Include defaults as comments (a self-documenting file)</label>
+
+        <h3 id="curl-h">Fetch it with curl</h3>
+        <p class="small" id="curl-note">The URL carries your whole config; <code>cfg.howdah.org</code> decodes it, re-checks it with the same core, and returns the file. Nothing is stored. Treat the URL like the file itself (allow lists can name internal paths).</p>
+        <pre tabindex="0" id="curl-pre" aria-labelledby="curl-h"><code id="curl">{curl}</code></pre>
+        <div class="row">
+          <button type="button" class="btn ghost" data-copy="curl" id="curl-copy">Copy</button>
+        </div>
+        <p class="small">Then add the <code>howdah.ini</code> lines to your PHP's conf.d directory and restart PHP-FPM or Apache. The <a href="/install/">install picker</a> has the per-platform paths; the <a href="/docs/configuration/">configuration reference</a> explains every setting at length.</p>
+      </aside>
+    </div>
+  </section>
+
+  <section class="alt">
+    <div class="wrap">
+      <h2>What this page does and does not do</h2>
+      <ul class="legend-list">
+        <li>Validation is the extension's own <code>Config::from_toml</code>, built to WebAssembly from the same source as the release. The error text you see is the core's.</li>
+        <li>Nothing leaves your browser except the URL you copy. The fetch service at <code>cfg.howdah.org</code> keeps no copies and no logs of configs.</li>
+        <li>The <code>[log]</code> TOML table is not offered: the extension reads the log path only from the <code>howdah.log</code> ini directive.</li>
+        <li>A malformed <code>howdah.config</code> on a server makes Howdah fall back to its safe defaults (block mode) and keep serving; using this page is how you avoid finding that out in production. Source: <a href={REPO + '/blob/main/docs/config.md'}>docs/config.md</a>.</li>
+      </ul>
+    </div>
+  </section>
+</Layout>
+
+<script is:inline src="/demo/howdah-wasm.js"></script>
+<script is:inline src="/config/schema.js"></script>
+<script is:inline src="/config/editor.js"></script>
+<script define:vars={{ coreVersion }}>
+  (function () {
+    var H = window.HowdahWasm, S = window.HowdahConfigSchema, E = window.HowdahConfigEditor;
+    var form = document.getElementById('cfg');
+    if (!form || !H || !S || !E) return;
+    var outToml = document.getElementById('out-toml');
+    var outIni = document.getElementById('out-ini');
+    var valid = document.getElementById('valid');
+    var curlEl = document.getElementById('curl');
+    var curlPre = document.getElementById('curl-pre');
+    var curlCopy = document.getElementById('curl-copy');
+    var curlNote = document.getElementById('curl-note');
+    var includeDefaults = document.getElementById('include-defaults');
+    var loadMsg = document.getElementById('load-msg');
+    var jsNote = document.querySelector('[data-nojs]');
+    if (jsNote) jsNote.textContent = 'The files on the right update as you change the controls; every change is validated by the real core.';
+
+    // The rule catalog is read from the server-rendered selects, so the editor
+    // works before (and without) the wasm; the wasm only validates.
+    var catalog = Array.prototype.map.call(form.querySelectorAll('[data-rule]'), function (el) {
+      return { name: el.getAttribute('data-rule'), severity: el.getAttribute('data-severity') };
+    });
+    S.withCatalog(catalog);
+
+    var CURL_HINT = curlNote.textContent;
+    var wasmReady = H.load('/demo/howdah_wasm.wasm');
+    var wasmFailed = false;
+    wasmReady.catch(function () { wasmFailed = true; });
+
+    function controls() { return form.querySelectorAll('[name]'); }
+
+    function readState() {
+      var state = S.defaultState(catalog);
+      Array.prototype.forEach.call(controls(), function (el) {
+        var t = el.getAttribute('data-type');
+        if (t === 'int') { var n = parseInt(el.value, 10); state[el.name] = isNaN(n) ? NaN : n; }
+        else if (t === 'bool') state[el.name] = el.checked;
+        else if (t === 'list') state[el.name] = el.value.split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
+        else state[el.name] = el.value;
+      });
+      return state;
+    }
+
+    function writeState(state) {
+      Array.prototype.forEach.call(controls(), function (el) {
+        if (!(el.name in state)) return;
+        var t = el.getAttribute('data-type'), v = state[el.name];
+        if (t === 'bool') el.checked = !!v;
+        else if (t === 'list') el.value = (v || []).join('\n');
+        else el.value = String(v);
+      });
+    }
+
+    var timer = null, seq = 0;
+    function schedule() { clearTimeout(timer); timer = setTimeout(render, 150); }
+
+    function setCurl(text, reason) {
+      if (text) {
+        curlEl.textContent = text;
+        curlPre.classList.remove('disabled');
+        curlCopy.disabled = false;
+        curlNote.textContent = CURL_HINT;
+      } else {
+        curlEl.textContent = '# ' + reason;
+        curlPre.classList.add('disabled');
+        curlCopy.disabled = true;
+        curlNote.textContent = reason;
+      }
+    }
+
+    function render() {
+      var state = readState();
+      var toml = E.emitToml(state, { includeDefaults: includeDefaults.checked });
+      var ini = E.emitIni(state);
+      outToml.textContent = toml;
+      outIni.textContent = ini;
+      var my = ++seq;
+      valid.className = 'valid pending';
+      valid.textContent = 'Checking with the core…';
+      wasmReady.then(function (x) {
+        if (my !== seq) return;
+        var v = H.validateConfigWith(x, toml);
+        if (v.ok) {
+          valid.className = 'valid ok';
+          valid.textContent = 'Valid for Howdah ' + coreVersion + '.';
+          document.querySelectorAll('[data-download]').forEach(function (b) { b.disabled = false; });
+          return E.encodePayload(toml).then(function (p) {
+            if (my !== seq) return;
+            if (p) setCurl(E.curlCommand(p, state['howdah.config']));
+            else setCurl(null, 'This config is too large for a URL (over ' + E.TOML_MAX + ' bytes or ' + E.PAYLOAD_MAX + ' URL characters). Use Download instead.');
+          });
+        }
+        valid.className = 'valid bad';
+        valid.textContent = 'The core rejects this config: ' + v.error;
+        setCurl(null, 'Fix the error above to get a curl command; the service only serves configs the core accepts.');
+        document.querySelectorAll('[data-download]').forEach(function (b) { b.disabled = true; });
+      }).catch(function (e) {
+        if (my !== seq) return;
+        valid.className = 'valid bad';
+        valid.textContent = 'Validation unavailable in this browser (' + (e && e.message || e) + '). Copy still works; download and the curl link do not, because they are only offered for configs the core has accepted.';
+        document.querySelectorAll('[data-download]').forEach(function (b) { b.disabled = true; });
+        setCurl(null, 'Validation unavailable: no curl command.');
+      });
+    }
+
+    form.addEventListener('input', schedule);
+    form.addEventListener('change', schedule);
+    includeDefaults.addEventListener('change', schedule);
+
+    document.querySelectorAll('[data-preset]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var state = S.defaultState(catalog);
+        var preset = S.SCHEMA.presets[b.getAttribute('data-preset')] || {};
+        Object.keys(preset).forEach(function (k) { state[k] = preset[k]; });
+        writeState(state);
+        render();
+      });
+    });
+
+    // Load existing: parse with the core, then fill the form from what it parsed.
+    function loadText(text) {
+      loadMsg.textContent = 'Checking with the core…';
+      return wasmReady.then(function (x) {
+        var v = H.validateConfigWith(x, text);
+        if (!v.ok) { loadMsg.textContent = 'Not loaded. The core rejects this file: ' + v.error; return; }
+        var r = E.loadFromCanonical(v.config, catalog);
+        if (r.unsupported) {
+          loadMsg.textContent = 'Not loaded. This file sets [' + r.unsupported.join('], [') + '], which this editor cannot represent (the extension does not read it); edit that file by hand or remove the table and load again.';
+          return;
+        }
+        writeState(r.state);
+        render();
+        var noops = Object.keys(v.config.rules || {}).filter(function (name) {
+          var el = form.querySelector('[data-rule="' + name + '"]');
+          return el && el.getAttribute('data-noop') === 'true';
+        });
+        loadMsg.textContent = 'Loaded. The form now shows that file; the output is rebuilt from it.' +
+          (noops.length ? ' Note: [rules] ' + noops.join(', ') + ' in this file ' + (noops.length === 1 ? 'has' : 'have') + ' no effect in the extension (see the [rules] section).' : '');
+      }).catch(function (e) { loadMsg.textContent = 'Could not validate: ' + (e && e.message || e); });
+    }
+    document.getElementById('load-btn').addEventListener('click', function () {
+      loadText(document.getElementById('load-text').value);
+    });
+    document.getElementById('load-file').addEventListener('change', function (ev) {
+      var f = ev.target.files && ev.target.files[0];
+      if (!f) return;
+      f.text().then(function (t) { document.getElementById('load-text').value = t; return loadText(t); });
+    });
+
+    // Tabs.
+    var tabs = document.querySelectorAll('[role=tab]');
+    tabs.forEach(function (tab) {
+      tab.addEventListener('click', function () {
+        tabs.forEach(function (t) {
+          var on = t === tab;
+          t.setAttribute('aria-selected', on ? 'true' : 'false');
+          t.tabIndex = on ? 0 : -1;
+          document.getElementById(t.getAttribute('aria-controls')).hidden = !on;
+        });
+      });
+      tab.addEventListener('keydown', function (e) {
+        if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+        var i = Array.prototype.indexOf.call(tabs, tab);
+        var next = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+        next.focus(); next.click();
+      });
+    });
+
+    // Copy and download.
+    function flash(btn, text) { var old = btn.textContent; btn.textContent = text; setTimeout(function () { btn.textContent = old; }, 1500); }
+    document.querySelectorAll('[data-copy]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var text = document.getElementById(b.getAttribute('data-copy')).textContent;
+        var p = navigator.clipboard && navigator.clipboard.writeText ? navigator.clipboard.writeText(text) : Promise.reject();
+        p.then(function () { flash(b, 'Copied'); }, function () {
+          var r = document.createRange(); r.selectNodeContents(document.getElementById(b.getAttribute('data-copy')));
+          var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r); flash(b, 'Select and copy');
+        });
+      });
+    });
+    document.querySelectorAll('[data-download]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var text = document.getElementById(b.getAttribute('data-download')).textContent;
+        var url = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
+        var a = document.createElement('a'); a.href = url; a.download = b.getAttribute('data-name'); document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+      });
+    });
+
+    render();
+  })();
+</script>
+
+<style>
+  .editor { display: grid; gap: 2rem; padding-block: 2rem; }
+  @media (min-width: 60rem) { .editor { grid-template-columns: minmax(0, 1.25fr) minmax(20rem, 1fr); gap: 2.5rem; } #out { position: sticky; top: 1rem; align-self: start; max-height: calc(100vh - 2rem); overflow: auto; } }
+  .presets { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin-bottom: 1rem; }
+  .presets-label { font-weight: 600; margin-right: .3rem; }
+  .jump { margin-left: auto; }
+  @media (min-width: 60rem) { .jump { display: none; } }
+  .load { flex-basis: 100%; }
+  .load summary { list-style: none; cursor: pointer; }
+  .load summary::-webkit-details-marker { display: none; }
+  .load[open] { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: .75rem 1rem 1rem; }
+  .load textarea { width: 100%; font-family: var(--mono); font-size: .9rem; margin: .5rem 0; }
+  .file input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  .file:focus-within { outline: 3px solid var(--focus); outline-offset: 2px; }
+  .row { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: .6rem; }
+  .msg:empty { display: none; }
+  .msg { margin: .6rem 0 0; }
+  #cfg fieldset { border: 1px solid var(--rule); background: var(--surface); border-radius: 10px; margin: 0 0 1.25rem; padding: .75rem 1.1rem 1rem; min-width: 0; }
+  #cfg legend { font-weight: 600; font-family: var(--display); padding: 0 .4rem; font-size: 1.15rem; }
+  #cfg .small, .small { font-size: .9rem; color: var(--muted); margin: .25rem 0 .75rem; }
+  .group h3 { font-size: 1rem; font-family: var(--sans); margin: 1rem 0 .25rem; }
+  .ctl { padding: .55rem 0; border-top: 1px solid var(--rule); }
+  .ctl:first-of-type { border-top: 0; }
+  .ctl label { display: block; margin-bottom: .3rem; }
+  .ctl input[type=number], .ctl input[type=text], .ctl select, .ctl textarea { width: 100%; max-width: 28rem; min-height: 44px; font-size: 1rem; font-family: var(--mono); padding: .4rem .6rem; border: 1px solid var(--rule); border-radius: 6px; background: var(--bg); color: var(--ink); }
+  .ctl textarea { min-height: 5rem; }
+  .ctl input[type=checkbox] { width: 1.5rem; height: 1.5rem; }
+  .ctl small { display: block; color: var(--muted); font-size: .85rem; margin-top: .3rem; max-width: 60ch; }
+  .def { color: var(--muted); font-size: .85rem; margin-left: .4rem; }
+  .rules { display: grid; gap: 0 1.5rem; grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); }
+  .noop { margin-top: 1rem; border-top: 1px solid var(--rule); padding-top: .5rem; }
+  .noop summary { cursor: pointer; font-weight: 600; min-height: 44px; display: flex; align-items: center; }
+  .rule select { max-width: 12rem; }
+  .tag { display: inline-block; font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; padding: .1rem .45rem; border-radius: 999px; margin-left: .4rem; vertical-align: middle; border: 1px solid var(--rule); }
+  .tag.critical { background: var(--no-bg); color: var(--no); border-color: transparent; }
+  .tag.standard { background: var(--ok-bg); color: var(--ok); border-color: transparent; }
+  .tag.php { background: var(--hot-bg); color: var(--hot); border-color: transparent; }
+  #out { background: var(--surface); border: 2px solid var(--rule); border-radius: 10px; padding: 1rem 1.2rem 1.2rem; min-width: 0; }
+  #out h2 { margin-top: 0; font-size: 1.3rem; }
+  #out h3 { font-size: 1.05rem; margin: 1.25rem 0 .4rem; }
+  #out pre { margin: 0; max-height: 24rem; overflow: auto; white-space: pre; }
+  .valid { font-weight: 600; padding: .5rem .7rem; border-radius: 6px; border-left: 4px solid var(--rule); background: var(--bg); }
+  .valid.ok { border-left-color: var(--ok); }
+  .valid.bad { border-left-color: var(--no); font-family: var(--mono); font-weight: 500; font-size: .9rem; white-space: pre-wrap; }
+  .valid.pending { border-left-color: var(--hot); }
+  .tabs { display: flex; gap: .25rem; margin: .75rem 0 .25rem; border-bottom: 1px solid var(--rule); }
+  .tabs [role=tab] { background: none; border: 0; border-bottom: 3px solid transparent; padding: .5rem .8rem; min-height: 44px; font: inherit; color: var(--muted); cursor: pointer; }
+  .tabs [role=tab][aria-selected=true] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+  .tabs [role=tab]:focus-visible { outline: 3px solid var(--focus); outline-offset: -3px; }
+  .opt { display: block; margin: .8rem 0 0; }
+  .opt input { width: 1.5rem; height: 1.5rem; margin-right: .4rem; vertical-align: middle; }
+  #curl-pre.disabled { opacity: .6; }
+  .btn[disabled] { opacity: .5; cursor: not-allowed; text-decoration: none; }
+  .legend-list { max-width: 60ch; }
+  .legend-list li { margin: .4rem 0; }
+</style>

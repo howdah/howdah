@@ -13,7 +13,7 @@ pub enum InspectClass {
     CommandInjection,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct InspectLimits {
     pub max_value_bytes: usize,

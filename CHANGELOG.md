@@ -3,6 +3,30 @@
 All notable changes to Howdah are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- A config editor at https://howdah.org/config/: builds `howdah.ini` and
+  `howdah.toml` from a form with every setting's default and effect (including
+  the 1.3 `[sinks.phar]` and `[sinks.ssrf]` tables), validates the TOML with
+  the extension's own parser compiled to WebAssembly (the core's error text,
+  verbatim), loads an existing file, and offers the result as copy, download
+  or one `curl` command. The `curl` URL is served by `cfg.howdah.org`, a
+  stateless Cloudflare Worker (`site/worker/`) that decodes the config from
+  the URL, re-validates it with the same core, serves only files the editor
+  itself wrote, and stores nothing; it is deployed on every push to `main`
+  that touches it and on every release tag (`.github/workflows/worker.yml`).
+- `howdah-wasm` exports `howdah_wasm_validate_config` (the parsed config as
+  JSON, or the error), `howdah_wasm_rule_catalog` and `howdah_wasm_version`.
+
+### Fixed
+- `docs/config.md` claimed `[log] path` in the TOML overrides `howdah.log`;
+  the extension never reads it. The log path is set only by the ini directive.
+- The browser demo ran a stale core: `site/demo/howdah_wasm.wasm` was a
+  committed binary last built at 1.0 and nothing in the site deploy rebuilt
+  it. The wasm is no longer committed; the Pages workflow builds it from the
+  same commit it deploys, and the site build fails if it is missing.
+
 ## [1.3.0] - 2026-10-24
 
 ### Added

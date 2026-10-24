@@ -35,6 +35,8 @@ use howdah_core::ffi::{
     howdah_feed, howdah_free, howdah_free_str, howdah_init, howdah_request_begin, howdah_request_end,
     howdah_take_log_line,
 };
+use howdah_core::limits::rule_catalog;
+use howdah_core::Config;
 use std::ffi::{c_char, CStr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -134,6 +136,72 @@ fn analyze(cfg: &[u8], body: &[u8]) -> String {
     serde_json::json!({ "action": action, "rule": rule, "reason": reason }).to_string()
 }
 
+// ---- config editor support --------------------------------------------------
+//
+// The howdah.org config editor validates with THIS code, not a JavaScript copy
+// of the parser: `howdah_wasm_validate_config` is `Config::from_toml` behind
+// the same alloc/result_len/free protocol as `howdah_wasm_analyze`. The parsed
+// config comes back as canonical JSON so the page can fill its form from what
+// the core understood, and tests can compare configs by meaning.
+
+/// `Config::from_toml` as JSON: `{"ok":true,"config":{…}}` or
+/// `{"ok":false,"error":"…"}` (the core's own error text, verbatim).
+fn validate_config(toml: &[u8]) -> String {
+    let text = String::from_utf8_lossy(toml);
+    match Config::from_toml(&text) {
+        Ok(cfg) => serde_json::json!({ "ok": true, "config": cfg }).to_string(),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }).to_string(),
+    }
+}
+
+/// Every rule the core accepts under `[rules]`, with its severity:
+/// `[{"name":"max_parts","severity":"critical"},…]` in declaration order.
+fn rule_catalog_json() -> String {
+    let rules: Vec<serde_json::Value> = rule_catalog()
+        .iter()
+        .map(|r| serde_json::json!({ "name": r, "severity": r.severity() }))
+        .collect();
+    serde_json::Value::Array(rules).to_string()
+}
+
+/// The core version this module was built from (the page shows it).
+fn version_str() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+fn into_result(s: String) -> *mut u8 {
+    RESULT_LEN.store(s.len(), Ordering::Relaxed);
+    into_raw(s.into_bytes())
+}
+
+/// Validate a TOML config with the real core. Result is JSON (see
+/// `validate_config`); read `howdah_wasm_result_len()` immediately, then free
+/// the result with `howdah_wasm_free`.
+///
+/// # Safety
+/// `toml_ptr` must be NULL or valid for reads of `toml_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_wasm_validate_config(toml_ptr: *const u8, toml_len: usize) -> *mut u8 {
+    let toml: &[u8] = if toml_ptr.is_null() || toml_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(toml_ptr, toml_len)
+    };
+    into_result(validate_config(toml))
+}
+
+/// The rule catalog as JSON; same result protocol as the other exports.
+#[no_mangle]
+pub extern "C" fn howdah_wasm_rule_catalog() -> *mut u8 {
+    into_result(rule_catalog_json())
+}
+
+/// The core version as a raw UTF-8 string (not JSON); same result protocol.
+#[no_mangle]
+pub extern "C" fn howdah_wasm_version() -> *mut u8 {
+    into_result(version_str().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +228,92 @@ mod tests {
             howdah_wasm_free(b, body.len());
             howdah_wasm_free(c, cfg.len());
             serde_json::from_str(&out).unwrap()
+        }
+    }
+
+    // ---- config validator export (config editor) ---------------------------
+
+    #[test]
+    fn validate_empty_is_defaults() {
+        let v: serde_json::Value = serde_json::from_str(&validate_config(b"")).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["config"]["mode"], "block");
+        assert_eq!(v["config"]["limits"]["max_parts"], 2000);
+        assert_eq!(v["config"]["sinks"]["unserialize"]["mode"], "off");
+        assert!(v["config"]["rules"].is_object());
+    }
+
+    #[test]
+    fn validate_reports_unknown_key_text() {
+        let v: serde_json::Value = serde_json::from_str(&validate_config(b"[limits]\nnope = 1")).unwrap();
+        assert_eq!(v["ok"], false);
+        assert!(v["error"].as_str().unwrap().contains("nope"), "{v}");
+    }
+
+    #[test]
+    fn validate_reports_zero_limit() {
+        let v: serde_json::Value = serde_json::from_str(&validate_config(b"[limits]\nmax_files = 0")).unwrap();
+        assert_eq!(v["ok"], false);
+        assert!(v["error"].as_str().unwrap().contains("max_files"), "{v}");
+    }
+
+    #[test]
+    fn validate_reports_invalid_toml() {
+        let v: serde_json::Value = serde_json::from_str(&validate_config(b"= = =")).unwrap();
+        assert_eq!(v["ok"], false);
+        assert!(!v["error"].as_str().unwrap().is_empty());
+    }
+
+    #[test]
+    fn validate_round_trips_detect_mode_and_rule_override() {
+        let v: serde_json::Value =
+            serde_json::from_str(&validate_config(b"mode = \"detect\"\n[rules]\nsql_injection = \"block\"")).unwrap();
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["config"]["mode"], "detect");
+        assert_eq!(v["config"]["rules"]["sql_injection"], "block");
+    }
+
+    #[test]
+    fn rule_catalog_has_every_rule_with_severity() {
+        let v: serde_json::Value = serde_json::from_str(&rule_catalog_json()).unwrap();
+        let rules = v.as_array().unwrap();
+        let names: Vec<&str> = rules.iter().map(|r| r["name"].as_str().unwrap()).collect();
+        assert_eq!(names.len(), 24, "{names:?}");
+        assert!(names.contains(&"max_parts") && names.contains(&"unserialize") && names.contains(&"ssrf"));
+        assert_eq!(v[0]["name"], "max_parts");
+        assert_eq!(v[0]["severity"], "critical");
+        let malformed = rules.iter().find(|r| r["name"] == "malformed_multipart").unwrap();
+        assert_eq!(malformed["severity"], "standard");
+    }
+
+    #[test]
+    fn version_is_cargo_version() {
+        assert_eq!(version_str(), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn validate_export_round_trips_through_the_abi() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = b"mode = \"detect\"";
+        unsafe {
+            let c = howdah_wasm_alloc(cfg.len());
+            std::slice::from_raw_parts_mut(c, cfg.len()).copy_from_slice(cfg);
+            let r = howdah_wasm_validate_config(c, cfg.len());
+            let n = howdah_wasm_result_len();
+            let out = std::str::from_utf8(std::slice::from_raw_parts(r, n)).unwrap().to_owned();
+            howdah_wasm_free(r, n);
+            howdah_wasm_free(c, cfg.len());
+            let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(v["config"]["mode"], "detect");
+            let vp = howdah_wasm_version();
+            let vn = howdah_wasm_result_len();
+            let ver = std::str::from_utf8(std::slice::from_raw_parts(vp, vn)).unwrap().to_owned();
+            howdah_wasm_free(vp, vn);
+            assert_eq!(ver, env!("CARGO_PKG_VERSION"));
+            let cp = howdah_wasm_rule_catalog();
+            let cn = howdah_wasm_result_len();
+            howdah_wasm_free(cp, cn);
+            assert!(cn > 100);
         }
     }
 

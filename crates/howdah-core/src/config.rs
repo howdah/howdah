@@ -2,14 +2,14 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::inspect::{InspectClass, InspectLimits};
 use crate::limits::{Limits, RuleId};
 use crate::sinks::SinkId;
 
 /// Global enforcement mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     Off,
@@ -18,7 +18,7 @@ pub enum Mode {
 }
 
 /// Logging settings.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct LogConfig {
     /// Log file path; `None` means the host default.
@@ -27,7 +27,7 @@ pub struct LogConfig {
 
 /// Layer-2 input inspection settings. Its `mode` is independent of the global
 /// mode: a global `block` never arms content scanning.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct InspectConfig {
     pub enabled: bool,
@@ -75,7 +75,7 @@ impl InspectConfig {
 }
 
 /// Layer-3 command-execution sink settings. `mode: None` inherits `SinkConfig.mode`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct CommandExecConfig {
     pub mode: Option<Mode>,
@@ -84,7 +84,7 @@ pub struct CommandExecConfig {
 }
 
 /// Layer-3 include/require sink settings.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct IncludeConfig {
     pub mode: Option<Mode>,
@@ -92,14 +92,14 @@ pub struct IncludeConfig {
 }
 
 /// Layer-3 eval sink settings.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct EvalConfig {
     pub mode: Option<Mode>,
 }
 
 /// Layer-3 unserialize sink settings. Off by default.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct UnserializeConfig {
     pub mode: Option<Mode>,
@@ -113,7 +113,7 @@ impl Default for UnserializeConfig {
 }
 
 /// Layer-3 phar-deserialization sink settings. Off by default.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct PharConfig {
     pub mode: Option<Mode>,
@@ -127,7 +127,7 @@ impl Default for PharConfig {
 }
 
 /// Layer-3 SSRF sink settings. Off by default.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct SsrfConfig {
     pub mode: Option<Mode>,
@@ -143,7 +143,7 @@ impl Default for SsrfConfig {
 
 /// Layer-3 sink hardening settings. Its `mode` is independent of the global
 /// mode: a global `block` never arms a sink.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct SinkConfig {
     pub enabled: bool,
@@ -191,12 +191,16 @@ impl SinkConfig {
 }
 
 /// Parsed Howdah configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serializes to the same shape as the TOML file (`rule_modes` as `rules`),
+/// which is what the wasm validator hands the config editor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Config {
     pub mode: Mode,
     pub limits: Limits,
     pub log: LogConfig,
     /// Per-rule mode overrides.
+    #[serde(rename = "rules")]
     pub rule_modes: BTreeMap<RuleId, Mode>,
     pub inspect: InspectConfig,
     pub sinks: SinkConfig,

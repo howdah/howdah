@@ -63,7 +63,8 @@
     max_input_vars: 'input', max_input_nesting_depth: 'input', max_input_key_bytes: 'input',
     max_request_headers: 'headers', max_request_header_bytes: 'headers',
     sql_injection: 'inspect', path_traversal: 'inspect', command_injection: 'inspect',
-    command_exec: 'sinks', include: 'sinks', eval: 'sinks', unserialize: 'sinks'
+    command_exec: 'sinks', include: 'sinks', eval: 'sinks', unserialize: 'sinks',
+    phar: 'sinks', ssrf: 'sinks'
   };
 
   var RULE_NOTES = {
@@ -120,7 +121,16 @@
     { key: 'include.allow_paths', type: 'list', default: [],
       note: 'Directories include/require may load from, one per line. Lexical prefixes: a symlink under an allowed directory is not resolved.' },
     { key: 'eval.mode', type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
-      note: 'eval. PHP 7.0+ only. There is no allowlist: in detect every eval() logs; in block every eval() is skipped.' }
+      note: 'eval. PHP 7.0+ only. There is no allowlist: in detect every eval() logs; in block every eval() is skipped.' },
+    // 1.3: both opt-in (off); only an explicit mode here arms them.
+    { key: 'phar.mode', type: 'enum', values: MODES, default: 'off',
+      note: 'phar:// stream access (1.3). Off by default; a global or [sinks] block does not arm it. detect logs phar access outside allow_paths; block refuses it.' },
+    { key: 'phar.allow_paths', type: 'list', default: [],
+      note: 'Realpath prefixes under which .phar archives may be opened, one per line; matched component-wise up to and including the .phar segment. Empty means every phar access is a hit in detect.' },
+    { key: 'ssrf.mode', type: 'enum', values: MODES, default: 'off',
+      note: 'Outbound requests to hosts not in allow_hosts (1.3). Off by default; a global or [sinks] block does not arm it.' },
+    { key: 'ssrf.allow_hosts', type: 'list', default: [],
+      note: 'One per line: a hostname (exact, case-insensitive; no wildcards), a literal IP, or a CIDR such as 10.0.0.0/8 or fd00::/8 (full address required, so 10/8 is rejected). The core rejects wildcards and out-of-range prefixes.' }
   ];
 
   var SCHEMA = {

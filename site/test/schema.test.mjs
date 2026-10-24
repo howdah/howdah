@@ -35,6 +35,13 @@ test('every schema default equals the core default', () => {
   assert.equal(state['sinks.unserialize.mode'], core.sinks.unserialize.mode);
   assert.equal(state['sinks.unserialize.mode'], 'off');
   assert.deepEqual(state['sinks.command_exec.allow'], []);
+  // 1.3: both new sinks are opt-in (off) with empty allow lists.
+  assert.equal(state['sinks.phar.mode'], core.sinks.phar.mode);
+  assert.equal(state['sinks.phar.mode'], 'off');
+  assert.deepEqual(state['sinks.phar.allow_paths'], []);
+  assert.equal(state['sinks.ssrf.mode'], core.sinks.ssrf.mode);
+  assert.equal(state['sinks.ssrf.mode'], 'off');
+  assert.deepEqual(state['sinks.ssrf.allow_hosts'], []);
   // The ini default is the SHIPPED default (packaging/howdah.ini), deliberately
   // not the core's safe default, which is "block".
   assert.equal(state['howdah.mode'], 'detect');

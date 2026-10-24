@@ -28,9 +28,10 @@ test('validateConfigWith returns the core error text', () => {
   assert.match(v.error, /max_files/);
 });
 
-test('ruleCatalogWith lists 22 rules with severities', () => {
+test('ruleCatalogWith lists every rule with severities', () => {
   const rules = H.ruleCatalogWith(x);
-  assert.equal(rules.length, 22);
+  assert.equal(rules.length, 24);
+  assert.ok(rules.some((r) => r.name === 'phar') && rules.some((r) => r.name === 'ssrf'));
   assert.deepEqual(rules[0], { name: 'max_parts', severity: 'critical' });
   assert.equal(rules.find((r) => r.name === 'malformed_multipart').severity, 'standard');
 });

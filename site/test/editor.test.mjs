@@ -120,6 +120,30 @@ test('load then emit reproduces a non-trivial config', () => {
   assert.deepEqual(v2.config, v.config);
 });
 
+test('1.3 phar and ssrf sinks round-trip through the core', () => {
+  const s = fresh();
+  s['sinks.phar.mode'] = 'detect';
+  s['sinks.phar.allow_paths'] = ['/var/www/vendor'];
+  s['sinks.ssrf.mode'] = 'block';
+  s['sinks.ssrf.allow_hosts'] = ['10.0.0.0/8', 'api.internal', '192.168.1.5'];
+  const toml = E.emitToml(s, {});
+  assert.ok(toml.includes('[sinks.phar]') && toml.includes('[sinks.ssrf]'), toml);
+  const v = validate(toml);
+  assert.equal(v.ok, true, v.error);
+  assert.equal(v.config.sinks.phar.mode, 'detect');
+  assert.deepEqual(v.config.sinks.phar.allow_paths, ['/var/www/vendor']);
+  assert.equal(v.config.sinks.ssrf.mode, 'block');
+  assert.deepEqual(v.config.sinks.ssrf.allow_hosts, ['10.0.0.0/8', 'api.internal', '192.168.1.5']);
+});
+
+test('a wildcard ssrf host is rejected by the core, not by JavaScript', () => {
+  const s = fresh();
+  s['sinks.ssrf.allow_hosts'] = ['*.example.com'];
+  const v = validate(E.emitToml(s, {}));
+  assert.equal(v.ok, false);
+  assert.match(v.error, /allow_hosts|wildcard|\*/i);
+});
+
 test('payload round-trips and uses z. when shorter', async () => {
   const small = 'mode = "detect"\n';
   const p = await E.encodePayload(small);

@@ -134,6 +134,31 @@ that populate superglobals lazily. See caveats 5–7.
 | **Array-nesting DoS** (deep `a[b][c]…`) | `max_input_nesting_depth` (64) | Var-dropped + logged, then best-effort 403; Enforced on the SAPIs in Table 3's nesting column. |
 | **CVE-2012-1823** — php-cgi argument injection | *(none — out of reach)* | **NOT protected.** The exploit works only under the php-cgi SAPI, where php-cgi consumes the argv-injection query string during its **own startup — before any PHP extension, module, or request (RINIT) hook loads** — so no in-PHP check can ever fire for the attack shape. Like CVE-2019-11043, this happens before extension code runs and is outside what a PHP extension can defend. See caveat 7. |
 
+## Table 5: other SAPIs and runtimes
+
+From [`lab/integration/runtime-results.tsv`](../lab/integration/runtime-results.tsv),
+one row per run of the named script, **not** from the matrix above. These runs
+are one scenario each (the self-test: a marker request, a request one part
+over `max_parts`, a normal form; the lab rows add the block-shaped script),
+not the matrix's 27, so a PASS here says the extension loads and refuses the
+over-limit shape on that runtime and nothing more. A FAIL is a run that went
+wrong and is why that runtime is not supported.
+
+| Runtime / SAPI | Arch | PHP | Result | Script | What ran |
+|---|---|---|---|---|---|
+| LiteSpeed LSAPI: OpenLiteSpeed 1.9.3 with LiteSpeed's lsphp83 package (`litespeed`) | x86_64 | 8.3.36 | PASS (2026-10-24) | `lab/integration/lsapi.sh` | released 1.4.0 .so in lsphp's extension_dir; marker flagged 200 with a self_test event; over-limit refused 403 with the Howdah body and a max_parts event; normal form 200, no event |
+| Docker image (docker/Dockerfile) on php:X.Y-fpm, php-fpm behind nginx 1.27 (`fpm`) | x86_64 | 5.6.40, 7.0.33, 7.1.33, 7.2.34, 7.3.33, 7.4.33, 8.0.30, 8.1.34, 8.2.35, 8.3.36, 8.4.27, 8.5.12 | PASS (2026-10-24) | `docker/smoke.sh` | released 1.4.0 .so; php -m and php-fpm -m; lab self-test on the CLI server in detect and block mode; howdah-check web through nginx: marker flagged 200, over-limit refused 403 with a max_parts event, php-fpm worker exit code 70, 403 body lost |
+| Docker image (docker/Dockerfile) on php:X.Y-fpm, php-fpm behind nginx 1.27 (`fpm`) | aarch64 (QEMU) | 8.3.36 | PASS (2026-10-24) | `docker/smoke.sh` | released 1.4.0 aarch64 .so, emulated on an x86_64 host; the same checks as the x86_64 rows |
+| Docker image on php:X.Y-fpm-alpine (musl build of the 1.4.0 source; no musl release yet) (`fpm`) | x86_64 musl | 5.6.40, 7.0.33, 7.1.33, 7.2.34, 7.3.33, 7.4.33, 8.0.30, 8.1.34, 8.2.35, 8.3.36, 8.4.27, 8.5.12 | PASS (2026-10-24) | `docker/smoke.sh` | HOWDAH_LIBC=musl packaging/build-release.sh, signed with a throwaway key; the same checks as the Debian rows |
+| Lab image (lab/images/php-X.Y.Dockerfile + dev.Dockerfile), PHP CLI server, extension built from source on arm64 (`cli`) | aarch64 (QEMU) | 7.4.33, 8.3.36 | PASS (2026-10-24) | `lab/integration/block_shaped.sh, lab/integration/selftest.sh` | block mode: shaped upload 403 with request id, normal form 200; detect mode: standard rule logged and 200, critical rule 403; self-test in detect and block mode |
+| FrankenPHP 1.13.3 (ZTS PHP, threads) with a throwaway ZTS build (not shipped) (`frankenphp`) | x86_64 | 8.3.36 | **FAIL** (2026-10-24) | `docs/zts.md` | one request at a time: marker flagged, over-limit blocked; 8+8 concurrent clients: 1 normal request refused 403, 16 over-limit requests served 200, then FrankenPHP aborted (malloc(): unaligned tcache chunk detected) |
+
+Not covered by any row: LiteSpeed Enterprise, lsphp other than 8.3 and lsphp
+from LiteSpeed's rpm repository, Apache `mod_php` with the event or worker
+MPM, any ZTS build (see [zts.md](zts.md)), and aarch64 musl (there is no
+aarch64 musl build). The Alpine rows ran a musl build of the 1.4.0 source
+made locally; no release carried musl tarballs when they ran.
+
 ## Honest caveats
 
 1. **The exact defense is the count and length rules**: `max_parts` (2000),
@@ -182,10 +207,13 @@ that populate superglobals lazily. See caveats 5–7.
    `config.guess` cannot identify an aarch64 host, so the build passes an
    explicit `--build` triple (releases before 1.2.2 shipped no 5.4 arm64
    tarball for that reason). The release assets are the definitive per-arch
-   list. The core is arch-agnostic pure Rust, but arm64 is **build-verified
-   only** (PHP 5.4, 7.4 and 8.4 locally under QEMU; the rest in CI). Every
-   matrix result in the tables above was recorded on x86_64; the scenario
-   matrix has not been run on arm64.
+   list. The core is arch-agnostic pure Rust. Every matrix result in the
+   tables above was recorded on x86_64; the scenario matrix has not been run
+   on arm64. On arm64 only the self-test scenario has run (Table 5, under
+   QEMU), and the non-blocking `lab-aarch64` CI job runs the lab's
+   block-shaped and self-test scripts for 7.4 and 8.3 on native arm64 runners.
+   A musl (Alpine) build exists for x86_64 only, from the release after 1.4.0.
+   ZTS PHP has no build: [zts.md](zts.md).
 
 ## Reproduce
 

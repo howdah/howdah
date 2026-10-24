@@ -561,5 +561,103 @@
   ],
   "notRunMinors": [
     "5.5"
+  ],
+  "runtimeSource": "lab/integration/runtime-results.tsv",
+  "runtimes": [
+    {
+      "date": "2026-10-24",
+      "runtime": "LiteSpeed LSAPI: OpenLiteSpeed 1.9.3 with LiteSpeed's lsphp83 package",
+      "sapi": "litespeed",
+      "php": [
+        "8.3.36"
+      ],
+      "arch": "x86_64",
+      "script": "lab/integration/lsapi.sh",
+      "result": "PASS",
+      "detail": "released 1.4.0 .so in lsphp's extension_dir; marker flagged 200 with a self_test event; over-limit refused 403 with the Howdah body and a max_parts event; normal form 200, no event"
+    },
+    {
+      "date": "2026-10-24",
+      "runtime": "Docker image (docker/Dockerfile) on php:X.Y-fpm, php-fpm behind nginx 1.27",
+      "sapi": "fpm",
+      "php": [
+        "5.6.40",
+        "7.0.33",
+        "7.1.33",
+        "7.2.34",
+        "7.3.33",
+        "7.4.33",
+        "8.0.30",
+        "8.1.34",
+        "8.2.35",
+        "8.3.36",
+        "8.4.27",
+        "8.5.12"
+      ],
+      "arch": "x86_64",
+      "script": "docker/smoke.sh",
+      "result": "PASS",
+      "detail": "released 1.4.0 .so; php -m and php-fpm -m; lab self-test on the CLI server in detect and block mode; howdah-check web through nginx: marker flagged 200, over-limit refused 403 with a max_parts event, php-fpm worker exit code 70, 403 body lost"
+    },
+    {
+      "date": "2026-10-24",
+      "runtime": "Docker image (docker/Dockerfile) on php:X.Y-fpm, php-fpm behind nginx 1.27",
+      "sapi": "fpm",
+      "php": [
+        "8.3.36"
+      ],
+      "arch": "aarch64 (QEMU)",
+      "script": "docker/smoke.sh",
+      "result": "PASS",
+      "detail": "released 1.4.0 aarch64 .so, emulated on an x86_64 host; the same checks as the x86_64 rows"
+    },
+    {
+      "date": "2026-10-24",
+      "runtime": "Docker image on php:X.Y-fpm-alpine (musl build of the 1.4.0 source; no musl release yet)",
+      "sapi": "fpm",
+      "php": [
+        "5.6.40",
+        "7.0.33",
+        "7.1.33",
+        "7.2.34",
+        "7.3.33",
+        "7.4.33",
+        "8.0.30",
+        "8.1.34",
+        "8.2.35",
+        "8.3.36",
+        "8.4.27",
+        "8.5.12"
+      ],
+      "arch": "x86_64 musl",
+      "script": "docker/smoke.sh",
+      "result": "PASS",
+      "detail": "HOWDAH_LIBC=musl packaging/build-release.sh, signed with a throwaway key; the same checks as the Debian rows"
+    },
+    {
+      "date": "2026-10-24",
+      "runtime": "Lab image (lab/images/php-X.Y.Dockerfile + dev.Dockerfile), PHP CLI server, extension built from source on arm64",
+      "sapi": "cli",
+      "php": [
+        "7.4.33",
+        "8.3.36"
+      ],
+      "arch": "aarch64 (QEMU)",
+      "script": "lab/integration/block_shaped.sh, lab/integration/selftest.sh",
+      "result": "PASS",
+      "detail": "block mode: shaped upload 403 with request id, normal form 200; detect mode: standard rule logged and 200, critical rule 403; self-test in detect and block mode"
+    },
+    {
+      "date": "2026-10-24",
+      "runtime": "FrankenPHP 1.13.3 (ZTS PHP, threads) with a throwaway ZTS build (not shipped)",
+      "sapi": "frankenphp",
+      "php": [
+        "8.3.36"
+      ],
+      "arch": "x86_64",
+      "script": "docs/zts.md",
+      "result": "FAIL",
+      "detail": "one request at a time: marker flagged, over-limit blocked; 8+8 concurrent clients: 1 normal request refused 403, 16 over-limit requests served 200, then FrankenPHP aborted (malloc(): unaligned tcache chunk detected)"
+    }
   ]
 }

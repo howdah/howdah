@@ -169,9 +169,9 @@ deny_php_writes     = false <span class="c"># true -> flag a *.php/.phar/.phtml 
       </div>
 
       <h2>Log format</h2>
-      <p>Howdah writes one JSON line per event, to a file or syslog. Each line carries a timestamp, request ID, rule ID, action, client IP, method, URI and the reason. The request ID also appears in the block response, so a user report maps to a log line.</p>
-      <pre tabindex="0"><code>{`{"ts":"2026-10-23T09:41:02Z","id":"91ab3f","rule":"max_files","action":"block","ip":"203.0.113.7","method":"POST","uri":"/upload.php","reason":"201 file parts > max_files 200"}`}</code></pre>
-      <p class="legend">Request bodies, cookies and authorization headers are never logged by default (privacy / GDPR).</p>
+      <p>Howdah writes one JSON line per event to the file named by <code>howdah.log</code> (there is no syslog transport). Each line carries a timestamp (<code>ts</code>, UTC epoch milliseconds), request ID, rule, action, client IP, method, path and the reason. The request ID also appears in the block response, so a user report maps to a log line.</p>
+      <pre tabindex="0"><code>{`{"action":"block","client_ip":"203.0.113.7","method":"POST","reason":"multipart file count exceeds limit","request_id":"2a9f3c1e7b5d0a4c62","rule":"max_files","ts":"1792834862000","uri":"/upload.php"}`}</code></pre>
+      <p class="legend">Request bodies, cookies, authorization headers and query strings are never logged (privacy / GDPR). Field-by-field reference, retention and a blocked-attack summary: <a href="/docs/compliance/#audit-log">compliance evidence</a>.</p>
     </div>
   </section>
 </Layout>

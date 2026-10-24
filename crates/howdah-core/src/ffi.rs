@@ -1462,7 +1462,7 @@ pub unsafe fn howdah_log_config(ctx: *const howdah_ctx) -> crate::config::LogCon
     catch_unwind(AssertUnwindSafe(|| (*ctx).config.log.clone())).unwrap_or_default()
 }
 
-// ---- scoped [[exceptions]] (1.5) --------------------------------------------
+// ---- scoped [[exceptions]] --------------------------------------------------
 //
 // The `_at` entry points below are the originals plus the executing script
 // (and an optional 32-byte SHA-256 of its bytes) so `script` / `script_sha256`
@@ -1532,8 +1532,11 @@ pub unsafe extern "C" fn howdah_exceptions_want_hash(
         return 0;
     }
     catch_unwind(AssertUnwindSafe(|| {
+        if (*ctx).exceptions.is_empty() || script.is_null() || script_len == 0 {
+            return 0; // nothing to hash for: no copy, no walk
+        }
         let s = copy_str(script, script_len);
-        i32::from(!s.is_empty() && (*ctx).exceptions.want_hash(&s))
+        i32::from((*ctx).exceptions.want_hash(&s))
     }))
     .unwrap_or(0)
 }
@@ -2848,7 +2851,7 @@ mod tests {
         // `limits` as a layer compiles (it covers the Standard rules) and the
         // Critical flood limit still blocks for a matching client.
         let toml = "mode = \"detect\"\n[limits]\nmax_parts = 1\n\
-            [[exceptions]]\nrule = \"limits\"\nclient_cidr = \"0.0.0.0/0\"\nreason = \"x\"\n";
+            [[exceptions]]\nrule = \"limits\"\nclient_cidr = \"1.2.3.0/24\"\nreason = \"x\"\n";
         let c = init(toml);
         begin(c);
         let two = b"--B\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nx\r\n--B\r\nContent-Disposition: form-data; name=\"b\"\r\n\r\nx\r\n--B--\r\n";

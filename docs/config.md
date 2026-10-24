@@ -643,7 +643,7 @@ program until it is labelled for that.
 Promtail pipeline for Loki, tested against the real tools by
 `lab/integration/siem_snippets.sh`.
 
-## `[[exceptions]]` — scoped exceptions (1.5)
+## `[[exceptions]]` — scoped exceptions
 
 An exception turns **one rule off for one scope**: the executing script, a
 request parameter, a URI prefix, a client network, or a combination. Every
@@ -680,8 +680,14 @@ reason        = "Vendor template compiler, pinned by content because the docroot
 Rules:
 
 - **Facets are ANDed.** Every facet an entry sets must match; unset facets
-  match anything. At least one facet is required. The first matching entry
-  wins.
+  match anything. At least one facet is required, and a facet that matches
+  every request (`script = "/**"`, `uri_prefix = "/"`, a `/0` CIDR) is
+  refused. The first matching entry wins.
+- **`uri_prefix` is never satisfied by a path with a `.`/`..` segment, `//`,
+  `\` or `%`** (fail toward protection: nginx passes `$request_uri`
+  unnormalized, and `/wp-admin/../index.php` executes `/index.php`).
+- **`param`/`param_prefix` may not name or prefix `REQUEST_URI`/`PATH_INFO`**,
+  the Layer 2 path pseudo-parameters.
 - **`rule`** is a rule id as spelled in the log (`sql_injection`,
   `command_exec`, `php_write`, `max_request_headers`, ...), a layer name
   (`limits`, `inspect`, `sinks`, `behavior`; `inspect.*` is the same as
@@ -699,9 +705,14 @@ Rules:
   and `param_prefix` are mutually exclusive.
 - **`script`** is compared with the path PHP reports for the executing file
   (`__FILE__`): the file that contains the call (a framework's filesystem
-  class, a `require`d file), not the page the request hit; absolute, with
-  symlinks resolved by PHP; matched byte-for-byte. Patterns must start
-  with `/`.
+  class, a `require`d file), not the page the request hit; absolute and
+  realpath'd by PHP (`require`d files through `zend_resolve_path`, the main
+  script through the stream layer's `opened_path`), so symlinks are followed;
+  matched byte-for-byte. The exception: Layer 4's `upload_exec` check of the
+  main script sees `SCRIPT_FILENAME` as the SAPI passed it. Code inside
+  `eval()` reports as `<file>(<line>) : eval()'d code`, which a `**` glob on
+  the directory also covers; a literal path or hash does not. Patterns must
+  start with `/`; paths over 4096 bytes never match.
 - **Effect.** A match sets the rule to `off` for that event, decided after the
   rule found something and before the mode applies. It never arms anything
   and never widens an allowlist: **an exception on `sinks.command_exec` means
@@ -719,10 +730,12 @@ Rules:
 
 ### Verification
 
-`lab/integration/exceptions.sh` (19 checks) passed on PHP 5.6, 7.4 and 8.3:
-a sink exception by exact script, glob, SHA-256 and through a symlinked
-docroot; that an exception on one sink leaves `eval` from the same script
-logged; a `param` exception silencing one Layer 2 rule for one parameter
+`lab/integration/exceptions.sh` (21 checks) passed on PHP 5.6, 7.4 and 8.3:
+a sink exception by exact script, glob, SHA-256, through a symlinked CLI
+main script and a symlinked `require` (both report the realpath); that an
+exception on one sink leaves `eval` from the same script logged; that
+`/wp-admin/../index.php` and its `/./`, `//` and `%2e%2e` spellings never
+satisfy `uri_prefix = "/wp-admin/"`; a `param` exception silencing one Layer 2 rule for one parameter
 while the same payload in another parameter and another rule in the same
 parameter are still logged; `client_cidr` on Layer 1 Standard rules under
 php-fpm (header count and input-key rules); `exceptions_log`; the `php --ri`
@@ -739,9 +752,11 @@ exception by script.
   `client_cidr` exception does not match Layer 1 or Layer 2 events.
 - `uri_prefix` is a raw byte prefix (not decoded, not case-folded). Prefer
   `script` where the layer offers it.
-- `script` follows symlinks because PHP does; pin the target, not the link.
-- The hash facet reads the file once per path per process (re-read on
-  size/mtime change; 256-path cache; an unreadable file never matches).
+- `script` follows symlinks because PHP does; pin the target, not the link
+  (copy `__FILE__`).
+- The hash facet reads the file once per path per process (re-read when
+  device, inode, size, mtime or ctime changes; 256-path cache; files over
+  4 MiB and unreadable files never match).
 - Layer 2 has no `script` facet (above). On a front-controller application
   every path may be `/index.php`.
 - An exception is a recorded hole with the same threat model as setting the

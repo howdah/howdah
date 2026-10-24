@@ -18,13 +18,25 @@ use crate::script_hash::HashCache;
 /// Process-global hash cache (NTS: one request at a time per worker).
 static mut CACHE: Option<HashCache> = None;
 
-/// The executing script's path as PHP reports it, or empty when nothing is
-/// executing (PHP yields a bracketed placeholder such as `[no active file]`,
-/// which is not a path and is dropped).
+/// Latched at MINIT: `howdah_exceptions_count(CTX) > 0`. With no
+/// `[[exceptions]]` configured nothing below does any work, so a config
+/// without exceptions keeps the per-call cost it had before this feature.
+pub(crate) static mut ACTIVE: bool = false;
+
+/// The executing script's path as PHP reports it, or empty when no
+/// exceptions are configured (no engine call at all) or nothing is executing
+/// (PHP yields a bracketed placeholder such as `[no active file]`, which is
+/// not a path and is dropped). For code inside `eval()` PHP reports
+/// `<file>(<line>) : eval()'d code`, which starts with `/` and is passed on
+/// as is: a `**` glob on the file's directory covers it, a literal path or a
+/// hash does not (documented).
 ///
 /// # Safety
 /// Must be called from a PHP hook with the engine initialised.
 pub(crate) unsafe fn current_script() -> Vec<u8> {
+    if !*ptr::addr_of!(ACTIVE) {
+        return Vec::new();
+    }
     let p = sys::howdah_sys_current_script();
     if p.is_null() {
         return Vec::new();
@@ -42,7 +54,8 @@ pub(crate) unsafe fn current_script() -> Vec<u8> {
 /// # Safety
 /// `module::CTX` live or NULL.
 pub(crate) unsafe fn sha_for(script: &[u8]) -> Option<[u8; 32]> {
-    if script.is_empty()
+    if !*ptr::addr_of!(ACTIVE)
+        || script.is_empty()
         || module::CTX.is_null()
         || core::howdah_exceptions_want_hash(module::CTX, script.as_ptr() as *const c_char, script.len()) == 0
     {

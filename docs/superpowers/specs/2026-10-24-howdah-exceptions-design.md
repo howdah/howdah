@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-24
 **Status:** design, approved to build (gap analysis item #2, "the keystone operability gap")
-**Target release:** Howdah 1.5.0 (follows 1.4 = Layer 4)
+**Target release:** the next minor after 1.4.0 (version number is the owner's call; the crate stays 1.4.0 in this PR)
 **Builds on:** the per-rule `[rules]` modes (1.0), the Layer 2 class toggles
 (1.1), the Layer 3 allowlists (1.2/1.3), and the Layer 4 execution-origin
 primitive (`zend_get_executed_filename()`, 1.4, `crates/howdah-sys/sink_hook.c`
@@ -233,6 +233,42 @@ character except `/`. Everything else is literal. A pattern must start with
 `/var/www/html/wp-admin/includes/x.php`; `/var/www/html/wp-admin/**` matches
 both. No brace expansion, no character classes.
 
+### 5.1a Rails added after review
+
+- **`uri_prefix` cannot be stepped into.** nginx passes `$request_uri`
+  unnormalized, so `/wp-admin/../index.php` executes `/index.php` while
+  starting with `/wp-admin/`. The matcher fails toward protection: a URI with
+  a `.` or `..` segment, an empty segment (`//`), a backslash or any `%`
+  never satisfies a `uri_prefix` facet (`exceptions::uri_is_plain`). A
+  legitimate request spelled that way is not excepted either, which is the
+  right way round. Unit tests cover each shape; the lab sends
+  `/wp-admin/../index.php`, `/wp-admin/./../index.php`, `//` and `%2e%2e`
+  with `--path-as-is` and asserts the `q` finding is still logged.
+- **Wildcard facets do not satisfy the facet rail.** `script = "/**"`,
+  `"/*"` (any pattern with no literal byte besides `/`), `uri_prefix = "/"`
+  and a CIDR with prefix length 0 are refused at validation, mirroring `*`.
+- **`param`/`param_prefix` may not name or prefix `REQUEST_URI`/`PATH_INFO`**,
+  the Layer 2 path pseudo-parameters (`param_prefix = "R"` would otherwise
+  silence the whole path scan).
+- **Hash cache revalidation** keys on device, inode, size, mtime and ctime
+  (`cp -p`, `touch -r`, `rsync -t` and `tar` keep mtime). Files over 4 MiB
+  are not hashed; the digest streams 64-byte blocks without copying.
+- **Glob matching** is O(tokens × path) via per-row suffix-ORs; paths over
+  4096 bytes never match.
+- **Zero cost without exceptions:** the glue latches
+  `howdah_exceptions_count(CTX) > 0` at MINIT and skips the origin lookup and
+  the hash path entirely when it is 0; `want_hash` checks emptiness before
+  copying the path.
+- **Which path, exactly (symlinks):** `require`d files are realpath'd by
+  `zend_resolve_path`; the main script is opened through the stream layer,
+  whose `opened_path` is realpath'd too, so `__FILE__` is the target on the
+  CLI, php-fpm and the built-in server (lab-asserted for a symlinked CLI main
+  script and a symlinked `require` on 5.6/7.4/8.3). The one unresolved
+  spelling is Layer 4's `upload_exec` check of the main script, which
+  compares `SCRIPT_FILENAME` as the SAPI passed it. Code inside `eval()`
+  reports as `<file>(<line>) : eval()'d code`: a `**` glob on the directory
+  covers it, a literal path or hash does not.
+
 ### 5.2 The `script_sha256` facet
 
 The hash is SHA-256 of the file's bytes as they are on disk, lowercase hex
@@ -371,7 +407,7 @@ that no profile arms a block.
 Packaging: the release tarball, the deb and the rpm would each need their own
 install lines (three packagers, not one line), so the profiles ship **in the
 repository and on the site** (`howdah.org/profiles/<app>.toml`, copied at
-site build) and are linked from the docs. Not packaged in 1.5.
+site build) and are linked from the docs. Not packaged in this change.
 
 ## 8. Observability and the config editor
 

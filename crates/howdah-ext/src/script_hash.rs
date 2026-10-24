@@ -3,24 +3,65 @@
 //! (`origin.rs`) owns the process-global instance and decides when to call it
 //! (only when the core says a hash facet could apply to the script).
 //!
-//! Revalidation is by `stat`: a cached digest is reused while the file's size
-//! and mtime are unchanged, so an edited file is re-read. The cache holds at
-//! most `cap` paths and is emptied when full (a bounded, simple policy; the
-//! facet is meant for a handful of pinned scripts, not hundreds).
+//! Revalidation is by `stat`: a cached digest is reused only while the
+//! file's identity and change stamps are all unchanged: device, inode, size,
+//! mtime AND ctime. mtime alone is not enough (`cp -p`, `touch -r`, `rsync
+//! -t` and `tar` preserve it); ctime cannot be set from userland, and a
+//! rename-in replacement changes the inode. The cache holds at most `cap`
+//! paths and is emptied when full (a bounded, simple policy; the facet is
+//! meant for a handful of pinned scripts, not hundreds).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use howdah_core::exceptions::sha256;
 
-/// Largest file hashed (bytes); anything bigger yields `None` (no match).
-pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+/// Largest file hashed (bytes); anything bigger yields `None` (no match,
+/// the rule stays armed). 4 MiB bounds the transient read inside a sink call;
+/// a PHP script larger than that cannot use the hash facet.
+pub const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// What must be unchanged for a cached digest to be reused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+}
+
+impl Stamp {
+    fn of(md: &std::fs::Metadata) -> Stamp {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Stamp {
+                dev: md.dev(),
+                ino: md.ino(),
+                len: md.len(),
+                mtime: (md.mtime(), md.mtime_nsec()),
+                ctime: (md.ctime(), md.ctime_nsec()),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            use std::time::UNIX_EPOCH;
+            let m = md.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok());
+            Stamp {
+                dev: 0,
+                ino: 0,
+                len: md.len(),
+                mtime: m.map_or((0, 0), |d| (d.as_secs() as i64, d.subsec_nanos() as i64)),
+                ctime: (0, 0),
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Entry {
-    len: u64,
-    mtime: Option<SystemTime>,
+    stamp: Stamp,
     sha: [u8; 32],
 }
 
@@ -45,19 +86,22 @@ impl HashCache {
         if !md.is_file() || md.len() > MAX_FILE_BYTES {
             return None;
         }
-        let (len, mtime) = (md.len(), md.modified().ok());
+        let stamp = Stamp::of(&md);
         if let Some(e) = self.map.get(path) {
-            if e.len == len && e.mtime == mtime {
+            if e.stamp == stamp {
                 return Some(e.sha);
             }
         }
         let bytes = std::fs::read(path).ok()?;
+        if bytes.len() as u64 > MAX_FILE_BYTES {
+            return None; // grew between stat and read
+        }
         self.reads += 1;
         let sha = sha256::digest(&bytes);
         if self.map.len() >= self.cap && !self.map.contains_key(path) {
             self.map.clear();
         }
-        self.map.insert(path.to_path_buf(), Entry { len, mtime, sha });
+        self.map.insert(path.to_path_buf(), Entry { stamp, sha });
         Some(sha)
     }
 
@@ -94,12 +138,45 @@ mod tests {
         // Same length, different bytes, forced older-or-newer mtime: re-read.
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&p, b"<?php echo 2;").unwrap();
-        let far = SystemTime::now() + std::time::Duration::from_secs(5);
+        let far = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
         let _ = std::fs::File::options().write(true).open(&p).and_then(|f| f.set_modified(far));
         let h2 = c.sha256_of(&p).unwrap();
         assert_eq!(h2, sha256::digest(b"<?php echo 2;"));
         assert_ne!(h1, h2);
         assert_eq!(c.reads, 2);
+    }
+
+    #[test]
+    fn same_size_rewrite_with_restored_mtime_is_re_read() {
+        // `cp -p`, `touch -r`, rsync -t and tar keep size and mtime; only the
+        // inode's ctime (and sometimes the inode) changes. The cache must not
+        // serve the stale digest.
+        let p = tmp("c.php", b"<?php echo 1;");
+        let mut c = HashCache::new(8);
+        let h1 = c.sha256_of(&p).unwrap();
+        let mtime = std::fs::metadata(&p).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&p, b"<?php echo 2;").unwrap(); // same length
+        std::fs::File::options().write(true).open(&p).unwrap().set_modified(mtime).unwrap();
+        assert_eq!(std::fs::metadata(&p).unwrap().modified().unwrap(), mtime, "mtime restored");
+        let h2 = c.sha256_of(&p).unwrap();
+        assert_eq!(h2, sha256::digest(b"<?php echo 2;"));
+        assert_ne!(h1, h2);
+        assert_eq!(c.reads, 2);
+        // A replacement via rename (new inode, same size, copied mtime).
+        let q = tmp("c.php.tmp", b"<?php echo 3;");
+        std::fs::File::options().write(true).open(&q).unwrap().set_modified(mtime).unwrap();
+        std::fs::rename(&q, &p).unwrap();
+        assert_eq!(c.sha256_of(&p).unwrap(), sha256::digest(b"<?php echo 3;"));
+        assert_eq!(c.reads, 3);
+    }
+
+    #[test]
+    fn files_over_the_cap_are_not_hashed() {
+        let p = tmp("big.php", &vec![b'/'; (MAX_FILE_BYTES + 1) as usize]);
+        let mut c = HashCache::new(8);
+        assert!(c.sha256_of(&p).is_none());
+        assert_eq!(MAX_FILE_BYTES, 4 * 1024 * 1024);
     }
 
     #[test]

@@ -386,7 +386,7 @@ void howdah_free_str(char *s);
  */
 void howdah_free(struct howdah_ctx *ctx);
 
-/* ---- scoped [[exceptions]] (1.5) ---------------------------------------
+/* ---- scoped [[exceptions]] ---------------------------------------------
  * The `_at` entry points are the originals plus the executing script (as PHP
  * reports it) and an optional 32-byte SHA-256 of its bytes (`sha256_len` must
  * be 32, else ignored), so `script` / `script_sha256` facets can match. The

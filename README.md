@@ -112,7 +112,7 @@ Layer 4.
 See the `[behavior]` section of [docs/config.md](docs/config.md) and the
 [CHANGELOG](CHANGELOG.md).
 
-## Scoped exceptions (1.5)
+## Scoped exceptions
 
 `[[exceptions]]` turns one rule off for one executing script (path, glob or
 SHA-256), one request parameter, one URI prefix or one client network, with a

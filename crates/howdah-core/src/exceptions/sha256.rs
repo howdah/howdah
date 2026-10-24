@@ -1,6 +1,8 @@
 //! Dependency-free SHA-256 (FIPS 180-4), for the `script_sha256` facet. The
 //! core is filesystem-free; the extension glue reads the file and calls
-//! [`digest`]. Tested against the standard vectors.
+//! [`digest`]. Streams the input in 64-byte blocks (no copy of the data;
+//! only the final one or two padded blocks are built). Tested against the
+//! standard vectors.
 
 const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -13,56 +15,75 @@ const K: [u32; 64] = [
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
-/// SHA-256 of `data`.
+const INIT: [u32; 8] = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+];
+
+/// One compression round over a 64-byte block.
 #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)] // as_chunks needs Rust 1.88+
-pub fn digest(data: &[u8]) -> [u8; 32] {
-    let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
-    ];
-    let bit_len = (data.len() as u64).wrapping_mul(8);
-    let mut msg = Vec::with_capacity(data.len() + 72);
-    msg.extend_from_slice(data);
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bit_len.to_be_bytes());
+fn compress(h: &mut [u32; 8], block: &[u8; 64]) {
     let mut w = [0u32; 64];
-    for block in msg.chunks_exact(64) {
-        for (i, c) in block.chunks_exact(4).enumerate() {
-            w[i] = u32::from_be_bytes([c[0], c[1], c[2], c[3]]);
-        }
-        for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
-        }
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
-        for i in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let ch = (e & f) ^ (!e & g);
-            let t1 = hh.wrapping_add(s1).wrapping_add(ch).wrapping_add(K[i]).wrapping_add(w[i]);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let t2 = s0.wrapping_add(maj);
-            hh = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(t1);
-            d = c;
-            c = b;
-            b = a;
-            a = t1.wrapping_add(t2);
-        }
-        for (x, v) in h.iter_mut().zip([a, b, c, d, e, f, g, hh]) {
-            *x = x.wrapping_add(v);
-        }
+    for (i, c) in block.chunks_exact(4).enumerate() {
+        w[i] = u32::from_be_bytes([c[0], c[1], c[2], c[3]]);
     }
+    for i in 16..64 {
+        let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+        let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+    }
+    let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = *h;
+    for i in 0..64 {
+        let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+        let ch = (e & f) ^ (!e & g);
+        let t1 = hh.wrapping_add(s1).wrapping_add(ch).wrapping_add(K[i]).wrapping_add(w[i]);
+        let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+        let maj = (a & b) ^ (a & c) ^ (b & c);
+        let t2 = s0.wrapping_add(maj);
+        hh = g;
+        g = f;
+        f = e;
+        e = d.wrapping_add(t1);
+        d = c;
+        c = b;
+        b = a;
+        a = t1.wrapping_add(t2);
+    }
+    for (x, v) in h.iter_mut().zip([a, b, c, d, e, f, g, hh]) {
+        *x = x.wrapping_add(v);
+    }
+}
+
+fn finish(h: &[u32; 8]) -> [u8; 32] {
     let mut out = [0u8; 32];
     for (i, v) in h.iter().enumerate() {
         out[i * 4..i * 4 + 4].copy_from_slice(&v.to_be_bytes());
     }
     out
+}
+
+/// SHA-256 of `data`, streamed: the input is never copied.
+#[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)] // as_chunks needs Rust 1.88+
+pub fn digest(data: &[u8]) -> [u8; 32] {
+    let mut h = INIT;
+    let blocks = data.chunks_exact(64);
+    let tail = blocks.remainder();
+    for block in blocks {
+        let b: &[u8; 64] = block.try_into().expect("64-byte chunk");
+        compress(&mut h, b);
+    }
+    // Padding: 0x80, zeros to 56 mod 64, then the bit length. The tail (< 64
+    // bytes) needs one block, or two when it is 56 bytes or longer.
+    let bit_len = (data.len() as u64).wrapping_mul(8);
+    let mut pad = [0u8; 128];
+    pad[..tail.len()].copy_from_slice(tail);
+    pad[tail.len()] = 0x80;
+    let total = if tail.len() < 56 { 64 } else { 128 };
+    pad[total - 8..total].copy_from_slice(&bit_len.to_be_bytes());
+    for block in pad[..total].chunks_exact(64) {
+        let b: &[u8; 64] = block.try_into().expect("64-byte chunk");
+        compress(&mut h, b);
+    }
+    finish(&h)
 }
 
 /// Lowercase hex of a digest.
@@ -120,6 +141,38 @@ mod tests {
             hex(&digest(&million)),
             "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
         );
+    }
+
+    #[test]
+    fn streams_blocks_without_copying_the_input() {
+        // Block boundaries: 55, 56, 63, 64, 65, 119, 120 bytes and a 1 MiB
+        // buffer all agree with the reference (two-block padding edge cases).
+        for n in [0usize, 1, 55, 56, 63, 64, 65, 119, 120, 128, 1 << 20] {
+            let data = vec![0x61u8; n];
+            assert_eq!(digest(&data), reference(&data), "{n}");
+        }
+        assert_eq!(
+            hex(&digest(&vec![b'a'; 1_000_000])),
+            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+        );
+    }
+
+    /// The straightforward copy-and-pad implementation, kept here only to
+    /// cross-check the streaming one.
+    #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
+    fn reference(data: &[u8]) -> [u8; 32] {
+        let mut h = INIT;
+        let bit_len = (data.len() as u64).wrapping_mul(8);
+        let mut msg = data.to_vec();
+        msg.push(0x80);
+        while msg.len() % 64 != 56 {
+            msg.push(0);
+        }
+        msg.extend_from_slice(&bit_len.to_be_bytes());
+        for block in msg.chunks_exact(64) {
+            compress(&mut h, block.try_into().unwrap());
+        }
+        finish(&h)
     }
 
     #[test]

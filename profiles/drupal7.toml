@@ -96,7 +96,7 @@ reason = "update.php appends $databases/$drupal_hash_salt to settings.php during
 [[exceptions]]
 rule         = "inspect"
 param_prefix = "body[und]["
-reason       = "Node body field (body[und][0][value], body[und][0][summary]): authors paste SQL, paths and code into content. Edit forms are authenticated."
+reason       = "Node body field (body[und][0][value], body[und][0][summary]): authors paste SQL, paths and code into content. Site-wide by parameter name because the node form path depends on clean URLs (/node/add/... vs /?q=node/add); with clean URLs add uri_prefix = \"/node/\" to confine it. The field exists only on authenticated node forms."
 
 [[exceptions]]
 rule       = "inspect"

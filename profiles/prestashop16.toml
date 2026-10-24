@@ -3,8 +3,9 @@
 #
 # Verified against https://github.com/PrestaShop/PrestaShop/blob/1.6.1.24/<path>
 # and the 1.6 documentation (docs.prestashop-project.org/1-6-documentation).
-# The admin directory is renamed at install (admin-dev -> admin<random>); the
-# globs below use admin*.
+# The admin directory is renamed at install (admin-dev -> admin<random>), so
+# no entry below names it: the back-office writers are pinned by the class
+# file that holds the write, and the Layer 2 entries by parameter name.
 #
 # Before use: replace /var/www/html with the path PHP reports for your docroot
 # (`__FILE__` in a script; symlinks are resolved), read every entry, delete
@@ -114,12 +115,12 @@ reason = "Advanced Parameters > Performance rewrites config/settings.inc.php (Ad
 [[exceptions]]
 rule         = "inspect"
 param_prefix = "description_"
-reason       = "Product description_<id_lang> / description_short_<id_lang> fields: HTML with inline styles and scripts. Back office only."
+reason       = "Product description_<id_lang> / description_short_<id_lang> fields: HTML with inline styles and scripts. Site-wide by parameter name because the back-office directory is renamed at install; add uri_prefix = \"/admin<yours>/\" to confine it to the back office."
 
 [[exceptions]]
 rule         = "inspect"
 param_prefix = "content_"
-reason       = "CMS page content_<id_lang> fields (AdminCmsController.php L168-176). Back office only."
+reason       = "CMS page content_<id_lang> fields (AdminCmsController.php L168-176). Site-wide by parameter name because the back-office directory is renamed at install; add uri_prefix = \"/admin<yours>/\" to confine it to the back office."
 
 # Theme Configurator module posts item_html (themeconfigurator.php L417-449,
 # separate repository, not re-verified against a shipped 1.6.1.24 tree):

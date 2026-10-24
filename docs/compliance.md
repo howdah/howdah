@@ -287,7 +287,7 @@ Reviewers look for "documented rationales for rule removals" and "a clear
 understanding of what's being excluded and why"
 ([OWASP CRS on PCI DSS](https://coreruleset.org/20250810/how-crs-contributes-to-pci-dss-compliance/)).
 Howdah's levers are a rule's mode (`block`, `detect`, `off`), a sink's
-allowlist, and, since 1.5, scoped `[[exceptions]]` (one rule off for one
+allowlist, and scoped `[[exceptions]]` (one rule off for one
 script, parameter, URI prefix or client network; see
 [exceptions.md](exceptions.md)). An exception cannot be written without a
 `reason`, so the exceptions in the file **are** the exclusions record: `grep

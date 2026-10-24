@@ -599,6 +599,9 @@ unsafe extern "C" fn minit(_type: c_int, module_number: c_int) -> c_int {
     // log when any are active (the once-per-process config summary; matched
     // exceptions are otherwise silent unless `exceptions_log = true`).
     let active = core::howdah_exceptions_count(ctx).max(0) as usize;
+    // Zero-cost when unused: the glue consults the origin/hash paths only
+    // when at least one exception is loaded (see `origin::ACTIVE`).
+    crate::origin::ACTIVE = active > 0;
     DISP_EXCEPTIONS = Some(cstring(&match exc_report {
         Some((_, rejected)) => format!("{active} configured, {rejected} rejected"),
         None => format!("{active} configured, n/a rejected (config does not parse)"),

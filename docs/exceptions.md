@@ -14,7 +14,7 @@ The reference for every key is the `[[exceptions]]` section of
 Run with the rule in `detect` and read the events it writes. One line:
 
 ```json
-{"action":"log","client_ip":"203.0.113.7","layer":3,"method":"POST","reason":"non-allowlisted command via shell_exec","request_id":"2c07d4e1a96b3f8c25","rule":"command_exec","schema":2,"ts":"1792834977000","uri":"/cron.php","version":"1.5.0"}
+{"action":"log","client_ip":"203.0.113.7","layer":3,"method":"POST","reason":"non-allowlisted command via shell_exec","request_id":"2c07d4e1a96b3f8c25","rule":"command_exec","schema":2,"ts":"1792834977000","uri":"/cron.php","version":"1.4.0"}
 ```
 
 Three questions decide the entry:
@@ -42,12 +42,27 @@ Layer 4 origin primitive, and it is why a WordPress plugin update shows up as
 `wp-admin/includes/class-wp-filesystem-direct.php`, not as `update.php`.
 
 The path compared is exactly what PHP reports for that file: `__FILE__`
-inside it. It is absolute and already resolved through PHP's realpath, so
-**symlinks are followed** (a docroot that is a symlink to `/srv/releases/42`
-appears as `/srv/releases/42/...`; an exception that names the symlink path
-never matches) and `.`/`..` are gone. Matching is byte-wise and
-case-sensitive; Howdah normalizes nothing. The lab asserts the symlink case
-on PHP 5.6, 7.4 and 8.3.
+inside it. Copy it from there; do not derive it from `ls`. The rule PHP
+applies:
+
+- a `require`d/`include`d file is resolved by `zend_resolve_path`: absolute,
+  `.`/`..` removed, **symlinks followed** (realpath);
+- the main script is opened through PHP's stream layer, whose `opened_path`
+  is also realpath'd, so on the CLI, php-fpm and the built-in server
+  `__FILE__` of a script reached through a symlinked docroot is the target
+  (`/srv/releases/42/...`, not `/var/www/current/...`); the lab asserts this
+  for a symlinked CLI main script and a symlinked `require` on PHP 5.6, 7.4
+  and 8.3;
+- the one place that sees the unresolved spelling is Layer 4's
+  `upload_exec` check of the **main script**, which compares the path the
+  SAPI handed PHP (`SCRIPT_FILENAME` as nginx or Apache passed it); a
+  `script` exception for `upload_exec` on a main script must match that
+  spelling, `require`d files are realpath'd as above;
+- code inside `eval()` is reported as `/var/www/a.php(12) : eval()'d code`.
+  A `**` glob on the directory (`/var/www/**`) therefore also covers eval'd
+  code from those files; a literal path or a `script_sha256` does not.
+
+Matching is byte-wise and case-sensitive; Howdah normalizes nothing.
 
 The event line does not carry the script path (the log keeps to its eight
 fields plus the schema fields). To find it:
@@ -73,7 +88,11 @@ reason = "DECISION 2026-10-24 jdoe (web ops): cron.php shells out to the mailer 
 
 Facets are **ANDed**: every facet you set must match. Unset facets match
 anything. The first entry that matches wins (only the index in the log
-differs). At least one facet is required.
+differs). At least one facet is required, and a facet that would match every
+request is refused as if it were missing: `script = "/**"` or `"/*"`,
+`uri_prefix = "/"`, `client_cidr` with prefix length 0 (`0.0.0.0/0`, `::/0`).
+`param`/`param_prefix` may not name or prefix `REQUEST_URI` or `PATH_INFO`
+(the pseudo-parameters of the Layer 2 path scan); use `uri_prefix` for paths.
 
 | Facet | Matches | Layers |
 |---|---|---|
@@ -136,11 +155,14 @@ change, a docroot that differs per tenant).
 `script_sha256` pins the file's bytes instead of (or as well as) its path.
 Use it when the path differs per host or you want the exception to expire when
 the file changes. Howdah reads and hashes the file once per path per PHP
-process, re-reading when its size or mtime changes, and only when an entry
-with a hash facet could apply to that path (an exception with a `script` glob
-that does not match never causes a read). An unreadable file never matches:
-the rule stays armed. The cache holds 256 paths; this is a facility for a
-handful of pinned scripts, not hundreds.
+process and only when an entry with a hash facet could apply to that path (an
+exception with a `script` glob that does not match never causes a read). The
+cached digest is reused only while the file's device, inode, size, mtime
+**and ctime** are unchanged, so a same-size rewrite that keeps the mtime
+(`cp -p`, `touch -r`, `rsync -t`, `tar`) is still re-read. Files over 4 MiB
+are not hashed (a script that large cannot use the facet) and an unreadable
+file never matches: in both cases the rule stays armed. The cache holds 256
+paths; this is a facility for a handful of pinned scripts, not hundreds.
 
 ## 4. Validate, then load
 
@@ -193,10 +215,14 @@ written in the same form.
   server (`php -S`) does not, so under `php -S` a `client_cidr` exception does
   not match Layer 1 or Layer 2 events. `php -S` is not a production SAPI.
 - `uri_prefix` is a raw byte prefix: not percent-decoded, not case-folded.
-  `/wp-admin/` does not match `/WP-ADMIN/` or `/wp%2Dadmin/`. A server that
-  treats those as the same resource can be asked for them to step around a
-  URI-scoped exception, which is why `script` is preferred where the layer
-  offers it.
+  `/wp-admin/` does not match `/WP-ADMIN/` or `/wp%2Dadmin/`. A path that
+  Howdah cannot trust to mean what it says **never satisfies the facet**: one
+  with a `.` or `..` segment, an empty segment (`//`), a backslash, or any
+  `%`. So `/wp-admin/../index.php`, which nginx passes through unnormalized
+  and which executes `/index.php`, is not excepted as `/wp-admin/` (the lab
+  asserts this and the `%2e%2e`, `/./` and `//` spellings). The cost is that
+  a legitimate request spelled that way is not excepted either, which is the
+  right way round. Prefer `script` where the layer offers it.
 - `script` follows symlinks because PHP does. Use `__FILE__`, not `ls`.
 - An exception is a deliberate, recorded hole. The threat model is the same as
   setting the rule to `off`, narrowed to the scope you wrote. Review the

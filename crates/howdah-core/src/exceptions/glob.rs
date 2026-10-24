@@ -4,6 +4,10 @@
 //! is byte-wise and case-sensitive on the path PHP reports for the executing
 //! file (already realpath-resolved by PHP).
 
+/// Longest path the matcher looks at (PATH_MAX). A longer path never matches:
+/// no exception, the rule stays armed.
+pub const MAX_PATH: usize = 4096;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Tok {
     Lit(u8),
@@ -16,7 +20,8 @@ enum Tok {
 }
 
 /// A compiled glob. `matches` is a dynamic-programming walk, O(pattern x
-/// path), with no backtracking blow-up and no regex engine.
+/// path): each wildcard row is filled from a suffix-OR of the row below, so
+/// no position is rescanned. No regex engine, no backtracking.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Glob {
     toks: Vec<Tok>,
@@ -32,6 +37,9 @@ impl Glob {
         }
         if pat.bytes().any(|b| b == 0 || b == b'\n' || b == b'\r') {
             return Err(format!("{pat:?} contains a control character"));
+        }
+        if pat.len() > MAX_PATH {
+            return Err(format!("pattern is longer than {MAX_PATH} bytes"));
         }
         let mut toks: Vec<Tok> = Vec::with_capacity(pat.len());
         let b = pat.as_bytes();
@@ -78,41 +86,47 @@ impl Glob {
         &self.source
     }
 
-    /// True iff `path` matches the whole pattern.
+    /// True iff `path` matches the whole pattern. Paths over [`MAX_PATH`]
+    /// bytes never match.
     pub fn matches(&self, path: &str) -> bool {
+        if path.len() > MAX_PATH {
+            return false;
+        }
         if self.literal {
             return path == self.source;
         }
         let s = path.as_bytes();
         let n = self.toks.len();
         let m = s.len();
-        // dp[j] : can toks[t..] match s[j..]  (computed from the last token back).
+        // next[j]: can toks[t+1..] match s[j..]; cur[j]: toks[t..] vs s[j..].
         let mut next = vec![false; m + 1];
         next[m] = true;
         let mut cur = vec![false; m + 1];
+        // Suffix ORs over `next`, rebuilt per row in O(m):
+        //   any[j]   = OR next[k] for k >= j                       (DoubleStar)
+        //   seg[j]   = OR next[k] for k in j..=end of segment at j  (Star)
+        //   slash[j] = OR next[k] for k >= j with s[k-1] == '/'     (DirStar)
+        let mut any = vec![false; m + 2];
+        let mut seg = vec![false; m + 2];
+        let mut slash = vec![false; m + 2];
         for t in (0..n).rev() {
+            let tok = &self.toks[t];
+            if matches!(tok, Tok::Star | Tok::DoubleStar | Tok::DirStar) {
+                for j in (0..=m).rev() {
+                    any[j] = next[j] || any[j + 1];
+                    seg[j] = next[j] || (j < m && s[j] != b'/' && seg[j + 1]);
+                    slash[j] = (j >= 1 && s[j - 1] == b'/' && next[j]) || slash[j + 1];
+                }
+            }
             for j in 0..=m {
-                cur[j] = match &self.toks[t] {
+                cur[j] = match tok {
                     Tok::Lit(c) => j < m && s[j] == *c && next[j + 1],
                     Tok::One => j < m && s[j] != b'/' && next[j + 1],
-                    Tok::Star => {
-                        // Consume k >= 0 non-slash bytes.
-                        let mut ok = next[j];
-                        let mut k = j;
-                        while !ok && k < m && s[k] != b'/' {
-                            k += 1;
-                            ok = next[k];
-                        }
-                        ok
-                    }
-                    Tok::DoubleStar => (j..=m).any(|k| next[k]),
-                    Tok::DirStar => {
-                        // `/` + zero or more directories: s[j] == '/' and the
-                        // consumed run ends in '/' (k is the index after it).
-                        j < m
-                            && s[j] == b'/'
-                            && (j + 1..=m).any(|k| s[k - 1] == b'/' && next[k])
-                    }
+                    Tok::Star => seg[j],
+                    Tok::DoubleStar => any[j],
+                    // `/` + zero or more directories: s[j] == '/' and the
+                    // consumed run ends in '/' (k is the index after it).
+                    Tok::DirStar => j < m && s[j] == b'/' && slash[j + 1],
                 };
             }
             std::mem::swap(&mut cur, &mut next);
@@ -146,6 +160,8 @@ mod tests {
         assert!(m("/home/*/public_html/cron.php", "/home/alice/public_html/cron.php"));
         assert!(m("/a/*", "/a/"));
         assert!(!m("/a/*", "/a/b/"));
+        assert!(m("/a/*b*", "/a/xbyb"));
+        assert!(!m("/a/*b*c", "/a/xbyb"));
     }
 
     #[test]
@@ -159,6 +175,9 @@ mod tests {
         assert!(m("/**", "/anything/at/all"));
         assert!(m("/**/x.php", "/x.php"));
         assert!(m("/var/**.php", "/var/a/b.php"));
+        // eval'd code reports "<file>(<line>) : eval()'d code": `**` covers it.
+        assert!(m("/var/www/**", "/var/www/a.php(12) : eval()'d code"));
+        assert!(!m("/var/www/a.php", "/var/www/a.php(12) : eval()'d code"));
     }
 
     #[test]
@@ -174,6 +193,27 @@ mod tests {
         assert!(Glob::parse("*.php").is_err());
         assert!(Glob::parse("").is_err());
         assert!(Glob::parse("/a\n").is_err());
+        assert!(Glob::parse(&format!("/{}", "a".repeat(MAX_PATH))).is_err());
+    }
+
+    #[test]
+    fn linear_time_on_long_paths_and_capped() {
+        // 100 wildcard tokens against a 4 KiB path: a linear DP finishes well
+        // inside the budget (the earlier O(tokens x path^2) walk took ~200 ms).
+        let pat = format!("/{}b", "*a".repeat(50));
+        let g = Glob::parse(&pat).unwrap();
+        let path = format!("/{}", "a".repeat(MAX_PATH - 1));
+        let t = std::time::Instant::now();
+        for _ in 0..20 {
+            assert!(!g.matches(&path));
+        }
+        assert!(t.elapsed().as_millis() < 400, "{:?}", t.elapsed());
+        // Over the cap: never matches, even a catch-all pattern.
+        let long = format!("/var/{}", "x".repeat(MAX_PATH));
+        assert!(!Glob::parse("/var/**").unwrap().matches(&long));
+        let at_cap = format!("/var/{}", "x".repeat(MAX_PATH - 5));
+        assert_eq!(at_cap.len(), MAX_PATH);
+        assert!(Glob::parse("/var/**").unwrap().matches(&at_cap));
     }
 
     #[test]
@@ -184,6 +224,7 @@ mod tests {
         assert!(!p.matches(&s));
         let long = format!("/{}b", "a".repeat(4000));
         assert!(!Glob::parse("/*a*a*a*a*a*a*a*a*c").unwrap().matches(&long));
+        assert!(Glob::parse("/*a*a*a*a*a*a*a*a*b").unwrap().matches(&long));
         assert!(t.elapsed().as_secs() < 5);
     }
 }

@@ -277,6 +277,24 @@ fn facet_allowed(layer: Layer, key: &str) -> Result<(), &'static str> {
     }
 }
 
+/// A request path a `uri_prefix` facet may be compared with: absolute, with
+/// no `.`/`..` segment, no empty segment (`//`), no backslash and no
+/// percent-encoding. Anything else is left to the web server's idea of
+/// normalisation, which Howdah cannot see (nginx passes `$request_uri` raw),
+/// so it never satisfies the facet: `/wp-admin/../index.php` executes
+/// `/index.php` and must not be excepted as `/wp-admin/`.
+pub fn uri_is_plain(uri: &str) -> bool {
+    if !uri.starts_with('/') || uri.bytes().any(|b| b == b'%' || b == b'\\') {
+        return false;
+    }
+    uri[1..].split('/').all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+        || uri == "/"
+}
+
+/// Layer 2 scans the request path as these pseudo-parameters; a `param` facet
+/// naming (or prefixing) them would silence the path scan, so they are refused.
+const PATH_PSEUDO_PARAMS: [&str; 2] = ["REQUEST_URI", "PATH_INFO"];
+
 /// Parse `client_cidr`: a CIDR, or a bare IPv4/IPv6 address (full prefix).
 pub fn parse_client_cidr(s: &str) -> Option<(IpRepr, u8)> {
     if s.contains('/') {
@@ -337,8 +355,19 @@ fn compile_one(i: usize, e: &ExceptionEntry) -> Result<Compiled, String> {
         return Err(facet_err(i, "param_prefix", "set either param or param_prefix, not both"));
     }
 
+    // A facet that matches everything is no facet: it would satisfy the
+    // "at least one facet" rail while scoping nothing (the `*` refusal, again).
+    let every = |key: &str, what: &str| {
+        facet_err(i, key, format!("{what} matches every request; a facet must narrow the scope (name a directory, path, parameter or network)"))
+    };
     let script = match &e.script {
-        Some(s) => Some(Glob::parse(s).map_err(|m| facet_err(i, "script", m))?),
+        Some(s) => {
+            let g = Glob::parse(s).map_err(|m| facet_err(i, "script", m))?;
+            if s.bytes().all(|b| matches!(b, b'/' | b'*' | b'?')) {
+                return Err(every("script", &format!("{s:?}")));
+            }
+            Some(g)
+        }
         None => None,
     };
     let script_sha256 = match &e.script_sha256 {
@@ -354,22 +383,48 @@ fn compile_one(i: usize, e: &ExceptionEntry) -> Result<Compiled, String> {
             Ok(())
         }
     };
+    let not_pseudo = |key: &str, v: &str| -> Result<(), String> {
+        if PATH_PSEUDO_PARAMS.iter().any(|p| p.starts_with(v)) {
+            Err(facet_err(
+                i,
+                key,
+                format!("{v:?} names or prefixes the path pseudo-parameters REQUEST_URI / PATH_INFO, which would silence the Layer 2 path scan; use uri_prefix to scope by path"),
+            ))
+        } else {
+            Ok(())
+        }
+    };
     if let Some(p) = &e.param {
         non_empty("param", p)?;
+        not_pseudo("param", p)?;
     }
     if let Some(p) = &e.param_prefix {
         non_empty("param_prefix", p)?;
+        not_pseudo("param_prefix", p)?;
     }
     if let Some(u) = &e.uri_prefix {
         non_empty("uri_prefix", u)?;
         if !u.starts_with('/') {
             return Err(facet_err(i, "uri_prefix", format!("{u:?} must start with '/' (a request path prefix)")));
         }
+        if u == "/" {
+            return Err(every("uri_prefix", "\"/\""));
+        }
+        let stem = u.trim_end_matches('/');
+        if !stem.is_empty() && !uri_is_plain(stem) {
+            return Err(facet_err(i, "uri_prefix", format!("{u:?} must be a plain path prefix (no '.'/'..' segments, '//', '\\\\' or '%')")));
+        }
     }
     let client_cidr = match &e.client_cidr {
-        Some(c) => Some(parse_client_cidr(c.trim()).ok_or_else(|| {
-            facet_err(i, "client_cidr", format!("{c:?} is not an IPv4/IPv6 CIDR or address"))
-        })?),
+        Some(c) => {
+            let (net, prefix) = parse_client_cidr(c.trim()).ok_or_else(|| {
+                facet_err(i, "client_cidr", format!("{c:?} is not an IPv4/IPv6 CIDR or address"))
+            })?;
+            if prefix == 0 {
+                return Err(every("client_cidr", &format!("{c:?} (prefix length 0)")));
+            }
+            Some((net, prefix))
+        }
         None => None,
     };
     Ok(Compiled {
@@ -420,6 +475,9 @@ impl Exceptions {
     /// `script` (its `script` glob, if any, matches). The glue hashes the
     /// file only when this is true.
     pub fn want_hash(&self, script: &str) -> bool {
+        if self.entries.is_empty() || script.is_empty() {
+            return false;
+        }
         self.entries.iter().any(|e| {
             e.script_sha256.is_some() && e.script.as_ref().is_none_or(|g| g.matches(script))
         })
@@ -456,7 +514,9 @@ impl Exceptions {
                 }
             }
             if let Some(u) = &e.uri_prefix {
-                if !f.uri.starts_with(u.as_str()) {
+                // Fail toward protection: a path Howdah cannot trust to mean
+                // what it says (dot segments, `//`, `\`, `%`) never matches.
+                if !uri_is_plain(f.uri) || !f.uri.starts_with(u.as_str()) {
                     return None;
                 }
             }
@@ -513,7 +573,7 @@ mod tests {
         compile(&[toml]).unwrap_err().join("; ")
     }
     fn facts(rule: RuleId) -> EventFacts<'static> {
-        EventFacts { rule, script: None, script_sha256: None, param: None, uri: "/", client_ip: "" }
+        EventFacts { rule, script: None, script_sha256: None, param: None, uri: "/up/index.php", client_ip: "" }
     }
 
     // ---- selector --------------------------------------------------------
@@ -781,7 +841,7 @@ mod tests {
     #[test]
     fn critical_never_matches_even_hand_built() {
         // A whole-layer selector reaches the matcher; Critical is still refused.
-        let x = one("rule = \"limits\"\nuri_prefix = \"/\"\nreason = \"x\"");
+        let x = one("rule = \"limits\"\nuri_prefix = \"/up\"\nreason = \"x\"");
         assert!(x.matches(&facts(RuleId::MaxParts)).is_none());
         assert!(x.matches(&facts(RuleId::MaxInputVars)).is_none());
         assert!(x.matches(&facts(RuleId::MaxRequestHeaders)).is_some());
@@ -790,7 +850,7 @@ mod tests {
     #[test]
     fn log_reason_is_bounded_and_single_line() {
         let long = "r\n".repeat(200);
-        let x = one(&format!("rule = \"sinks\"\nuri_prefix = \"/\"\nreason = {long:?}"));
+        let x = one(&format!("rule = \"sinks\"\nuri_prefix = \"/up\"\nreason = {long:?}"));
         let m = x.matches(&facts(RuleId::Eval)).unwrap();
         let s = m.log_reason();
         assert!(s.starts_with("exception #0 (sinks): rrr"));
@@ -810,6 +870,81 @@ mod tests {
             f.param = Some(b"q");
             assert!(x.matches(&f).is_none());
         }
+    }
+
+    // ---- review fixes (PR #43) -------------------------------------------------
+
+    #[test]
+    fn uri_prefix_never_matches_a_uri_with_dot_segments_or_encoding() {
+        let x = one("rule = \"inspect\"\nuri_prefix = \"/wp-admin/\"\nreason = \"x\"");
+        let mut f = facts(RuleId::SqlInjection);
+        f.uri = "/wp-admin/post.php";
+        assert!(x.matches(&f).is_some());
+        for bad in [
+            "/wp-admin/../index.php",
+            "/wp-admin/./post.php",
+            "/wp-admin/..",
+            "/wp-admin/.",
+            "/wp-admin//post.php",
+            "/wp-admin/%2e%2e/index.php",
+            "/wp-admin/post%2ephp",
+            "/wp-admin/..\\index.php",
+            "/wp-admin\\post.php",
+            "/wp-admin/sub/../../index.php",
+            "//wp-admin/post.php",
+        ] {
+            f.uri = bad;
+            assert!(x.matches(&f).is_none(), "{bad} must not satisfy uri_prefix");
+        }
+        assert!(uri_is_plain("/a/b.c/d.php"));
+        assert!(uri_is_plain("/a/.well-known/x"));
+        assert!(uri_is_plain("/a/..hidden"));
+        assert!(!uri_is_plain(""));
+        assert!(!uri_is_plain("wp-admin/x"));
+    }
+
+    #[test]
+    fn wildcard_facets_do_not_satisfy_the_facet_rail() {
+        for (facet, e) in [
+            ("script", "rule = \"sinks\"\nscript = \"/**\"\nreason = \"x\""),
+            ("script", "rule = \"sinks\"\nscript = \"/*\"\nreason = \"x\""),
+            ("script", "rule = \"sinks\"\nscript = \"/**/*\"\nreason = \"x\""),
+            ("script", "rule = \"sinks\"\nscript = \"/?\"\nreason = \"x\""),
+            ("uri_prefix", "rule = \"inspect\"\nuri_prefix = \"/\"\nreason = \"x\""),
+            ("client_cidr", "rule = \"inspect\"\nclient_cidr = \"0.0.0.0/0\"\nreason = \"x\""),
+            ("client_cidr", "rule = \"inspect\"\nclient_cidr = \"::/0\"\nreason = \"x\""),
+        ] {
+            let m = err(e);
+            assert!(m.contains(&format!("exceptions[0].{facet}")), "{e}: {m}");
+            assert!(m.contains("every"), "{e}: {m}");
+        }
+        // Combined with a real facet the wildcard is still refused (it adds nothing).
+        assert!(err("rule = \"sinks\"\nscript = \"/**\"\nclient_cidr = \"10.0.0.0/8\"\nreason = \"x\"").contains("script"));
+        // Narrow spellings stay fine.
+        assert!(one("rule = \"sinks\"\nscript = \"/var/**\"\nreason = \"x\"").len() == 1);
+        assert!(one("rule = \"sinks\"\nscript = \"/*/cron.php\"\nreason = \"x\"").len() == 1);
+        assert!(one("rule = \"inspect\"\nuri_prefix = \"/a\"\nreason = \"x\"").len() == 1);
+        assert!(one("rule = \"inspect\"\nclient_cidr = \"0.0.0.0/1\"\nreason = \"x\"").len() == 1);
+    }
+
+    #[test]
+    fn param_facets_cannot_name_the_path_pseudo_parameters() {
+        for bad in [
+            "param = \"REQUEST_URI\"",
+            "param = \"PATH_INFO\"",
+            "param_prefix = \"REQUEST_URI\"",
+            "param_prefix = \"R\"",
+            "param_prefix = \"REQ\"",
+            "param_prefix = \"PATH_\"",
+            "param_prefix = \"P\"",
+        ] {
+            let m = err(&format!("rule = \"inspect\"\n{bad}\nreason = \"x\""));
+            assert!(m.contains("exceptions[0].param"), "{bad}: {m}");
+            assert!(m.contains("REQUEST_URI"), "{bad}: {m}");
+        }
+        assert!(one("rule = \"inspect\"\nparam = \"REQUEST_URI2\"\nreason = \"x\"").len() == 1);
+        assert!(one("rule = \"inspect\"\nparam_prefix = \"Rx\"\nreason = \"x\"").len() == 1);
+        assert!(one("rule = \"inspect\"\nparam = \"r\"\nreason = \"x\"").len() == 1);
     }
 
     // ---- report ---------------------------------------------------------------

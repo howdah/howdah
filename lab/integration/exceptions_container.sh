@@ -179,19 +179,27 @@ run_file "$SINKBLOCK$EXC_SHA" "$APP/cron.php"
 out_has 'CRON_RAN\[blocked\]' || fail "a8: edited cron.php still matched its old hash"
 cp "$WORK/cron.bak" "$APP/cron.php"
 ok "(a) script_sha256 facet: matches the pinned bytes, not another file, and not the file once edited"
-# Symlink: what PHP reports for __FILE__ is what the facet matches.
+# Symlink, CLI main script: PHP opens the primary script through its stream
+# layer, whose opened_path is realpath'd, so __FILE__ is the TARGET. Asserted
+# (not branched): a change here is a documentation change.
 run_file "$SINKBLOCK$EXC_CRON" "$WORK/www/link/cron.php"
 REPORTED=$(sed -n 's/^FILE=//p' "$WORK/out.txt")
-echo "  info - via symlink $WORK/www/link/cron.php PHP reports __FILE__=$REPORTED"
-if [ "$REPORTED" = "$APP/cron.php" ]; then
-  out_has 'CRON_RAN\[ok\]' || fail "a9: realpath-reported script did not match the realpath exception"
-  run_file "$SINKBLOCK"'[[exceptions]]\nrule="sinks.command_exec"\nscript="'"$WORK"'/www/link/cron.php"\nreason="lab symlink"\n' "$WORK/www/link/cron.php"
-  out_has 'CRON_RAN\[blocked\]' || fail "a10: an exception pinned to the symlink path matched (PHP reports the target)"
-  ok "(a) symlink: PHP reports the resolved target; the exception must name the target, a symlink path does not match"
-else
-  out_has 'CRON_RAN\[blocked\]' || fail "a9: symlink-reported script matched the realpath exception"
-  ok "(a) symlink: on this PHP __FILE__ is the symlink path itself; a realpath exception does not match it (documented as version-dependent)"
-fi
+[ "$REPORTED" = "$APP/cron.php" ] || fail "a9: CLI main script via symlink reported __FILE__=$REPORTED, expected the realpath $APP/cron.php (update docs/exceptions.md if PHP changed)"
+out_has 'CRON_RAN\[ok\]' || fail "a9: realpath-reported script did not match the realpath exception"
+run_file "$SINKBLOCK"'[[exceptions]]\nrule="sinks.command_exec"\nscript="'"$WORK"'/www/link/cron.php"\nreason="lab symlink"\n' "$WORK/www/link/cron.php"
+out_has 'CRON_RAN\[blocked\]' || fail "a10: an exception pinned to the symlink path matched (PHP reports the target)"
+ok "(a) symlink, CLI main script: __FILE__ is the resolved target ($REPORTED); the exception must name the target, the symlink path does not match"
+# Symlink, required file: zend_resolve_path realpath's includes too.
+cat > "$APP/entry_link.php" <<'PHPEOF'
+<?php
+require getenv('WORK') . '/www/link/sub/deep.php';
+echo "ENTRY_DONE\n";
+PHPEOF
+export WORK
+run_file "$SINKBLOCK"'[[exceptions]]\nrule="sinks.command_exec"\nscript="'"$APP"'/sub/deep.php"\nreason="lab symlink require"\n' "$APP/entry_link.php"
+out_has 'DEEP_RAN\[ok\]' || fail "a11: required file via symlink did not match its realpath exception"
+out_has ENTRY_DONE || fail "a11: entry did not finish"
+ok "(a) symlink, required file: the include is realpath'd, the realpath exception matches"
 
 # ============================================================ (e) exceptions_log
 run_file 'exceptions_log = true\n'"$SINKBLOCK$EXC_CRON" "$APP/cron.php"
@@ -253,6 +261,33 @@ if grep -q "variable 'q'" "$LOG"; then fail "b4: GET parameter q was not excepte
 if grep -q "REQUEST_URI" "$LOG"; then _p="also a path-source (REQUEST_URI) finding on this SAPI/version"; else _p="no path-source finding on this SAPI/version"; fi
 ok "(b) the same payload as GET ?q=: the q finding is excepted; $_p"
 if grep -q "1=1\|etc/passwd" "$LOG"; then fail "b: payload bytes leaked into the log"; fi
+stop_server
+
+# ============================================================ (i) uri_prefix cannot be stepped into
+# nginx (and the built-in server) pass the request path as sent; `--path-as-is`
+# keeps the dot segments on the wire. /wp-admin/../index.php executes
+# /index.php: it must NOT satisfy uri_prefix = "/wp-admin/" (fail toward
+# protection), while a plain /index.php under its own prefix is excepted.
+mkdir -p "$WORK/www/wp-admin"
+cp "$WORK/www/index.php" "$WORK/www/wp-admin/post.php"
+URIX='mode="detect"\n[inspect]\nmode="detect"\n[[exceptions]]\nrule="inspect.sql_injection"\nuri_prefix="/wp-admin/"\nreason="lab: admin editors"\n'
+start_server "$URIX"
+post_path() { # <path> <key> <value>
+  : > "$LOG"
+  set +e
+  CODE=$(curl -s --path-as-is -o "$WORK/out.txt" -w '%{http_code}' --data-urlencode "$2=$3" "http://127.0.0.1:$PORT$1")
+  set -e
+  : > "$WORK/err.txt"
+}
+post_path /wp-admin/post.php q "$SQLI"
+out_has '^OK ' || fail "i1: admin page did not run"
+if grep -q "\"rule\":\"sql_injection\"" "$LOG" && grep -q "variable 'q'" "$LOG"; then fail "i1: plain /wp-admin/ request was not excepted"; fi
+for TRICK in '/wp-admin/../index.php' '/wp-admin/./../index.php' '/wp-admin//../index.php' '/wp-admin/%2e%2e/index.php'; do
+  post_path "$TRICK" q "$SQLI"
+  out_has '^OK ' || fail "i2: $TRICK did not reach index.php ($CODE)"
+  grep -q "sql_injection pattern in post variable 'q'" "$LOG" || fail "i2: $TRICK satisfied uri_prefix=/wp-admin/ and silenced the q finding"
+done
+ok "(i) uri_prefix: /wp-admin/post.php is excepted; /wp-admin/../index.php, /./, // and %2e%2e variants reach index.php and are NOT excepted"
 stop_server
 
 # ============================================================ (c) Layer 1 Standard by client_cidr

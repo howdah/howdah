@@ -15,18 +15,24 @@ All notable changes to Howdah are documented here. The format follows
   Standard rules take only `uri_prefix`/`client_cidr`; Layer 2 takes no
   `script` (its events are raised before any script runs); every validation
   error names `exceptions[i].key` and an invalid entry takes the
-  `on_invalid_config` path. A match is decided after the finding and before
-  the mode, never arms anything and never widens an allowlist. The `script`
+  `on_invalid_config` path. A facet that matches every request
+  (`script = "/**"`, `uri_prefix = "/"`, a `/0` CIDR) is refused, a `param`
+  may not name the `REQUEST_URI`/`PATH_INFO` pseudo-parameters, and a
+  request path with a `.`/`..` segment, `//`, `\` or `%` never satisfies
+  `uri_prefix` (fail toward protection). A match is decided after the
+  finding and before the mode, never arms anything and never widens an
+  allowlist. The `script`
   facet reuses the Layer 4 origin capture (`zend_get_executed_filename()`,
-  exported once from `sink_hook.c`); the glue hashes a file only when an
-  entry with `script_sha256` could apply. New optional top-level
+  exported once from `sink_hook.c`); the glue hashes a file (up to 4 MiB)
+  only when an entry with `script_sha256` could apply, and re-reads it when
+  its inode, size, mtime or ctime changes. New optional top-level
   `exceptions_log = true` writes each match as an event with the new
   `action: "excepted"` (the only schema-2 addition). `php --ri howdah` shows
   `Exceptions ([[exceptions]]) => N configured, M rejected` and the SAPI
   error log gets one summary line per process. Under php-fpm and Apache the
   client IP is known before any variable; the input filter now also feeds
   `REMOTE_ADDR` to the core where the SAPI exposes it only as a `$_SERVER`
-  entry. `lab/integration/exceptions.sh` (19 checks) passes on PHP 5.6, 7.4
+  entry. `lab/integration/exceptions.sh` (21 checks) passes on PHP 5.6, 7.4
   and 8.3. Design: `docs/superpowers/specs/2026-10-24-howdah-exceptions-design.md`;
   how-to: `docs/exceptions.md`.
 - Application profiles in `profiles/` (WordPress, Drupal 7, Magento 1 and 2,

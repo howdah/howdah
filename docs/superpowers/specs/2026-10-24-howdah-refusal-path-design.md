@@ -106,13 +106,16 @@ would leave unread `FCGI_STDIN` records on the socket, which is the exact nginx
 At the end of `rinit`, after the one-time hook installs:
 
 1. If Layer 2 is armed (`howdah_inspect_armed`), materialise `$_SERVER` now
-   (`zend_is_auto_global` for `_SERVER`), so the path (`REQUEST_URI`,
-   `PATH_INFO`) and the `HTTP_*` headers go through the chained `input_filter`
-   before the script instead of at first access. Cost: `$_SERVER` is built on
-   every request even when the application never reads it (one
-   `php_register_server_variables` pass, the same work every framework
-   triggers on its first line). Not done when Layer 2 is not armed, so the
-   default install does not pay it.
+   (`zend_is_auto_global` for `_SERVER`), so its variables go through the
+   chained `input_filter` before the script instead of at first access. For
+   Layer 2 that means the request path (`REQUEST_URI`, `PATH_INFO`; the only
+   `$_SERVER` keys `input_filter::source_for` maps to a scan source) is
+   scanned pre-execution; header values are never a Layer 2 input. For Layer
+   1 it means the `HTTP_*` count and size limits are applied pre-execution on
+   that install. Cost: `$_SERVER` is built on every request even when the
+   application never reads it (one `php_register_server_variables` pass, the
+   same work every framework triggers on its first line). Not done when Layer
+   2 is not armed, so the default install does not pay it.
 2. Take the stashed verdict, if any. Otherwise, if the input path latched a
    block before RINIT (`INPUT_BLOCKED`: Layer 1 input-shape or header rules,
    or an armed Layer 2 class) and the core request is still open, end it now,
@@ -149,8 +152,9 @@ lazily during execution (Layer 2 not armed, `auto_globals_jit=On`).
 
 "Pre-execution" means: HTTP 403/413 with the Howdah body and request id, the
 script's side effect (a marker file) absent, no worker exit, no connection
-reset. Verified by `lab/integration/refusal.sh` on 2026-10-24 (95 checks
-passed, 0 failed, 1 skipped: no `cgi-fcgi` in the 5.6 image). Other minors of
+reset. Verified by `lab/integration/refusal.sh` on 2026-10-24 (116 checks
+passed, 0 failed, 1 skipped: no `cgi-fcgi` in the 5.6 image; nginx's error
+log is checked after every scenario). Other minors of
 the same generation are expected to match but are not claimed. The same lab
 against the 1.4.0 tree on 8.3 reproduces the bug: five `child N exited with
 code 70` lines, four nginx `readv() failed (104)` lines, an empty body on the
@@ -158,11 +162,12 @@ Layer 4 refusal, "refused (HTTP 403) but not by Howdah" from `howdah-check
 web`, and every Layer 2 / input-shape block answered 200 with the script's
 output followed by "Cannot modify header information".
 
-| SAPI | Layer 1 multipart flood | Layer 1 input-shape rules | Layer 1 header rules | Layer 2 `block` (GET/POST/cookie) | Layer 2 `block` (path / headers) | Layer 4 `deny_exec_dirs` main script | armed Layer 3 sink |
+| SAPI | Layer 1 multipart flood | Layer 1 input-shape rules | Layer 1 header rules | Layer 2 `block` (GET/POST/cookie) | Layer 2 `block` (request path; header values are not a Layer 2 input) | Layer 4 `deny_exec_dirs` main script | armed Layer 3 sink |
 |---|---|---|---|---|---|---|---|
-| php-fpm behind nginx (5.6, 7.4, 8.3) | pre-execution, worker pid unchanged, twice on one worker | pre-execution (`max_input_vars`) | post-hoc when `$_SERVER` is built lazily (matrix: http=200, log line present); pre-execution when Layer 2 is armed | pre-execution (SQLi in GET, POST, cookie; traversal; command injection) | pre-execution (`$_SERVER` forced at RINIT when armed; not separately asserted by the lab) | pre-execution, worker pid unchanged | call returns false, script continues, worker alive |
+| php-fpm behind nginx (5.6, 7.4, 8.3) | pre-execution, worker pid unchanged, twice on one worker; also under `output_handler = ob_gzhandler` with no "headers already sent" warning | pre-execution (`max_input_vars`) | pre-execution when Layer 2 is armed (lab: 15-header flood under `max_request_headers = 5` → 403 before the script); unexercised when Layer 2 is not armed and the app never reads `$_SERVER` (lab control: 200, no event); post-hoc when the script builds `$_SERVER` lazily (matrix: http=200, log line present) | pre-execution (SQLi in GET, POST, cookie; traversal; command injection) | pre-execution (traversal shape in the raw `REQUEST_URI`, `$_SERVER` forced at RINIT) | pre-execution, worker pid unchanged | call returns false, script continues, worker alive |
 | php-fpm via cgi-fcgi (7.4, 8.3) | pre-execution, worker alive | matrix 8.3/5.6: log line + 403 | post-hoc (matrix) | not run | not run | not run | not run |
-| Apache mod_php prefork (5.6, 7.4, 8.3) | pre-execution, no child exit | pre-execution | post-hoc (matrix) | pre-execution | as fpm | pre-execution | not run |
+| Apache mod_php prefork (5.6, 7.4, 8.3) | pre-execution, no child exit | pre-execution | pre-execution when Layer 2 is armed (lab); post-hoc otherwise (matrix) | pre-execution | pre-execution (raw `REQUEST_URI`) | pre-execution | not run |
+| CLI (`php script.php`, 5.6, 7.4, 8.3) | n/a | n/a | n/a | n/a | n/a | refused: "Howdah blocked" on stdout, script not run, exit code 0 on 5.6, 7.4 and 8.3 (a cron job checking the status will not see it; the log line is the signal) | n/a |
 | CLI built-in server (8.3, 5.6: the matrix, behavior and inspect labs re-run after the change) | pre-execution (403 + body) | 403 + log line | not asserted on this SAPI | detect-mode logging unchanged (inspect lab) | not run | pre-execution (behavior lab, 28 checks) | unchanged (behavior lab) |
 | php-cgi (not run) | expected to match php-fpm (same startup code, same `FAILURE` handling), not claimed | | | | | | |
 

@@ -389,14 +389,19 @@ tables above.
 When a class is **armed** (\`[inspect] mode = "block"\` or a \`rule_modes\`
 entry), the request is refused **before the script runs**: GET, POST and
 cookie values are scanned while PHP builds the superglobals at request
-startup, and Howdah builds \`$_SERVER\` at RINIT so the path and header values
-are scanned there too. The refusal-path lab (next section) asserts, for a
-SQLi-, traversal- and command-injection-shaped \`q\` in GET, POST and a cookie,
-that the answer is 403 with the Howdah body and that the script's side effect
-(a marker file) did not happen, on PHP 5.6, 7.4 and 8.3 under php-fpm behind
-nginx and under Apache mod_php prefork. Not claimed: other minors (expected to
-match by generation, not run), php-cgi, and a superglobal PHP never builds
-(\`variables_order\` without \`G\`/\`P\`/\`C\`, \`enable_post_data_reading = Off\`).
+startup, and Howdah builds \`$_SERVER\` at RINIT so the request path
+(\`REQUEST_URI\`, \`PATH_INFO\`) is scanned there too. Header values are not a
+Layer 2 input; the forced \`$_SERVER\` also moves the Layer 1 header count and
+size limits in front of the script. The refusal-path lab (next section)
+asserts, for a SQLi-, traversal- and command-injection-shaped \`q\` in GET, POST
+and a cookie, and for a traversal shape in the raw request path, that the
+answer is 403 with the Howdah body and that the script's side effect (a marker
+file) did not happen, on PHP 5.6, 7.4 and 8.3 under php-fpm behind nginx and
+under Apache mod_php prefork. Not claimed: other minors (expected to match by
+generation, not run), php-cgi, header values, a raw body read through
+\`php://input\`, variables past PHP's \`max_input_vars\`, and a superglobal PHP
+never builds (\`variables_order\` without \`G\`/\`P\`/\`C\`,
+\`enable_post_data_reading = Off\`).
 
 ## Refusal path (worker survival)
 
@@ -421,15 +426,22 @@ through nginx reporting BLOCKED.
 | scenario | php-fpm + nginx (5.6, 7.4, 8.3) | php-fpm via cgi-fcgi (7.4, 8.3) | Apache mod_php prefork (5.6, 7.4, 8.3) |
 |---|---|---|---|
 | Layer 1 multipart flood (\`max_parts\`), twice on one worker | refused before the script, worker alive | refused, worker alive | refused before the script, no child exit |
+| the same flood under \`output_handler = ob_gzhandler\` | refused, no "headers already sent" warning | not run | not run |
 | Layer 1 \`max_input_vars\` flood | refused before the script | not run | refused before the script |
+| Layer 1 header flood (\`max_request_headers = 5\`) with Layer 2 armed | refused before the script (\`$_SERVER\` forced at RINIT) | not run | refused before the script |
+| the same header flood, Layer 2 not armed, app never reads \`$_SERVER\` | 200, no event (limit unexercised: documented caveat 6) | not run | not run |
 | armed Layer 2: SQLi in GET, POST, cookie; traversal; command injection | refused before the script | not run | refused before the script |
+| armed Layer 2: traversal shape in the raw request path (\`REQUEST_URI\`) | refused before the script | not run | refused before the script |
 | Layer 2 default (detect) | logged, script ran | not run | logged, script ran |
 | Layer 4 \`deny_exec_dirs\` on the requested script | refused before the script, worker alive | not run | refused before the script |
+| Layer 4 \`deny_exec_dirs\` on a CLI main script | "Howdah blocked" on stdout, script not run (CLI, not fpm) | n/a | n/a |
 | armed Layer 3 \`command_exec\` sink | call returns false, script continues, worker alive | not run | not run |
 | \`howdah-check web\` through the front | BLOCKED with request id | n/a | BLOCKED with request id |
 
-Run on 2026-10-24: 95 checks passed, 0 failed, 1 skipped (no \`cgi-fcgi\` in
-the 5.6 image; the nginx path covers php-fpm there). The same lab against the
+Run on 2026-10-24: 116 checks passed, 0 failed, 1 skipped (no \`cgi-fcgi\` in
+the 5.6 image; the nginx path covers php-fpm there). nginx's error log is
+checked after every scenario, not only after the floods. The refused CLI main
+script exits 0 on all three minors (see \`docs/config.md\`, "Enforcement timing"). The same lab against the
 1.4.0 tree reproduces the bug on 8.3: five \`child N exited with code 70\`
 lines, four nginx \`readv() failed (104)\` lines, an empty body on the Layer 4
 refusal, and "refused (HTTP 403) but not by Howdah" from \`howdah-check web\`.

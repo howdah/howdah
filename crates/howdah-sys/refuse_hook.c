@@ -19,6 +19,7 @@
  * next compile function), and restored by RSHUTDOWN. NTS only, like the rest
  * of Howdah. PHP 5 threads TSRMLS through these signatures; 7/8 do not. */
 #include "main/php.h"
+#include "main/php_output.h"
 #include "Zend/zend_compile.h"
 
 #if PHP_VERSION_ID < 70000
@@ -26,6 +27,9 @@
 #else
 # define HOWDAH_TSRMLS_DC
 #endif
+
+/* shim.c: one line to the SAPI error log. */
+extern void howdah_sys_log_err(const char *msg);
 
 static zend_op_array *(*howdah_refuse_prev_compile_file)(zend_file_handle *fh, int type HOWDAH_TSRMLS_DC) = NULL;
 static int howdah_refuse_armed = 0;
@@ -48,18 +52,41 @@ void howdah_refuse_arm(void) {
     howdah_refuse_armed = 1;
 }
 
-/* Restore the saved compile function. A no-op when not armed. Only restores
- * if the pointer is still ours, so a hook installed on top of ours during the
- * request (none is known to do that) is not silently dropped. */
+/* Restore the saved compile function. A no-op when not armed. The restore is
+ * unconditional (the way opcache restores its own swap at shutdown): if some
+ * other hook replaced the pointer during the refused request and did not put
+ * ours back, leaving ours installed would compile EVERY later request on this
+ * worker to NULL. That case is reported once per process to the SAPI error
+ * log, since the other hook is dropped for the rest of the process. */
 void howdah_refuse_disarm(void) {
+    static int warned = 0;
     if (!howdah_refuse_armed) {
         return;
     }
-    if (zend_compile_file == howdah_refuse_compile_file) {
-        zend_compile_file = howdah_refuse_prev_compile_file;
+    if (zend_compile_file != howdah_refuse_compile_file && !warned) {
+        warned = 1;
+        howdah_sys_log_err("howdah: zend_compile_file was replaced by another hook during a "
+                           "refused request; restoring the compile function Howdah saved "
+                           "(the other hook is no longer installed in this process)");
     }
+    zend_compile_file = howdah_refuse_prev_compile_file;
     howdah_refuse_prev_compile_file = NULL;
     howdah_refuse_armed = 0;
+}
+
+/* Discard every active output handler (php_output_discard_all, PHP 5.4+).
+ * Called right after the refusal body went out through ub_write: a handler
+ * started at request startup (output_handler = ob_gzhandler, or
+ * zlib.output_compression) would otherwise try to add Content-Encoding at
+ * php_output_end_all, after our headers were sent, and warn "headers already
+ * sent" on every refused request. Nothing of ours is in those buffers. */
+void howdah_sys_output_discard_all(void) {
+#if PHP_VERSION_ID < 70000
+    TSRMLS_FETCH();
+    php_output_discard_all(TSRMLS_C);
+#else
+    php_output_discard_all();
+#endif
 }
 
 /* 1 while PHP is inside php_request_startup() (PG(during_request_startup),

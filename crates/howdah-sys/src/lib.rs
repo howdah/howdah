@@ -85,6 +85,12 @@ extern "C" {
     /// pass through the chained `input_filter` before the script. No-op when it
     /// already exists.
     pub fn howdah_force_server_global();
+
+    /// `php_output_discard_all()`: drop every active output handler. Called
+    /// right after the refusal body went out, so a handler started at request
+    /// startup (`output_handler = ob_gzhandler`) cannot add headers later and
+    /// warn "headers already sent".
+    pub fn howdah_sys_output_discard_all();
 }
 
 extern "C" {

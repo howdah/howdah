@@ -156,6 +156,25 @@ mod tests {
     }
 
     #[test]
+    fn stale_delivered_state_is_visible_at_the_next_request_and_reset_clears_it() {
+        // A request was refused at RINIT but its RSHUTDOWN never ran (a startup
+        // failure after our RINIT, or another module bailing out of its
+        // RSHUTDOWN), so nothing reset the state. The next request's hooks
+        // would then be ignored silently...
+        let mut d = Deferred::default();
+        d.refuse(v(403, "old"), true);
+        d.take_at_rinit();
+        assert!(d.delivered(), "the stale marker the glue checks at RINIT entry");
+        assert_eq!(d.refuse(v(413, "new"), true), Delivery::Ignored);
+        // ...so RINIT entry treats `delivered` as "previous request" and resets,
+        // after which the new request's refusal is recorded and delivered.
+        d.reset();
+        assert!(!d.delivered() && !d.is_pending());
+        assert_eq!(d.refuse(v(413, "new"), true), Delivery::Deferred);
+        assert_eq!(d.take_at_rinit(), Some(v(413, "new")));
+    }
+
+    #[test]
     fn no_verdict_means_nothing_at_rinit() {
         let mut d = Deferred::default();
         assert_eq!(d.take_at_rinit(), None);

@@ -186,10 +186,13 @@ request; values past a budget are not scanned.
 When a class is armed (`block`), the refusal happens **before the script
 runs** on php-fpm, Apache mod_php, php-cgi and the CLI server: GET, POST and
 cookie values are scanned while PHP builds the superglobals at request
-startup, and Howdah then builds `$_SERVER` at RINIT so the path and header
-values are scanned there too, instead of whenever the script first touches
-`$_SERVER`. That `$_SERVER` build is the one cost of arming Layer 2 on an
-application that never reads it; log-only mode does not pay it. Details and
+startup, and Howdah then builds `$_SERVER` at RINIT so the request path
+(`REQUEST_URI`, `PATH_INFO`) is scanned there too, instead of whenever the
+script first touches `$_SERVER`. Header values are not a Layer 2 input (only
+the path is taken from `$_SERVER`); what the forced `$_SERVER` also buys is
+that the Layer 1 header count and size limits move in front of the script.
+That `$_SERVER` build is the one cost of arming Layer 2 on an application that
+never reads it; log-only mode does not pay it. Details and
 what stays post-hoc: "Enforcement timing" below.
 
 ## `[sinks]` — Layer 3 sink hardening (log-only by default)
@@ -794,13 +797,21 @@ application's first line:
   `max_input_key_bytes`) on GET, POST and cookie variables; the offending
   variables are also dropped, which bounds the symbol table;
 - an armed Layer 2 class (`[inspect] mode = "block"` or a `rule_modes` entry)
-  on GET, POST and cookie values, and on the request path and headers: with
-  Layer 2 armed, Howdah builds `$_SERVER` at RINIT itself, so the
-  `auto_globals_jit` deferral no longer hides the path and the `HTTP_*` values
-  from the scan. The cost is one `$_SERVER` build per request on applications
+  on GET, POST and cookie values, and on the request path (`REQUEST_URI`,
+  `PATH_INFO`): with Layer 2 armed, Howdah builds `$_SERVER` at RINIT itself,
+  so the `auto_globals_jit` deferral no longer hides the path from the scan.
+  Header values are not a Layer 2 input; what the forced `$_SERVER` buys for
+  headers is that the Layer 1 count and size limits (next list) move in front
+  of the script. The cost is one `$_SERVER` build per request on applications
   that never read it (the same work every framework triggers on its first
   line). The default, log-only install does not pay it;
 - the Layer 4 `deny_exec_dirs` check on the requested script.
+
+For cron and other command-line users: a CLI main script refused by
+`deny_exec_dirs` prints the "Howdah blocked" notice with the request id on
+stdout, does not run, and **exits 0** (PHP treats "nothing compiled" as a
+normal end; lab-measured on 5.6, 7.4 and 8.3). A job that checks the exit
+status will not see the refusal; the event line in the log is the signal.
 
 **Post-hoc refuse.** The response is set at request shutdown, after the
 script ran and may have produced output, so the HTTP status can already be
@@ -813,7 +824,9 @@ committed; the log line is the reliable signal:
   `$_SERVER` leaves the limit unexercised.
 
 **Not a refusal.** An armed Layer 3 sink makes the call return `false` and the
-script continues. A superglobal PHP never builds (`variables_order` without
-`G`, `P` or `C`; `enable_post_data_reading = Off` for POST) has nothing to
-inspect before or after the script. See `docs/coverage.md` for the per-SAPI
-lab status.
+script continues. Only the variables PHP itself registers are counted and
+scanned: a raw body the application reads through `php://input` (JSON or XML
+APIs) and variables past PHP's own `max_input_vars` never reach Howdah. A
+superglobal PHP never builds (`variables_order` without `G`, `P` or `C`;
+`enable_post_data_reading = Off` for POST) has nothing to inspect before or
+after the script. See `docs/coverage.md` for the per-SAPI lab status.

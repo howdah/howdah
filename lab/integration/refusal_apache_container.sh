@@ -41,6 +41,8 @@ PHP
 php -r '$f=fopen($argv[1],"w"); $b=$argv[2]; for($i=0;$i<3000;$i++){ fwrite($f,"--$b\r\nContent-Disposition: form-data; name=\"f$i\"\r\n\r\n\r\n"); } fwrite($f,"--$b--\r\n"); fclose($f);' "$WORK/flood.bin" FloodB0
 php -r 'for($i=0;$i<60;$i++){echo($i?"&":"")."v$i=$i";}' > "$WORK/iv.body"
 printf '[inspect]\nmode = "block"\n'                                                > "$WORK/l2.toml"
+printf '[limits]\nmax_request_headers = 5\n[inspect]\nmode = "block"\n'             > "$WORK/l2h.toml"
+HDRS=""; i=0; while [ "$i" -lt 15 ]; do HDRS="$HDRS -H X-Flood-$i:v$i"; i=$((i+1)); done
 printf 'mode = "block"\n[limits]\nmax_input_vars = 50\n'                            > "$WORK/iv.toml"
 printf '[behavior]\nmode = "block"\ndeny_exec_dirs = ["/var/www/html/uploads"]\n'   > "$WORK/l4.toml"
 
@@ -64,6 +66,9 @@ ap_stop() { $AP stop 2>/dev/null; _j=0; while curl -s -m 1 -o /dev/null "$URL/" 
 B="$WORK/resp.txt"
 get()       { curl -s -m 30 -o "$B" -w '%{http_code}' "$URL$1" 2>/dev/null || echo 000; }
 get_ck()    { curl -s -m 30 -o "$B" -w '%{http_code}' -b "$2" "$URL$1" 2>/dev/null || echo 000; }
+get_raw()   { curl -s -m 30 --path-as-is -o "$B" -w '%{http_code}' "$URL$1" 2>/dev/null || echo 000; }
+# shellcheck disable=SC2086
+get_hdrs()  { curl -s -m 30 -o "$B" -w '%{http_code}' $HDRS "$URL$1" 2>/dev/null || echo 000; }
 post()      { curl -s -m 30 -o "$B" -w '%{http_code}' -X POST -H "Content-Type: $1" --data-binary @"$2" "$URL/" 2>/dev/null || echo 000; }
 post_urlq() { curl -s -m 30 -o "$B" -w '%{http_code}' --data-urlencode "q=$1" "$URL/" 2>/dev/null || echo 000; }
 getq()      { curl -s -m 30 -o "$B" -w '%{http_code}' -G --data-urlencode "q=$1" "$URL/" 2>/dev/null || echo 000; }
@@ -106,7 +111,14 @@ reset; c=$(post_urlq "' OR 1=1 --");         assert_refused l2_block_post "$c" s
 reset; c=$(get_ck / "q=' OR 1=1 --");        assert_refused l2_block_cookie "$c" sql_injection
 reset; c=$(getq "../../etc/passwd");         assert_refused l2_block_traversal "$c" path_traversal
 reset; c=$(getq "; cat /etc/passwd");        assert_refused l2_block_cmdi "$c" command_injection
+# forced-$_SERVER path: traversal shape in the raw REQUEST_URI (the app never
+# reads $_SERVER; Apache maps the normalised path to index.php via PATH_INFO)
+reset; c=$(get_raw "/index.php/a/b/c/../../etc/passwd"); assert_refused l2_block_uri_path "$c" path_traversal
 reset; c=$(getq "operating system (Linux)"); assert_ran l2_block_benign_runs "$c" ""
+ap_stop
+# 2b. the same forced $_SERVER moves the Layer 1 request-header limit pre-execution
+write_ini "$WORK/l2h.toml"; ap_start || { record $S l2h_start FAIL down; exit 1; }
+reset; c=$(get_hdrs /); assert_refused l1_header_flood_pre_exec_with_l2_armed "$c" max_request_headers
 ap_stop
 # 3. Layer 1 input-shape rule
 write_ini "$WORK/iv.toml"; ap_start || { record $S iv_start FAIL down; exit 1; }

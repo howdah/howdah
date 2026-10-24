@@ -208,8 +208,10 @@ All notable changes to Howdah are documented here. The format follows
   Apache mod_php, php-cgi and the CLI server, instead of after it. `$_GET`,
   `$_POST` and `$_COOKIE` are scanned while PHP builds them at request
   startup; when Layer 2 is armed Howdah also builds `$_SERVER` at RINIT, so
-  the request path and headers are scanned before the script instead of at
-  the script's first `$_SERVER` access. That `$_SERVER` build is the one cost
+  the request path (`REQUEST_URI`, `PATH_INFO`) is scanned before the script
+  instead of at the script's first `$_SERVER` access, and the Layer 1 header
+  count and size limits move in front of the script with it (header values
+  are not a Layer 2 input). That `$_SERVER` build is the one cost
   of arming Layer 2 on an application that never reads it; the log-only
   default does not pay it. The Layer 1 input-shape rules (`max_input_vars`,
   `max_input_nesting_depth`, `max_input_key_bytes`) move with it and are also
@@ -255,6 +257,11 @@ All notable changes to Howdah are documented here. The format follows
   request id goes out through the SAPI, and `zend_compile_file` is swapped for
   the rest of that request so the script (and `auto_prepend_file`) never
   compiles. No longjmp; the request ends normally and the worker survives.
+  Output handlers started at request startup (`output_handler =
+  ob_gzhandler`) are discarded after the refusal body, so no "headers already
+  sent" warning follows it. A CLI main script refused by `deny_exec_dirs`
+  prints the notice on stdout, does not run, and exits 0 (measured on 5.6,
+  7.4 and 8.3); cron jobs should watch the log line, not the exit status.
   Armed Layer 3 sinks never bailed (they neutralise the call) and are
   unchanged. `lab/integration/refusal.sh` puts a real nginx in front of a
   single-worker php-fpm (plus Apache mod_php prefork) and checks the status,

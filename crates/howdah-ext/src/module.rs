@@ -51,8 +51,10 @@ pub(crate) static mut LOG: Option<logsink::Settings> = None;
 /// `clear_request_state`.
 pub(crate) static mut DEFERRED: Deferred = Deferred::new();
 /// Process-static: Layer 2 can block (computed once at first RINIT). When set,
-/// RINIT materialises `$_SERVER` so the path and header values are scanned
-/// before the script, and an armed class refuses before execution.
+/// RINIT materialises `$_SERVER` so the request path (`REQUEST_URI`,
+/// `PATH_INFO`) is scanned and the `HTTP_*` headers are counted before the
+/// script (Layer 2 never scans header values), and an armed class refuses
+/// before execution.
 static INSPECT_ARMED: AtomicBool = AtomicBool::new(false);
 static mut MODULE_NUMBER: c_int = 0;
 /// For the info table: (mode, config path, log destination, hook) as displayed.
@@ -235,9 +237,18 @@ unsafe extern "C" fn rshutdown(_type: c_int, _module_number: c_int) -> c_int {
 /// # Safety
 /// Called by PHP at request startup (NTS: single-threaded).
 unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
-    // Defensive: a compile swap left armed by a request whose RSHUTDOWN never
-    // ran (another module bailing out of startup) must not refuse this one.
-    sys::howdah_refuse_disarm();
+    // A previous request whose RSHUTDOWN never ran (a startup failure after our
+    // RINIT, or another module bailing out of its RSHUTDOWN) leaves the
+    // request-local state stale: BEGUN/ENDED/INPUT_BLOCKED and the compile swap,
+    // and DEFERRED.delivered, which would make this request's refusal
+    // `Ignored` silently. `delivered` can only be true at RINIT entry for that
+    // reason (every delivery happens at or after RINIT), so it is the sound
+    // signal to reset everything. Otherwise just make sure no swap is armed.
+    if (*ptr::addr_of!(DEFERRED)).delivered() {
+        clear_request_state();
+    } else {
+        sys::howdah_refuse_disarm();
+    }
     static INSTALLED: AtomicBool = AtomicBool::new(false);
     if !INSTALLED.swap(true, Ordering::Relaxed) && !CTX.is_null() {
         let _ = catch_unwind(AssertUnwindSafe(|| {
@@ -357,6 +368,11 @@ unsafe fn deliver_startup_refusal() {
     let verdict = catch_unwind(AssertUnwindSafe(|| startup_verdict())).unwrap_or(None);
     if let Some(v) = verdict {
         let _ = catch_unwind(AssertUnwindSafe(|| response::emit_block(v.status, &v.request_id)));
+        // The body went out through ub_write; drop every output handler that
+        // request startup started (output_handler = ob_gzhandler, zlib output
+        // compression) so none of them adds Content-Encoding at shutdown,
+        // after our headers, and warns "headers already sent".
+        sys::howdah_sys_output_discard_all();
         sys::howdah_refuse_arm();
     }
 }

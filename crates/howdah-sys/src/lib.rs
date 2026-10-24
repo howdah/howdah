@@ -20,6 +20,9 @@ extern "C" {
     /// static C string literal; never freed.
     pub fn howdah_sys_build_id() -> *const ::std::ffi::c_char;
 
+    /// Write one line to the SAPI error log (`php_log_err`, see `shim.c`).
+    pub fn howdah_sys_log_err(msg: *const ::std::ffi::c_char);
+
     /// Install the Layer-3 function-table sink hooks (see `sink_hook.c`). Call
     /// once at MINIT. `cb` decides each intercepted call, returning the action
     /// code (0 ALLOW / 1 LOG / 2 BLOCK); on BLOCK the C trampoline neutralizes

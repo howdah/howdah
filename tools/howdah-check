@@ -4,6 +4,7 @@
 #   howdah-check detect     list every PHP install on this box, the host arch,
 #                           and the release tarball that matches each install
 #   howdah-check web <url>  EICAR-style self-test over HTTP (see cmd_web)
+#   howdah-check ini [php]  read-only report of risky php.ini settings (see cmd_ini)
 #
 # For each install, detect prints: version, PHP API number, NTS/ZTS,
 # extension_dir, the exact release asset to download for it (host CPU arch +
@@ -27,7 +28,8 @@ NL='
 say() { printf '%s\n' "$*"; }
 
 usage() {
-  say "usage: $PROG detect | web <url>" >&2
+  say "usage: $PROG detect | web <url> | ini [php-binary]" >&2
+  say "  ini      report risky php.ini settings (register_argc_argv, allow_url_include, ...); changes nothing" >&2
   say "  detect   find every PHP install; report host arch + the matching release asset (read-only)" >&2
   say "  web URL  send two harmless self-test requests; confirms Howdah is live in the web SAPI" >&2
 }
@@ -435,7 +437,145 @@ cmd_web() {
   return "$_rc"
 }
 
+# --- ini: read-only report of risky php.ini settings ---------------------------
+# `howdah-check ini [php-binary]` reads the settings of ONE php binary (default:
+# `php` on PATH) with `php -i` and flags the ones that are known preconditions
+# for exploited bug classes, each with the one-line reason and what to set
+# instead. It changes nothing. Caveats, also printed in the report:
+#   * it asks the CLI binary; php-fpm and Apache often load a different php.ini
+#     (Debian: /etc/php/<ver>/fpm/php.ini). Run it with that SAPI's binary or
+#     compare the file it names.
+#   * the CLI overrides register_argc_argv and display_errors at startup, so for
+#     those two the value is read from the ini files (built-in default: On).
+#   * the session docroot test is a path-name heuristic; howdah-check does not
+#     know your document root. The extension runs the same checks (phpinfo /
+#     `php --ri howdah`, "Risky ini settings").
+
+# Local Value of directive $2 in `php -i` output $1 ("no value" -> empty)
+ini_local() {
+  _r=$(printf '%s\n' "$1" | sed -n "s/^$2 => //p" | sed -n '1p')
+  _r=${_r%% => *}
+  [ "$_r" = "no value" ] && _r=""
+  printf '%s\n' "$_r"
+}
+
+# last active assignment of directive $1 in the ini files that follow; empty if none
+ini_file_value() {
+  _n=$1; shift
+  for _f in "$@"; do
+    [ -f "$_f" ] && grep -E "^[[:space:]]*$_n[[:space:]]*=" "$_f" 2>/dev/null
+  done | sed -n '$p' | sed -e 's/^[^=]*=//' -e 's/[[:space:]]*;.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/'
+}
+
+ini_is_on() {
+  case $(printf '%s' "$1" | tr 'A-Z' 'a-z') in 1|on|yes|true) return 0 ;; esac
+  return 1
+}
+
+INI_FLAGS=0
+ini_flag() { # setting value why fix
+  INI_FLAGS=$((INI_FLAGS + 1))
+  say "FLAG  $1 = ${2:-(empty)}"
+  say "      why: $3"
+  say "      set: $4"
+}
+
+cmd_ini() {
+  _bin=${1:-php}
+  command -v "$_bin" >/dev/null 2>&1 || { say "$PROG: ini: cannot run '$_bin' (pass the php binary path)" >&2; exit 2; }
+  _info=$(tmo "$_bin" -i 2>/dev/null)
+  case "$_info" in *"PHP Version =>"*) ;; *) say "$PROG: ini: '$_bin -i' gave no phpinfo output" >&2; exit 2 ;; esac
+  _cf=$(printf '%s\n' "$_info" | sed -n 's/^Loaded Configuration File => \(.*[^ ]\) *$/\1/p' | head -1)
+  _sd=$(printf '%s\n' "$_info" | sed -n 's/^Scan this dir for additional \.ini files => \(.*[^ ]\) *$/\1/p' | head -1)
+  [ "$_sd" = "(none)" ] && _sd=""
+  _files=""
+  if [ -n "$_cf" ] && [ "$_cf" != "(none)" ]; then _files=$_cf; fi
+  if [ -n "$_sd" ] && [ -d "$_sd" ]; then
+    for _f in "$_sd"/*.ini; do [ -f "$_f" ] && _files="$_files $_f"; done
+  fi
+
+  say "php: $_bin ($(printf '%s\n' "$_info" | sed -n 's/^PHP Version => \(.*[^ ]\) *$/\1/p' | head -1))"
+  say "php_ini: ${_cf:-(none)}${_sd:+  scan dir: $_sd}"
+  say "note: read from the CLI binary; php-fpm / Apache may load a different php.ini. This report changes nothing."
+  say ""
+  INI_FLAGS=0
+
+  # register_argc_argv: the CLI forces it on, so use the files (built-in default On)
+  _v=$(ini_file_value register_argc_argv $_files); [ -n "$_v" ] || _v=1
+  if ini_is_on "$_v"; then ini_flag register_argc_argv "$_v" \
+    "enabling condition for Craft CMS CVE-2024-56145 and Laravel CVE-2024-52301 (web SAPIs only; the CLI always enables it)" \
+    "register_argc_argv = Off"; fi
+
+  _v=$(ini_local "$_info" allow_url_include)
+  if ini_is_on "$_v"; then ini_flag allow_url_include "$_v" "remote file inclusion" "allow_url_include = Off"; fi
+
+  _v=$(ini_local "$_info" session.upload_progress.enabled)
+  if ini_is_on "$_v"; then ini_flag session.upload_progress.enabled "$_v" \
+    "session-file writes attacker-controlled data; used in LFI-to-RCE chains" \
+    "session.upload_progress.enabled = Off unless an upload progress bar needs it"; fi
+
+  if [ "$(ini_local "$_info" session.save_handler)" = files ]; then
+    _sp=$(ini_local "$_info" session.save_path)
+    _dir=${_sp##*;}
+    _dflt=0
+    if [ -z "$_dir" ]; then _dir=/tmp; _dflt=1; fi
+    _why=""
+    if [ "$_dflt" = 0 ]; then
+      case "/$_dir/" in
+        */public_html/*|*/htdocs/*|*/httpdocs/*|*/wwwroot/*|*/www/*|*/html/*|*/public/*)
+          _why="session file poisoning: session files under a web docroot can be served or included" ;;
+      esac
+    fi
+    if [ -z "$_why" ] && [ -d "$_dir" ]; then
+      _perm=$(ls -ld "$_dir" 2>/dev/null | cut -c8)
+      if [ "$_perm" = r ]; then
+        _why="session file poisoning: session files are named sess_<id>, so a directory others can list exposes valid session ids"
+      fi
+    fi
+    if [ -n "$_why" ]; then ini_flag session.save_path "${_sp:-(unset, system temp dir)}" "$_why" \
+      "session.save_path to a directory outside the docroot that only the PHP user can read (mode 0700)"; fi
+  fi
+
+  # display_errors: the CLI forces it on, so use the files (built-in default On)
+  _v=$(ini_file_value display_errors $_files); [ -n "$_v" ] || _v=1
+  case $(printf '%s' "$_v" | tr 'A-Z' 'a-z') in
+    1|on|yes|true|stdout) ini_flag display_errors "$_v" \
+      "information disclosure: errors reveal paths, queries and versions to visitors" \
+      "display_errors = Off and log_errors = On" ;;
+  esac
+
+  _v=$(ini_local "$_info" expose_php)
+  if ini_is_on "$_v"; then ini_flag expose_php "$_v" "version disclosure in the X-Powered-By header" "expose_php = Off"; fi
+
+  _v=$(ini_local "$_info" enable_dl)
+  if ini_is_on "$_v"; then ini_flag enable_dl "$_v" "historic precondition for loading attacker-supplied extensions (web SAPIs)" "enable_dl = Off"; fi
+
+  _v=$(ini_local "$_info" cgi.fix_pathinfo)
+  if ini_is_on "$_v"; then ini_flag cgi.fix_pathinfo "$_v" \
+    "historic RCE precondition under CGI/FastCGI with nginx (an upload served as image.jpg/x.php runs as PHP); safe when the web server only passes existing .php files; ignored by mod_php" \
+    "cgi.fix_pathinfo = 0 after checking the app does not rely on PATH_INFO"; fi
+
+  _df=$(ini_local "$_info" disable_functions | tr -d ' ')
+  _open=""
+  for _fn in exec system passthru shell_exec popen proc_open; do
+    case ",$_df," in *",$_fn,"*) ;; *) _open="${_open:+$_open, }$_fn" ;; esac
+  done
+  if [ -n "$_open" ]; then ini_flag disable_functions "${_df:-(empty)}" \
+    "command-execution functions stay callable after any code-injection bug" \
+    "add $_open to disable_functions if the app does not use them"; fi
+
+  if [ "$INI_FLAGS" -eq 0 ]; then say "none flagged"; fi
+  say ""
+  _v=$(ini_local "$_info" allow_url_fopen)
+  if ini_is_on "$_v"; then say "info  allow_url_fopen = $_v (common and needed by many apps; not flagged as a risk; Off blocks URL wrappers in fopen/file_get_contents, which also limits SSRF)"; fi
+  _v=$(ini_local "$_info" open_basedir)
+  if [ -z "$_v" ]; then say "info  open_basedir is unset (not a flaw by itself; setting it to the app's directories limits what a file-read or include bug can reach)"; fi
+  say "$INI_FLAGS risky setting(s) flagged"
+  return 0
+}
+
 case "${1:-}" in
+  ini) shift; cmd_ini "${1:-}"; exit $? ;;
   detect) cmd_detect ;;
   web) shift; cmd_web "${1:-}"; exit $? ;;
   "") usage; exit 2 ;;

@@ -92,10 +92,112 @@ pub fn synth_config(mode: Option<&str>, log: Option<&str>) -> String {
     s
 }
 
+/// What MINIT does with the bytes of the `howdah.config` file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilePlan {
+    /// TOML to hand to `howdah_init`: the file itself when it parses, else a
+    /// one-line `mode = ...` fallback.
+    pub init_toml: Vec<u8>,
+    /// Set when the file did not parse.
+    pub invalid: Option<InvalidConfig>,
+}
+
+/// A config file that failed to parse, ready to report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidConfig {
+    /// One-line parser error (no source excerpt).
+    pub error: String,
+    /// The mode the process runs in instead: `"block"` or `"off"`.
+    pub fallback: &'static str,
+}
+
+impl InvalidConfig {
+    /// The `phpinfo()` / `php --ri` "Config status" value.
+    pub fn status(&self) -> String {
+        format!("INVALID (fell back to {}): {}", self.fallback, self.error)
+    }
+
+    /// The one-time startup message for the SAPI error log.
+    pub fn startup_message(&self, path: &str) -> String {
+        format!(
+            "Howdah: config file '{path}' is invalid, running in {} mode instead: {}",
+            self.fallback, self.error
+        )
+    }
+}
+
+/// Decide what to initialise the core with, from the config file's bytes.
+pub fn plan_file_config(bytes: &[u8]) -> FilePlan {
+    let out = howdah_core::Config::load(bytes);
+    match out.error {
+        None => FilePlan { init_toml: bytes.to_vec(), invalid: None },
+        Some(e) => {
+            let fallback = if out.config.mode == howdah_core::Mode::Off { "off" } else { "block" };
+            FilePlan {
+                init_toml: synth_config(Some(fallback), None).into_bytes(),
+                invalid: Some(InvalidConfig { error: one_line(e.message()), fallback }),
+            }
+        }
+    }
+}
+
+/// Collapse a (possibly multi-line, source-excerpting) TOML error to one line:
+/// `at line L, column C: <message>`. Single-line errors pass through.
+pub fn one_line(msg: &str) -> String {
+    let lines: Vec<&str> = msg.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let s = match lines.as_slice() {
+        [] => "unknown error".to_string(),
+        [only] => (*only).to_string(),
+        [first, .., last] => {
+            let head = first.strip_prefix("TOML parse error ").unwrap_or(first);
+            format!("{head}: {last}")
+        }
+    };
+    // serde appends the full list of valid keys; docs/config.md has it.
+    match s.find(", expected ") {
+        Some(i) => s[..i].to_string(),
+        None => s,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{resolve_mode, synth_config, ModeChoice};
+    use super::{one_line, plan_file_config, resolve_mode, synth_config, ModeChoice};
     use howdah_core::{Config, Mode};
+
+    #[test]
+    fn valid_file_is_passed_through_untouched() {
+        let p = plan_file_config(b"mode = \"detect\"\n");
+        assert!(p.invalid.is_none());
+        assert_eq!(p.init_toml, b"mode = \"detect\"\n");
+    }
+
+    #[test]
+    fn invalid_file_falls_back_to_block_and_reports() {
+        let p = plan_file_config(b"mode = \"detect\"\n[limits]\nnope = 1\n");
+        let inv = p.invalid.expect("must be invalid");
+        assert_eq!(inv.fallback, "block");
+        assert!(inv.error.contains("nope") && !inv.error.contains('\n'), "{}", inv.error);
+        assert!(inv.status().starts_with("INVALID (fell back to block): "));
+        assert!(inv.startup_message("/etc/h.toml").contains("/etc/h.toml"));
+        assert_eq!(Config::from_toml(std::str::from_utf8(&p.init_toml).unwrap()).unwrap().mode, Mode::Block);
+    }
+
+    #[test]
+    fn invalid_file_with_on_invalid_config_off_falls_back_to_off() {
+        let p = plan_file_config(b"on_invalid_config = \"off\"\n[limits]\nnope = 1\n");
+        assert_eq!(p.invalid.as_ref().unwrap().fallback, "off");
+        assert_eq!(Config::from_toml(std::str::from_utf8(&p.init_toml).unwrap()).unwrap().mode, Mode::Off);
+    }
+
+    #[test]
+    fn one_line_collapses_toml_excerpts() {
+        let m = "TOML parse error at line 3, column 1\n  |\n3 | nope = 1\n  | ^^^^\nunknown field `nope`\n";
+        assert_eq!(one_line(m), "at line 3, column 1: unknown field `nope`");
+        assert_eq!(one_line("limits.max_parts must be > 0"), "limits.max_parts must be > 0");
+        let long = "TOML parse error at line 3, column 1\n  |\n3 | nope = 1\n  | ^^^^\nunknown field `nope`, expected one of `a`, `b`\n";
+        assert_eq!(one_line(long), "at line 3, column 1: unknown field `nope`");
+    }
 
     #[test]
     fn empty_ini_mode_means_explicit_off() {

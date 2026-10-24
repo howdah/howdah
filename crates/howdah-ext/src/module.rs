@@ -47,6 +47,7 @@ static mut MODULE_NUMBER: c_int = 0;
 static mut DISP_MODE: Option<CString> = None;
 static mut DISP_CONFIG: Option<CString> = None;
 static mut DISP_LOG: Option<CString> = None;
+static mut DISP_CONFIG_STATUS: Option<CString> = None;
 
 const SUCCESS: c_int = 0;
 
@@ -420,19 +421,39 @@ unsafe extern "C" fn minit(_type: c_int, module_number: c_int) -> c_int {
     // Fail-safe: genuinely broken/unreadable config still yields the core's safe
     // defaults (Block) — we fail toward protection, never toward Off.
     let mode_disp;
+    let mut config_status = String::from("ok");
     let ctx = match cfg_path.as_deref().and_then(read_file) {
         Some(bytes) => {
-            mode_disp = format!(
-                "(set by howdah.config file: {})",
-                cfg_path.as_deref().unwrap_or("")
-            );
-            core::howdah_init(bytes.as_ptr() as *const c_char, bytes.len())
+            // A file that does not parse is NOT silent: one startup line in the
+            // SAPI error log and an INVALID row in phpinfo(). The fallback is
+            // block unless the file's top-level `on_invalid_config = "off"`.
+            let plan = crate::ini_config::plan_file_config(&bytes);
+            let eff = match &plan.invalid {
+                Some(inv) => {
+                    let path = cfg_path.as_deref().unwrap_or("");
+                    let c = cstring(&inv.startup_message(path));
+                    sys::howdah_sys_log_err(c.as_ptr());
+                    config_status = inv.status();
+                    format!("{} (fallback: howdah.config is invalid)", inv.fallback)
+                }
+                None => format!(
+                    "(set by howdah.config file: {})",
+                    cfg_path.as_deref().unwrap_or("")
+                ),
+            };
+            mode_disp = eff;
+            core::howdah_init(plan.init_toml.as_ptr() as *const c_char, plan.init_toml.len())
         }
         None => {
             // No config file: resolve howdah.mode (note PHP maps bareword
             // off/no/false/none -> "" -> None => Off; unset keeps the registered
             // default "block") and synthesize a core config so the ini mode
             // actually takes effect.
+            config_status = if cfg_path.is_some() {
+                "UNREADABLE (using howdah.mode)".to_string()
+            } else {
+                "n/a (no howdah.config file)".to_string()
+            };
             let choice = crate::ini_config::resolve_mode(ini_mode.as_deref());
             let toml = crate::ini_config::synth_config(choice.toml_mode(), log.as_deref());
             mode_disp = choice.display().to_string();
@@ -449,6 +470,7 @@ unsafe extern "C" fn minit(_type: c_int, module_number: c_int) -> c_int {
     DISP_MODE = Some(cstring(&mode_disp));
     DISP_CONFIG = Some(cstring(cfg_path.as_deref().unwrap_or("(none; mode from howdah.mode ini)")));
     DISP_LOG = Some(cstring(log.as_deref().unwrap_or("(stderr)")));
+    DISP_CONFIG_STATUS = Some(cstring(&config_status));
 
     // Chain the multipart callback: save whatever is installed (e.g. session
     // upload-progress) and install ours above it.
@@ -507,6 +529,9 @@ unsafe extern "C" fn minfo(_module: *mut sys::zend_module_entry) {
     if let Some(c) = (*ptr::addr_of!(DISP_CONFIG)).as_ref() {
         row(b"Rules file (howdah.config)\0", c.as_bytes_with_nul());
     }
+    if let Some(s) = (*ptr::addr_of!(DISP_CONFIG_STATUS)).as_ref() {
+        row(b"Config status\0", s.as_bytes_with_nul());
+    }
     if let Some(l) = (*ptr::addr_of!(DISP_LOG)).as_ref() {
         row(b"Log (howdah.log)\0", l.as_bytes_with_nul());
     }
@@ -518,6 +543,38 @@ unsafe extern "C" fn minfo(_module: *mut sys::zend_module_entry) {
         b"Layer-1 limits\0",
         b"multipart, input-shape, request-header\0",
     );
+    sys::php_info_print_table_end();
+
+    // Read-only ini-risk report. Reads current values, changes none.
+    let _ = catch_unwind(AssertUnwindSafe(|| risky_ini_section()));
+}
+
+/// "Risky ini settings": only flagged settings; an empty list says so.
+unsafe fn risky_ini_section() {
+    let sapi = {
+        let p = (*ptr::addr_of!(sys::sapi_module)).name;
+        if p.is_null() { String::new() } else { CStr::from_ptr(p).to_string_lossy().into_owned() }
+    };
+    let get = |n: &str| {
+        let mut b = n.as_bytes().to_vec();
+        b.push(0);
+        ini_string(&b)
+    };
+    let dir_mode = |p: &str| {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(p).ok().filter(|m| m.is_dir()).map(|m| m.permissions().mode())
+    };
+    let findings = crate::ini_risk::evaluate(&crate::ini_risk::Env { sapi: &sapi, get: &get, dir_mode: &dir_mode });
+    sys::php_info_print_table_start();
+    sys::php_info_print_table_header(2, b"Risky ini settings\0".as_ptr() as *const c_char, b"(read-only; Howdah changes none)\0".as_ptr() as *const c_char);
+    if findings.is_empty() {
+        row(b"Flagged\0", b"none flagged\0");
+    }
+    for f in &findings {
+        let k = cstring(f.setting);
+        let v = cstring(&f.row_value());
+        sys::php_info_print_table_row(2, k.as_ptr(), v.as_ptr());
+    }
     sys::php_info_print_table_end();
 }
 

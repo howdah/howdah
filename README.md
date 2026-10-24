@@ -122,6 +122,7 @@ Howdah on a server. End users can download it on its own from the
 ```sh
 tools/howdah-check detect              # list PHP installs and whether Howdah is loaded
 tools/howdah-check web https://host/   # self-test over HTTP
+tools/howdah-check ini                 # read-only report of risky php.ini settings
 ```
 
 ## Documentation

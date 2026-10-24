@@ -9,5 +9,5 @@ pub mod multipart;
 pub mod rules;
 pub mod sinks;
 
-pub use config::{Config, ConfigError, LogConfig, Mode};
+pub use config::{Config, ConfigError, LoadOutcome, LogConfig, Mode, OnInvalidConfig};
 pub use limits::{Limits, RuleId, Severity};

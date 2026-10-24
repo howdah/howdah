@@ -37,9 +37,9 @@
       "pattern": "^[a-z0-9_]+$"
     },
     "action": {
-      "description": "What Howdah did: \"log\" (recorded, request allowed) or \"block\" (request refused or call denied). \"allow\" is reserved and not written by 1.x.",
+      "description": "What Howdah did: \"log\" (recorded, request allowed), \"block\" (request refused or call denied), or \"excepted\" (a finding a [[exceptions]] entry turned off; written only when exceptions_log = true). \"allow\" is reserved and not written by 1.x.",
       "type": "string",
-      "enum": ["allow", "log", "block"]
+      "enum": ["allow", "log", "block", "excepted"]
     },
     "client_ip": {
       "description": "REMOTE_ADDR as the SAPI reports it (the proxy's address behind a reverse proxy). Empty when the SAPI has none, as on the command line.",

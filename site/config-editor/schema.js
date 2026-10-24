@@ -137,12 +137,51 @@
   // Top-level keys of the TOML file (before any [table]), besides `mode`.
   var TOP = [
     { key: 'on_invalid_config', type: 'enum', values: ['block', 'off'], default: 'block',
-      note: 'Mode used if this file fails to parse. Scanned from the raw file, so it must stay on a top-level line.' }
+      note: 'Mode used if this file fails to parse. Scanned from the raw file, so it must stay on a top-level line.' },
+    { key: 'exceptions_log', type: 'bool', default: false,
+      note: 'Write every matched [[exceptions]] entry to the event log as action "excepted" (Layers 3 and 4: one line per excepted call; Layers 1 and 2: at most one per request). Off by default so adding an exception never adds log volume by itself; turn it on while tuning or when an auditor wants to see exceptions in use.' }
+  ];
+
+  // [[exceptions]]: the keys of one entry, in the order the emitter writes
+  // them. `rule` and `reason` are required and at least one facet must be set;
+  // the core enforces that (and which facets a layer accepts), this table only
+  // names the columns.
+  var EXCEPTION_FIELDS = [
+    { key: 'rule', required: true, placeholder: 'sinks.command_exec',
+      note: 'A rule id as spelled in the log (sql_injection, command_exec, php_write), a layer (limits, inspect, sinks, behavior) or layer.rule. Critical Layer 1 rules are refused.' },
+    { key: 'script', placeholder: '/var/www/html/cron.php',
+      note: 'The executing file as PHP reports it (__FILE__; symlinks resolved): absolute path or glob (* within a segment, ** across). Layers 3 and 4 only.' },
+    { key: 'script_sha256', placeholder: '64 hex characters',
+      note: 'SHA-256 of the executing file (sha256sum), files up to 4 MiB. Layers 3 and 4 only.' },
+    { key: 'param', placeholder: 'content',
+      note: 'Request variable name, exact, as submitted (jform[articletext]). Layer 2 only.' },
+    { key: 'param_prefix', placeholder: 'jform[',
+      note: 'Request variable name prefix. Layer 2 only; not together with param.' },
+    { key: 'uri_prefix', placeholder: '/wp-admin/',
+      note: 'Request path prefix (query string removed), raw bytes, must start with / and be more than "/". A request path with a . or .. segment, //, \\ or % never matches.' },
+    { key: 'client_cidr', placeholder: '10.0.0.0/8',
+      note: 'REMOTE_ADDR as the SAPI reports it: an IPv4/IPv6 CIDR or a bare address.' },
+    { key: 'reason', required: true, placeholder: 'DECISION 2026-10-24 owner: why this is legitimate',
+      note: 'Required. The audit record: date, owner, why.' }
+  ];
+
+  // Shipped application profiles (profiles/*.toml in the repository, served
+  // at /profiles/<id>.toml). Starting points, loaded through the same path as
+  // "Load existing", never applied on their own.
+  var PROFILES = [
+    { id: 'wordpress', title: 'WordPress' },
+    { id: 'drupal7', title: 'Drupal 7' },
+    { id: 'magento1', title: 'Magento 1 / OpenMage' },
+    { id: 'magento2', title: 'Magento 2' },
+    { id: 'joomla', title: 'Joomla 3 / 4' },
+    { id: 'prestashop16', title: 'PrestaShop 1.6' }
   ];
 
   var SCHEMA = {
     ini: INI,
     top: TOP,
+    exceptionFields: EXCEPTION_FIELDS,
+    profiles: PROFILES,
     sections: [
       { id: 'limits', title: 'Limits', keys: LIMITS,
         groups: { multipart: 'Multipart body', input: 'Input shape', headers: 'Request headers' } },
@@ -175,10 +214,16 @@
         state[s.id + '.' + k.key] = Array.isArray(k.default) ? k.default.slice() : k.default;
       });
     });
+    // [[exceptions]]: an array of plain {rule, script, ..., reason} objects,
+    // not a flat key; the emitter writes them after every table.
+    state.exceptions = [];
     return state;
   }
 
-  var api = { SCHEMA: SCHEMA, defaultState: defaultState, withCatalog: withCatalog, RULE_LAYER: RULE_LAYER, MODES: MODES };
+  var api = {
+    SCHEMA: SCHEMA, defaultState: defaultState, withCatalog: withCatalog, RULE_LAYER: RULE_LAYER, MODES: MODES,
+    EXCEPTION_FIELDS: EXCEPTION_FIELDS, PROFILES: PROFILES
+  };
   root.HowdahConfigSchema = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);

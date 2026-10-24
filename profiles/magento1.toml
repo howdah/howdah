@@ -1,0 +1,120 @@
+# Howdah application profile: Magento 1.9 / OpenMage LTS (vanilla; extensions
+# add behaviours of their own). A STARTING POINT, never applied automatically.
+#
+# Verified against Magento CE 1.9.4.5 (https://github.com/OpenMage/
+# magento-mirror/blob/1.9.4.5/<path>) and OpenMage LTS main
+# (https://github.com/OpenMage/magento-lts/blob/main/<path>). Line numbers
+# are 1.9.4.5 unless stated.
+#
+# Before use: replace /var/www/html with the path PHP reports for your docroot
+# (`__FILE__` in a script; symlinks are resolved), read every entry, delete
+# what you do not need, keep the reasons. See docs/exceptions.md.
+
+mode = "detect"
+
+# ---------------------------------------------------------------------------
+# Layer 4 [behavior]
+# ---------------------------------------------------------------------------
+# The installer requires app/etc, var and media writable (app/code/core/Mage/
+# Install/etc/install.xml <filesystem_prerequisites>). media/ holds product
+# images, WYSIWYG uploads (media/wysiwyg) and media/upload; var/ holds cache,
+# session, log, export, report, locks (app/code/core/Mage/Core/Model/Config/
+# Options.php L39-54). No legitimate PHP executes from either.
+[behavior]
+mode = "detect"
+# deny_exec_dirs = ["/var/www/html/media", "/var/www/html/var"]
+# deny_php_writes = true
+# cron.php spawns /bin/sh cron.sh, which runs `which php`, sed, expr, ps,
+# grep and then php (cron.sh). Name them before arming unexpected_binary.
+# allow_exec_binaries = ["/bin/sh", "sh", "php", "which", "sed", "expr", "ps", "grep"]
+# Outbound from the admin: the notifications feed
+# (notifications.magentocommerce.com, app/code/core/Mage/AdminNotification/
+# etc/config.xml L94). Carrier/payment hosts only when configured.
+# allow_egress_hosts = ["notifications.magentocommerce.com"]
+
+# ---------------------------------------------------------------------------
+# Layer 3 [sinks]
+# ---------------------------------------------------------------------------
+# cron.php, when run without -m and with shell_exec available, runs
+#   shell_exec(escapeshellcmd("/bin/sh $cronPath $fileName -mdefault 1") . " > /dev/null 2>&1 &")
+# and the -malways twin (cron.php L71-72; OpenMage main: same shape).
+# The narrowest control is the allowlist (anchored prefix, trailing `*`);
+# the exception below is the alternative when the docroot differs per host.
+[sinks.command_exec]
+allow = ["/bin/sh /var/www/html/cron.sh *"]
+
+# unserialize: ~124 call sites in 1.9 (Mage_Core_Model_Resource_Abstract::
+# _unserializeField L198 for payment additional_information, caches, flags,
+# translations); OpenMage passes allowed_classes (false, or ['Varien_Object']
+# in _unserializeField, app/code/core/Mage/Core/Model/Resource/Abstract.php
+# L188). Serialized payloads are arrays and Varien_Object. Leave the sink off
+# unless reviewed; this is the class list for ordinary requests.
+# [sinks.unserialize]
+# mode = "detect"
+# allow_classes = ["stdClass", "Varien_Object"]
+
+# ---------------------------------------------------------------------------
+# [[exceptions]]
+# ---------------------------------------------------------------------------
+# cron.php is the only docroot script that shells out by design. Prefer the
+# allow pattern above; use this when you cannot pin the command line (the
+# executing script is cron.php itself: the shell_exec call is in that file).
+[[exceptions]]
+rule   = "sinks.command_exec"
+script = "/var/www/html/cron.php"
+reason = "cron.php spawns `/bin/sh cron.sh -mdefault|-malways` (cron.php L71-72). Shell-based cron scheduling of Magento 1. This means command_exec is not checked for cron.php; prefer the [sinks.command_exec] allow pattern when the docroot is fixed."
+
+[[exceptions]]
+rule   = "behavior.unexpected_binary"
+script = "/var/www/html/cron.php"
+reason = "Same cron.php spawn, Layer 4 facet: /bin/sh is the program token. Remove once /bin/sh is in allow_exec_binaries."
+
+# Layer 2: admin forms. CMS page/block `content`, the layout-update XML
+# fields (app/code/core/Mage/Adminhtml/Block/Cms/Page/Edit/Tab/Content.php
+# L82; Design.php L70, L120), product attributes posted under product[...]
+# (Catalog/Product/Edit/Tab/Attributes.php L141) and email templates
+# (System/Email/Template/Edit/Form.php L130-140). The admin frontName is
+# `admin` by default (app/code/core/Mage/Adminhtml/etc/config.xml L93); the
+# path is /admin/ with rewrites or /index.php/admin/ without. Adjust
+# uri_prefix to yours.
+[[exceptions]]
+rule       = "inspect"
+param      = "content"
+uri_prefix = "/admin/"
+reason     = "CMS page and block content fields in the admin (Cms/Page/Edit/Tab/Content.php L82, Cms/Block/Edit/Form.php L128): HTML, widget directives and inline scripts."
+
+[[exceptions]]
+rule       = "inspect"
+param      = "layout_update_xml"
+uri_prefix = "/admin/"
+reason     = "CMS page layout update XML (Cms/Page/Edit/Tab/Design.php L70)."
+
+[[exceptions]]
+rule       = "inspect"
+param      = "custom_layout_update_xml"
+uri_prefix = "/admin/"
+reason     = "CMS page custom layout update XML (Cms/Page/Edit/Tab/Design.php L120)."
+
+[[exceptions]]
+rule         = "inspect"
+param_prefix = "product["
+uri_prefix   = "/admin/"
+reason       = "Product attributes are posted as product[...] (Attributes.php L141): description, short_description and custom_layout_update carry HTML and XML."
+
+[[exceptions]]
+rule       = "inspect"
+param      = "template_text"
+uri_prefix = "/admin/"
+reason     = "Transactional email template body (System/Email/Template/Edit/Form.php L130)."
+
+# Compiler (includes/src/*.php, app/code/core/Mage/Compiler/Model/Process.php
+# L341, L437) is off by default (includes/config.php) and removed in OpenMage.
+# If you run it, the writes come from that file:
+# [[exceptions]]
+# rule   = "behavior.php_write"
+# script = "/var/www/html/app/code/core/Mage/Compiler/Model/Process.php"
+# reason = "Magento Compiler writes includes/src/*.php. Only with the compiler enabled."
+
+# Magento Connect (downloader/) copies package files anywhere under the root
+# (downloader/lib/Mage/Connect/Packager.php L462, copy(); not a hooked call),
+# so nothing to except; it is removed in OpenMage and should stay deleted.

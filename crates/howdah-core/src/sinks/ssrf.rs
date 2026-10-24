@@ -386,7 +386,7 @@ fn strict_dotted_quad(s: &[u8]) -> Option<[u8; 4]> {
 }
 
 /// Parse `ip/prefix` with an in-range prefix length.
-fn parse_cidr(entry: &str) -> Option<(IpRepr, u8)> {
+pub(crate) fn parse_cidr(entry: &str) -> Option<(IpRepr, u8)> {
     let (ip, pfx) = entry.split_once('/')?;
     if pfx.is_empty() || pfx.len() > 3 || !pfx.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -415,7 +415,7 @@ fn bits_match(n: &[u8], i: &[u8], prefix: u8) -> bool {
     }
 }
 
-fn cidr_contains(net: IpRepr, prefix: u8, ip: IpRepr) -> bool {
+pub(crate) fn cidr_contains(net: IpRepr, prefix: u8, ip: IpRepr) -> bool {
     // A v4-mapped v6 net with prefix >= 96 is really a v4 net (prefix - 96).
     // Never normalize the net otherwise: the prefix must stay within its width.
     let (net, prefix) = match net {

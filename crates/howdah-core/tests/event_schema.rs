@@ -175,7 +175,7 @@ fn layer_enum_is_exactly_the_layers_rules_use() {
 fn every_rule_and_action_validates() {
     let s = schema();
     for r in rule_catalog() {
-        for a in [Action::Allow, Action::Log, Action::Block] {
+        for a in [Action::Allow, Action::Log, Action::Block, Action::Excepted] {
             let v = event(*r, a);
             validate(&s, &v, "$").unwrap_or_else(|e| panic!("{r:?}/{a:?}: {e}\n{v}"));
         }

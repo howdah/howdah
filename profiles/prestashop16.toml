@@ -1,0 +1,130 @@
+# Howdah application profile: PrestaShop 1.6.1 (vanilla; modules and themes
+# add behaviours of their own). A STARTING POINT, never applied automatically.
+#
+# Verified against https://github.com/PrestaShop/PrestaShop/blob/1.6.1.24/<path>
+# and the 1.6 documentation (docs.prestashop-project.org/1-6-documentation).
+# The admin directory is renamed at install (admin-dev -> admin<random>), so
+# no entry below names it: the back-office writers are pinned by the class
+# file that holds the write, and the Layer 2 entries by parameter name.
+#
+# Before use: replace /var/www/html with the path PHP reports for your docroot
+# (`__FILE__` in a script; symlinks are resolved), read every entry, delete
+# what you do not need, keep the reasons. See docs/exceptions.md.
+
+mode = "detect"
+
+# ---------------------------------------------------------------------------
+# Layer 4 [behavior]
+# ---------------------------------------------------------------------------
+# The installer wants config, cache, log, img, mails, modules, override,
+# themes/<theme>/lang, themes/<theme>/pdf/lang, themes/<theme>/cache,
+# translations, upload, download writable (classes/ConfigurationTest.php
+# L64-88). img/ holds images only (config/defines.inc.php L115-137; the TinyMCE
+# file manager uploads to img/cms, admin-dev/filemanager/config/config.php
+# L42); upload/ and download/ hold customer files and virtual products; log/
+# holds exception logs. No PHP executes from them legitimately.
+#
+# NOTE: cache/ holds compiled Smarty templates as PHP (cache/smarty/compile,
+# config/smarty.config.inc.php L33-34) and cache/class_index.php, so cache/
+# must NOT be denied: PHP legitimately executes compiled templates from it.
+[behavior]
+mode = "detect"
+# deny_exec_dirs = ["/var/www/html/img", "/var/www/html/upload", "/var/www/html/download", "/var/www/html/log"]
+# deny_php_writes = true
+# Core shells out only to `file -b --mime-type <path>` as a fallback when the
+# fileinfo extension is missing (classes/ImageManager.php L328-333,
+# controllers/front/GetFileController.php L131-136). Install fileinfo and
+# this never runs.
+# allow_exec_binaries = ["file"]
+# Outbound: translations.prestashop.com, api-addons.prestashop.com,
+# addons.prestashop.com, www.prestashop.com (controllers/admin/
+# AdminTranslationsController.php L34 and the Addons calls in Module.php).
+# allow_egress_hosts = ["api-addons.prestashop.com", "addons.prestashop.com", "translations.prestashop.com", "www.prestashop.com"]
+
+# ---------------------------------------------------------------------------
+# Layer 3 [sinks]
+# ---------------------------------------------------------------------------
+# The mime-type fallback above, anchored. Empty if fileinfo is installed.
+[sinks.command_exec]
+allow = ["file -b --mime-type *"]
+
+# unserialize: Tools::unSerialize refuses object tokens (classes/Tools.php
+# L3350-3357) and cookies are not serialized (classes/Cookie.php L274-300);
+# raw unserialize appears in the optional CacheFs backend (classes/cache/
+# CacheFs.php L40, L70). Arrays only, so:
+# [sinks.unserialize]
+# mode = "detect"
+# allow_classes = []
+
+# ---------------------------------------------------------------------------
+# [[exceptions]]
+# ---------------------------------------------------------------------------
+# php_write on ordinary requests: Smarty compiles templates to
+# cache/smarty/compile/*.php (written by the bundled Smarty's
+# Smarty_Internal_Write_File: tools/smarty/sysplugins/
+# smarty_internal_write_file.php L44 file_put_contents, L60-68 rename) and the
+# autoloader regenerates cache/class_index.php (classes/PrestaShopAutoload.php
+# L159) from any entry script.
+[[exceptions]]
+rule   = "behavior.php_write"
+script = "/var/www/html/tools/smarty/sysplugins/smarty_internal_write_file.php"
+reason = "Smarty compiles templates to cache/smarty/compile/*.php on normal front and back office requests (smarty_internal_write_file.php L44, L60-68)."
+
+[[exceptions]]
+rule   = "behavior.php_write"
+script = "/var/www/html/classes/PrestaShopAutoload.php"
+reason = "The class autoloader rebuilds cache/class_index.php when it is missing or stale (PrestaShopAutoload.php L159); can happen on any request."
+
+# Back office writes: module install writes override/classes|controllers/*.php
+# (classes/module/Module.php L2846, L2897 file_put_contents); the translations
+# screen writes translations/<iso>/*.php and theme/module language files
+# (controllers/admin/AdminTranslationsController.php L301 fopen 'w', L2801;
+# classes/Language.php L125); Performance writes config/settings.inc.php
+# (controllers/admin/AdminPerformanceController.php L876, L949). All run
+# under the renamed admin directory's index.php/ajax-tab.php through the
+# Dispatcher, but the executing file is the class that holds the write.
+[[exceptions]]
+rule   = "behavior.php_write"
+script = "/var/www/html/classes/module/Module.php"
+reason = "Module install/uninstall writes class and controller overrides under override/ (Module.php L2846, L2897). Back office only."
+
+[[exceptions]]
+rule   = "behavior.php_write"
+script = "/var/www/html/controllers/admin/AdminTranslationsController.php"
+reason = "The Translations screen writes translations/<iso>/*.php and theme/module language files (AdminTranslationsController.php L301, L2801)."
+
+[[exceptions]]
+rule   = "behavior.php_write"
+script = "/var/www/html/classes/Language.php"
+reason = "Creating a language generates its .php translation files (Language.php L125)."
+
+[[exceptions]]
+rule   = "behavior.php_write"
+script = "/var/www/html/controllers/admin/AdminPerformanceController.php"
+reason = "Advanced Parameters > Performance rewrites config/settings.inc.php (AdminPerformanceController.php L876, L949)."
+
+# Module uploads extract zip/tar archives straight into modules/
+# (controllers/admin/AdminModulesController.php L392-410) through ZipArchive /
+# Archive_Tar, which Howdah does not hook: nothing to except.
+
+# Layer 2: multilingual admin fields are posted as <field>_<id_lang>:
+# description_1, description_short_1 (controllers/admin/AdminProductsController.php
+# L2174-2185), CMS content_1 (controllers/admin/AdminCmsController.php
+# L168-176). The back office lives under the renamed admin directory, so the
+# URI prefix cannot be fixed here; the field names are admin-only.
+[[exceptions]]
+rule         = "inspect"
+param_prefix = "description_"
+reason       = "Product description_<id_lang> / description_short_<id_lang> fields: HTML with inline styles and scripts. Site-wide by parameter name because the back-office directory is renamed at install; add uri_prefix = \"/admin<yours>/\" to confine it to the back office."
+
+[[exceptions]]
+rule         = "inspect"
+param_prefix = "content_"
+reason       = "CMS page content_<id_lang> fields (AdminCmsController.php L168-176). Site-wide by parameter name because the back-office directory is renamed at install; add uri_prefix = \"/admin<yours>/\" to confine it to the back office."
+
+# Theme Configurator module posts item_html (themeconfigurator.php L417-449,
+# separate repository, not re-verified against a shipped 1.6.1.24 tree):
+# [[exceptions]]
+# rule   = "inspect"
+# param  = "item_html"
+# reason = "Theme Configurator block HTML. Unverified against the shipped module; enable if present."

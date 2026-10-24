@@ -1,0 +1,130 @@
+# Howdah application profile: WordPress (vanilla core; plugins and themes add
+# behaviours of their own). A STARTING POINT, never applied automatically.
+#
+# Verified against the wordpress.org release archives for 4.9, 5.9, 6.8 and
+# 7.1.3; file:line references below are 6.8 unless stated, and resolve at
+# https://github.com/WordPress/WordPress/blob/6.8/<path>#L<n>.
+#
+# Before use: replace /var/www/html with the path PHP reports for your docroot
+# (`__FILE__` in a script; symlinks are resolved), read every entry, delete
+# what you do not need, keep the reasons. See docs/exceptions.md.
+
+mode = "detect"
+
+# ---------------------------------------------------------------------------
+# Layer 4 [behavior]: where PHP should never execute, and the writers.
+# ---------------------------------------------------------------------------
+# Core never writes PHP into these; a .php file executing there is a dropped
+# shell. uploads: wp-includes/functions.php L2436-2459 (WP_CONTENT_DIR/uploads,
+# year/month subdirs by default, wp-admin/includes/schema.php L469).
+# upgrade: packages are unpacked there by WP_Upgrader::unpack_package
+# (wp-admin/includes/class-wp-upgrader.php L365-376) and moved out again.
+# wp-content/cache is NOT used by core (only the deprecated wp-includes/rss.php
+# names it); caching plugins create it. Enable deny_php_writes only after
+# reading the exceptions below.
+[behavior]
+mode = "detect"
+# deny_exec_dirs = ["/var/www/html/wp-content/uploads", "/var/www/html/wp-content/upgrade"]
+# deny_php_writes = true
+# Layer 4 egress: wp-cron triggers itself with a loopback POST to
+# site_url('wp-cron.php') (wp-includes/cron.php L957, L969), Site Health does
+# the same (wp-includes/class-wp-site-health.php L3128) and GETs rest_url()
+# (L2152). Put your own hostname here before arming unexpected_egress.
+# allow_egress_hosts = ["www.example.com", "api.wordpress.org", "downloads.wordpress.org"]
+
+# ---------------------------------------------------------------------------
+# Layer 3 [sinks]
+# ---------------------------------------------------------------------------
+# Core's only exec-family call reachable from the web is Site Health's
+# Ghostscript probe, a fixed string (wp-admin/includes/class-wp-debug-data.php
+# L727, 5.2+). PHPMailer's popen($sendmail) (wp-includes/PHPMailer/PHPMailer.php
+# L1771, L1797) runs only when a plugin switches the mailer to sendmail/qmail;
+# WordPress itself uses mail() (wp-includes/pluggable.php L465).
+[sinks.command_exec]
+allow = ["gs --version"]
+
+# unserialize: get_option() runs maybe_unserialize() with no allowed_classes
+# (wp-includes/functions.php L654-656; wp-includes/option.php L256). Core
+# stores stdClass trees in the update_core/update_plugins/update_themes
+# transients (wp-includes/update.php L50, L78, L244, ...). Leave the sink off
+# (the default) unless you have reviewed the log; this is the class core needs.
+# [sinks.unserialize]
+# mode = "detect"
+# allow_classes = ["stdClass"]
+
+# ---------------------------------------------------------------------------
+# [[exceptions]]
+# ---------------------------------------------------------------------------
+# php_write: with the default `direct` filesystem every core write goes through
+# WP_Filesystem_Direct::put_contents (fopen 'wb', wp-admin/includes/
+# class-wp-filesystem-direct.php L66) and move (rename, L347): plugin/theme
+# installs and updates (class-plugin-upgrader.php L138, L227; class-theme-
+# upgrader.php L176, L251), core updates (wp-admin/includes/update-core.php
+# L1227, L1317, L1402) and language packs. The executing script Howdah sees is
+# that file, whatever admin page or cron started the upgrade.
+[[exceptions]]
+rule   = "behavior.php_write"
+script = "/var/www/html/wp-admin/includes/class-wp-filesystem-direct.php"
+reason = "WordPress core/plugin/theme updates write PHP through WP_Filesystem_Direct (class-wp-filesystem-direct.php L66 fopen wb, L347 rename). Vanilla core behaviour; remove if updates are done outside the web process (WP-CLI, packages)."
+
+# The theme/plugin file editor writes the edited file with fopen('w+') from
+# wp-admin/includes/file.php L510 and rolls back with file_put_contents L634.
+# If you have DISALLOW_FILE_EDIT in wp-config.php, delete this entry.
+[[exceptions]]
+rule   = "behavior.php_write"
+script = "/var/www/html/wp-admin/includes/file.php"
+reason = "The built-in theme/plugin file editor (wp_edit_theme_plugin_file, wp-admin/includes/file.php L510-516, L634). Remove when DISALLOW_FILE_EDIT is set."
+
+# Layer 2: the post editor sends free text in `content`, `excerpt` and
+# `post_title` to wp-admin/post.php (wp-admin/includes/post.php L47-52 maps
+# content -> post_content; the editor id is `content`, wp-admin/
+# edit-form-advanced.php L618). Tutorials and code posts contain SQL and
+# shell text. Scoped to the admin path; Layer 2 is detect-only anyway.
+[[exceptions]]
+rule       = "inspect"
+param      = "content"
+uri_prefix = "/wp-admin/"
+reason     = "Post body of the classic editor (wp-admin/post.php, content -> post_content). Editors paste SQL, paths and shell snippets into posts."
+
+[[exceptions]]
+rule       = "inspect"
+param      = "excerpt"
+uri_prefix = "/wp-admin/"
+reason     = "Post excerpt field (wp-admin/includes/meta-boxes.php L752)."
+
+[[exceptions]]
+rule       = "inspect"
+param      = "newcontent"
+uri_prefix = "/wp-admin/"
+reason     = "The theme/plugin file editor posts whole PHP files as `newcontent` (wp-admin/theme-editor.php L127, plugin-editor.php L99, admin-ajax edit-theme-plugin-file). PHP source always looks like code injection to Layer 2."
+
+[[exceptions]]
+rule       = "inspect"
+param      = "customized"
+uri_prefix = "/wp-admin/"
+reason     = "Customizer saves a JSON blob of every setting as `customized` (wp-includes/class-wp-customize-manager.php L210, L499)."
+
+# Block editor and REST: posts are saved through index.php?rest_route=/wp/v2/
+# posts with JSON bodies (wp-includes/rest-api.php L226-229). Layer 2 inspects
+# GET/POST/cookie variables and the path, not JSON bodies, so no entry is
+# needed; nothing to except.
+
+# Comments: wp-comments-post.php takes `comment`, `author`, `email`, `url`
+# (wp-includes/comment.php L3544-3554). Anonymous free text is where real
+# injection attempts arrive, so this is NOT excepted by default. Uncomment
+# only if comment noise drowns your log and you accept losing that signal.
+# [[exceptions]]
+# rule       = "inspect.sql_injection"
+# param      = "comment"
+# uri_prefix = "/wp-comments-post.php"
+# reason     = "Comment bodies trip the SQL signatures; accepted as noise on this site."
+
+# XML-RPC pingbacks fetch a caller-supplied URL (wp_safe_remote_get in
+# wp-includes/class-wp-xmlrpc-server.php L7038, with wp_http_validate_url
+# blocking private ranges). That is SSRF-shaped by design. Do NOT except
+# `ssrf` for xmlrpc.php; disable pingbacks or XML-RPC instead.
+
+# Site Health's `gs --version` is covered by the allow entry above, so the
+# `unexpected_binary` facet only needs `gs` in allow_exec_binaries:
+# [behavior]
+# allow_exec_binaries = ["gs"]

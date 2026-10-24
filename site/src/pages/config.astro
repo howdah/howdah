@@ -57,6 +57,19 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
           <button type="button" class="btn ghost" data-preset="enforcing">Enforcing</button>
           <a class="btn ghost jump" href="#out">Your files ↓</a>
           <details class="load">
+            <summary class="btn ghost">Application profile…</summary>
+            <p class="small">Start from a shipped profile for a vanilla install: a complete detect-mode file whose <code>[[exceptions]]</code> entries and commented allowlist suggestions cover the application's own verified behaviours, each with a cited reason. It is loaded through the same path as "Load existing" and parsed by the core first. Replace <code>/var/www/html</code> with your docroot and read every entry; nothing is applied automatically. Source: <a href={REPO + '/tree/main/profiles'}>profiles/</a>.</p>
+            <div class="row">
+              <label for="profile-pick" class="sr-only">Application profile</label>
+              <select id="profile-pick">
+                {SCHEMA.profiles.map((p) => <option value={p.id}>{p.title}</option>)}
+              </select>
+              <button type="button" class="btn primary" id="profile-btn">Load profile into the form</button>
+              <a class="btn ghost" id="profile-raw" href="/profiles/wordpress.toml" download>Download the .toml</a>
+            </div>
+            <p id="profile-msg" class="msg" aria-live="polite"></p>
+          </details>
+          <details class="load">
             <summary class="btn ghost">Load existing…</summary>
             <p class="small">Paste a <code>howdah.toml</code> or choose the file. It is parsed by the core first; if the core rejects it, you see the exact error and the form is left as it is.</p>
             <label for="load-text" class="sr-only">Existing howdah.toml</label>
@@ -85,11 +98,13 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
         </fieldset>
 
         <fieldset>
-          <legend>Top-level TOML key</legend>
+          <legend>Top-level TOML keys</legend>
           {SCHEMA.top.map((k) => (
             <div class="ctl">
-              <label for={'t-' + k.key}><code>{k.key}</code> <span class="def">default: {k.default}</span></label>
-              <select id={'t-' + k.key} name={k.key} data-type="enum">{k.values.map((v) => <option value={v} selected={v === k.default}>{v}</option>)}</select>
+              <label for={'t-' + k.key}><code>{k.key}</code> <span class="def">default: {String(k.default)}</span></label>
+              {k.type === 'bool'
+                ? <input id={'t-' + k.key} name={k.key} data-type="bool" type="checkbox" checked={k.default} />
+                : <select id={'t-' + k.key} name={k.key} data-type="enum">{k.values.map((v) => <option value={v} selected={v === k.default}>{v}</option>)}</select>}
               <small>{k.note}</small>
             </div>
           ))}
@@ -168,6 +183,34 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
             ))}
           </fieldset>
         ))}
+
+        <fieldset id="exc-fieldset">
+          <legend>[[exceptions]]: scoped exceptions</legend>
+          <p class="small">An exception turns <strong>one rule off for one scope</strong>: the executing script (path, glob or SHA-256), a request parameter, a URI prefix, a client network, or any combination (facets are ANDed). Every entry needs a <code>reason</code>: it is the decision record. It is decided after the rule found something and before the mode applies, so it never arms anything and never widens an allowlist: <strong>an exception on <code>sinks.command_exec</code> means that sink is not checked for that script.</strong> Critical Layer 1 rules take no exception; Layer 1 Standard rules take only <code>uri_prefix</code>/<code>client_cidr</code>; Layer 2 takes no <code>script</code>; Layers 3 and 4 take no <code>param</code>. The core validates each row and names it (<code>exceptions[2].client_cidr: ...</code>) in the status on the right. How to go from a log line to an entry: <a href={REPO + '/blob/main/docs/exceptions.md'}>docs/exceptions.md</a>.</p>
+          <div class="tablewrap" tabindex="0" role="region" aria-label="Exceptions (scrolls sideways on narrow screens)">
+            <table class="exc" id="exc-table">
+              <thead>
+                <tr>
+                  <th scope="col">#</th>
+                  {SCHEMA.exceptionFields.map((f) => <th scope="col"><code>{f.key}</code>{f.required ? <span class="req" title="required"> *</span> : null}</th>)}
+                  <th scope="col"><span class="sr-only">Remove</span></th>
+                </tr>
+              </thead>
+              <tbody id="exc-rows">
+                <tr class="exc-empty"><td colspan={SCHEMA.exceptionFields.length + 2}><em>No exceptions. The shipped default; add one only for a behaviour you have read about in the detect log.</em></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="row">
+            <button type="button" class="btn ghost" id="exc-add" data-nojs-hide>Add an exception</button>
+          </div>
+          <details class="noop">
+            <summary>What each column means</summary>
+            <ul class="facts">
+              {SCHEMA.exceptionFields.map((f) => <li><code>{f.key}</code>{f.required ? ' (required)' : ''}: {f.note}</li>)}
+            </ul>
+          </details>
+        </fieldset>
       </form>
 
       <aside id="out" aria-labelledby="out-h">
@@ -211,6 +254,7 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
         <li>Validation is the extension's own <code>Config::from_toml</code>, built to WebAssembly from the same source as the release. The error text you see is the core's.</li>
         <li>Nothing leaves your browser except the URL you copy. The fetch service at <code>cfg.howdah.org</code> keeps no copies and no logs of configs.</li>
         <li>The <code>[log]</code> TOML table (destination, syslog, the per-event hook) is not offered yet; write it by hand from the <a href="/docs/configuration/#log">event log reference</a>. A file that has one is refused on load, so a round trip never drops it.</li>
+        <li><code>[[exceptions]]</code> and <code>exceptions_log</code> are loaded into the table above and written back in full, so a round trip keeps every entry and its reason. The validation of each entry (required keys, which facets a layer accepts, Critical rules refused) is the core's, not this page's. The <a href={REPO + '/tree/main/profiles'}>application profiles</a> are starting points for vanilla installs and are never applied on their own.</li>
         <li>A malformed <code>howdah.config</code> on a server makes Howdah fall back to its safe defaults (block mode, or off with <code>on_invalid_config = "off"</code>) and keep serving, with a line in the PHP error log and an INVALID row in <code>php --ri howdah</code>; using this page is how you avoid finding that out in production. Source: <a href={REPO + '/blob/main/docs/config.md'}>docs/config.md</a>.</li>
       </ul>
     </div>
@@ -251,6 +295,65 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
 
     function controls() { return form.querySelectorAll('[name]'); }
 
+    // ---- [[exceptions]] table: rows are plain inputs WITHOUT a name attribute
+    // (so the flat-state reader skips them); read/written as state.exceptions.
+    var excRows = document.getElementById('exc-rows');
+    var excFields = S.SCHEMA.exceptionFields;
+    function excRow(entry, i) {
+      var tr = document.createElement('tr');
+      var num = document.createElement('td'); num.textContent = String(i); tr.appendChild(num);
+      excFields.forEach(function (f) {
+        var td = document.createElement('td');
+        var inp = document.createElement('input');
+        inp.type = 'text'; inp.spellcheck = false; inp.setAttribute('data-exc', f.key);
+        inp.placeholder = f.placeholder || ''; inp.value = entry[f.key] || '';
+        inp.setAttribute('aria-label', 'exceptions[' + i + '].' + f.key);
+        if (f.key === 'reason') inp.size = 40;
+        td.appendChild(inp); tr.appendChild(td);
+      });
+      var rm = document.createElement('td');
+      var b = document.createElement('button'); b.type = 'button'; b.className = 'btn ghost small-btn'; b.textContent = 'Remove';
+      b.setAttribute('aria-label', 'Remove exception ' + i);
+      b.addEventListener('click', function () { tr.remove(); renumber(); schedule(); });
+      rm.appendChild(b); tr.appendChild(rm);
+      return tr;
+    }
+    function renumber() {
+      var rows = excRows.querySelectorAll('tr:not(.exc-empty)');
+      Array.prototype.forEach.call(rows, function (tr, i) {
+        tr.firstChild.textContent = String(i);
+        Array.prototype.forEach.call(tr.querySelectorAll('[data-exc]'), function (inp) {
+          inp.setAttribute('aria-label', 'exceptions[' + i + '].' + inp.getAttribute('data-exc'));
+        });
+      });
+      var empty = excRows.querySelector('.exc-empty');
+      if (empty) empty.hidden = rows.length > 0;
+    }
+    function readExceptions() {
+      var out = [];
+      Array.prototype.forEach.call(excRows.querySelectorAll('tr:not(.exc-empty)'), function (tr) {
+        var e = {};
+        Array.prototype.forEach.call(tr.querySelectorAll('[data-exc]'), function (inp) {
+          var v = inp.value.trim();
+          if (v !== '') e[inp.getAttribute('data-exc')] = v;
+        });
+        out.push(e);
+      });
+      return out;
+    }
+    function writeExceptions(list) {
+      Array.prototype.forEach.call(excRows.querySelectorAll('tr:not(.exc-empty)'), function (tr) { tr.remove(); });
+      (list || []).forEach(function (e, i) { excRows.appendChild(excRow(e, i)); });
+      renumber();
+    }
+    document.getElementById('exc-add').addEventListener('click', function () {
+      excRows.appendChild(excRow({}, excRows.querySelectorAll('tr:not(.exc-empty)').length));
+      renumber();
+      var first = excRows.lastChild.querySelector('[data-exc="rule"]');
+      if (first) first.focus();
+    });
+    renumber();
+
     function readState() {
       var state = S.defaultState(catalog);
       Array.prototype.forEach.call(controls(), function (el) {
@@ -260,6 +363,7 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
         else if (t === 'list') state[el.name] = el.value.split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
         else state[el.name] = el.value;
       });
+      state.exceptions = readExceptions();
       return state;
     }
 
@@ -271,6 +375,7 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
         else if (t === 'list') el.value = (v || []).join('\n');
         else el.value = String(v);
       });
+      writeExceptions(state.exceptions || []);
     }
 
     var timer = null, seq = 0;
@@ -356,10 +461,34 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
           var el = form.querySelector('[data-rule="' + name + '"]');
           return el && el.getAttribute('data-noop') === 'true';
         });
+        var nExc = (r.state.exceptions || []).length;
         loadMsg.textContent = 'Loaded. The form now shows that file; the output is rebuilt from it.' +
+          (nExc ? ' ' + nExc + ' [[exceptions]] ' + (nExc === 1 ? 'entry is' : 'entries are') + ' in the exceptions table.' : '') +
           (noops.length ? ' Note: [rules] ' + noops.join(', ') + ' in this file ' + (noops.length === 1 ? 'has' : 'have') + ' no effect in the extension (see the [rules] section).' : '');
       }).catch(function (e) { loadMsg.textContent = 'Could not validate: ' + (e && e.message || e); });
     }
+
+    // Application profiles: fetched from /profiles/<id>.toml (copied from the
+    // repository's profiles/ at build time) and loaded exactly like a pasted file.
+    var profilePick = document.getElementById('profile-pick');
+    var profileMsg = document.getElementById('profile-msg');
+    var profileRaw = document.getElementById('profile-raw');
+    function syncProfileLink() { if (profilePick && profileRaw) profileRaw.href = '/profiles/' + profilePick.value + '.toml'; }
+    if (profilePick) { profilePick.addEventListener('change', syncProfileLink); syncProfileLink(); }
+    var profileBtn = document.getElementById('profile-btn');
+    if (profileBtn) profileBtn.addEventListener('click', function () {
+      var id = profilePick.value;
+      profileMsg.textContent = 'Fetching /profiles/' + id + '.toml…';
+      fetch('/profiles/' + id + '.toml').then(function (res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.text();
+      }).then(function (text) {
+        document.getElementById('load-text').value = text;
+        return loadText(text).then(function () {
+          profileMsg.textContent = 'Profile loaded (see the message under "Load existing"). Replace /var/www/html with your docroot in the exceptions table and read every reason before you deploy.';
+        });
+      }).catch(function (e) { profileMsg.textContent = 'Could not fetch the profile: ' + (e && e.message || e); });
+    });
     document.getElementById('load-btn').addEventListener('click', function () {
       loadText(document.getElementById('load-text').value);
     });
@@ -443,6 +572,14 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
   .ctl small { display: block; color: var(--muted); font-size: .85rem; margin-top: .3rem; max-width: 60ch; }
   .def { color: var(--muted); font-size: .85rem; margin-left: .4rem; }
   .rules { display: grid; gap: 0 1.5rem; grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); }
+  table.exc { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  table.exc th, table.exc td { padding: .3rem .35rem; text-align: left; vertical-align: top; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+  table.exc input { width: 11rem; min-width: 7rem; font: inherit; font-size: .85rem; }
+  table.exc input[data-exc="reason"] { width: 24rem; }
+  table.exc input[data-exc="client_cidr"], table.exc input[data-exc="param_prefix"] { width: 8rem; }
+  table.exc .req { color: var(--accent, #b00); }
+  table.exc .exc-empty td { white-space: normal; }
+  .small-btn { padding: .2rem .5rem; font-size: .8rem; }
   .noop { margin-top: 1rem; border-top: 1px solid var(--rule); padding-top: .5rem; }
   .noop summary { cursor: pointer; font-weight: 600; min-height: 44px; display: flex; align-items: center; }
   .rule select { max-width: 12rem; }

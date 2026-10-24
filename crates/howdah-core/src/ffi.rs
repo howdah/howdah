@@ -24,6 +24,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::{Config, Mode};
+use crate::exceptions::{EventFacts, Exceptions, Match};
 use crate::input::InputState;
 use crate::inspect::{class_rule, scan, InspectClass, Source};
 use crate::limits::{LimitHit, RuleId, Severity};
@@ -64,7 +65,7 @@ pub const HOWDAH_BEHAVIOR_PHP_WRITE: i32 = 3;
 
 fn code(a: Action) -> i32 {
     match a {
-        Action::Allow => HOWDAH_ALLOW,
+        Action::Allow | Action::Excepted => HOWDAH_ALLOW,
         Action::Log => HOWDAH_LOG,
         Action::Block => HOWDAH_BLOCK,
     }
@@ -72,9 +73,36 @@ fn code(a: Action) -> i32 {
 
 fn rank(a: Action) -> u8 {
     match a {
-        Action::Allow => 0,
+        Action::Allow | Action::Excepted => 0,
         Action::Log => 1,
         Action::Block => 2,
+    }
+}
+
+/// A 32-byte SHA-256 handed over the ABI (`sha256`/`sha256_len`): only an
+/// exact 32-byte buffer is accepted; anything else means "no hash".
+///
+/// # Safety
+/// `p` must be NULL or valid for `len` readable bytes.
+unsafe fn copy_sha(p: *const u8, len: usize) -> Option<[u8; 32]> {
+    if p.is_null() || len != 32 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(std::slice::from_raw_parts(p, 32));
+    Some(out)
+}
+
+/// Borrow `len` bytes at `p` as a str-ish script path (lossy), or `None` for
+/// NULL / empty.
+///
+/// # Safety
+/// `p` must be NULL or valid for `len` readable bytes.
+unsafe fn copy_script(p: *const c_char, len: usize) -> Option<String> {
+    if p.is_null() || len == 0 {
+        None
+    } else {
+        Some(copy_str(p, len))
     }
 }
 
@@ -114,6 +142,10 @@ pub struct howdah_ctx {
     inspect_bytes: usize,
     /// Layer-3 per-hit sink line; dedicated slot, never shares `log`/`worst`.
     sink_log: Option<String>,
+    /// Compiled `[[exceptions]]` (empty when none configured).
+    exceptions: Exceptions,
+    /// Write matched exceptions as `excepted` events.
+    exceptions_log: bool,
 }
 
 fn describe(r: RuleId) -> &'static str {
@@ -180,6 +212,10 @@ unsafe fn copy_str(p: *const c_char, len: usize) -> String {
 
 impl howdah_ctx {
     fn new(config: Config) -> Self {
+        // The config was validated by `from_toml`, so this cannot fail; a
+        // hand-built config with bad entries simply gets no exceptions.
+        let exceptions = Exceptions::compile(&config.exceptions).unwrap_or_default();
+        let exceptions_log = config.exceptions_log;
         howdah_ctx {
             config,
             state: None,
@@ -192,6 +228,62 @@ impl howdah_ctx {
             inspect_values: 0,
             inspect_bytes: 0,
             sink_log: None,
+            exceptions,
+            exceptions_log,
+        }
+    }
+
+    /// Build a log record for `rule`/`action` with this request's metadata.
+    fn record(&self, rule: RuleId, action: Action, reason: String) -> String {
+        log_line(&EventRecord {
+            ts: now(),
+            request_id: self.request_id.clone(),
+            rule,
+            action,
+            client_ip: self.meta.client_ip.clone(),
+            method: self.meta.method.clone(),
+            uri: self.meta.uri.clone(),
+            reason,
+        })
+    }
+
+    /// Does an exception turn `rule` off for this event? `script`, `sha` and
+    /// `param` are whatever the calling layer knows (see the design, §3).
+    fn excepted(
+        &self,
+        rule: RuleId,
+        script: Option<&str>,
+        sha: Option<&[u8; 32]>,
+        param: Option<&[u8]>,
+    ) -> Option<Match> {
+        if self.exceptions.is_empty() {
+            return None;
+        }
+        self.exceptions.matches(&EventFacts {
+            rule,
+            script,
+            script_sha256: sha,
+            param,
+            uri: &self.meta.uri,
+            client_ip: &self.meta.client_ip,
+        })
+    }
+
+    /// An excepted Layer 1/2 finding: with `exceptions_log`, use the
+    /// per-request slot like the self-test marker does (only when nothing
+    /// else is pending; a later real hit replaces it). `worst` is untouched.
+    fn note_excepted_request(&mut self, rule: RuleId, m: &Match) {
+        if self.exceptions_log && self.log.is_none() && self.worst == Action::Allow {
+            self.selftest_only = true;
+            self.log = Some(self.record(rule, Action::Excepted, m.log_reason()));
+        }
+    }
+
+    /// An excepted Layer 3/4 call: with `exceptions_log`, one line in the
+    /// per-call sink slot.
+    fn note_excepted_sink(&mut self, rule: RuleId, m: &Match) {
+        if self.exceptions_log {
+            self.sink_log = Some(self.record(rule, Action::Excepted, m.log_reason()));
         }
     }
 
@@ -209,8 +301,19 @@ impl howdah_ctx {
         self.log = Some(log_line(&rec));
     }
 
-    /// Fold a hit into the sticky worst action; log only on escalation.
+    /// Fold a hit into the sticky worst action; log only on escalation. A
+    /// Standard hit that an exception covers (URI / client facets; Layer 1
+    /// knows no script or parameter) is dropped here, before the mode is
+    /// applied. Critical hits never consult the exceptions.
     fn apply(&mut self, hit: Option<&LimitHit>) {
+        if let Some(h) = hit {
+            if h.severity == Severity::Standard {
+                if let Some(m) = self.excepted(h.rule, None, None, None) {
+                    self.note_excepted_request(h.rule, &m);
+                    return;
+                }
+            }
+        }
         let a = decide(hit, self.config.mode, &self.config.rule_modes);
         self.fold(hit, a, None);
     }
@@ -274,6 +377,12 @@ impl howdah_ctx {
         }
         let overrides = self.config.inspect.rule_modes.clone();
         let rule = class_rule(class);
+        // Scoped exception: by parameter name, URI or client (never script:
+        // Layer 2 runs before any script is known).
+        if let Some(m) = self.excepted(rule, None, None, Some(name)) {
+            self.note_excepted_request(rule, &m);
+            return Action::Allow;
+        }
         let class_name = match class {
             InspectClass::SqlInjection => "sql_injection",
             InspectClass::PathTraversal => "path_traversal",
@@ -295,7 +404,14 @@ impl howdah_ctx {
     /// `worst`/`log`: a hit goes only to `sink_log`. All sinks honor block;
     /// include/eval block is enforced by the C opcode handler (PHP 7.0+); PHP
     /// 5.x has no such handler and uses a compile-time swap instead.
-    fn sink_check(&mut self, sink: SinkId, name: &[u8], arg: &[u8]) -> Action {
+    fn sink_check(
+        &mut self,
+        sink: SinkId,
+        name: &[u8],
+        arg: &[u8],
+        script: Option<&str>,
+        sha: Option<&[u8; 32]>,
+    ) -> Action {
         #[cfg(test)]
         if tests::FORCE_PANIC.with(|f| f.get()) {
             panic!("injected test panic");
@@ -341,30 +457,29 @@ impl howdah_ctx {
         let Some(reason) = matched else {
             return Action::Allow;
         };
+        // Scoped exception (script / hash / URI / client): the sink is not
+        // checked for this script. Decided after the finding, before the mode.
+        if let Some(m) = self.excepted(rule, script, sha, None) {
+            self.note_excepted_sink(rule, &m);
+            return Action::Allow;
+        }
         let action = match mode {
             Mode::Block => Action::Block,
             _ => Action::Log,
         };
-        let rec = EventRecord {
-            ts: now(),
-            request_id: self.request_id.clone(),
-            rule,
-            action,
-            client_ip: self.meta.client_ip.clone(),
-            method: self.meta.method.clone(),
-            uri: self.meta.uri.clone(),
-            reason,
-        };
-        self.sink_log = Some(log_line(&rec));
+        self.sink_log = Some(self.record(rule, action, reason));
         action
     }
 
     /// Layer-4 behavior check. Reuses `sink_log`. `hit` runs the classifier
     /// against the config; the target is never logged (the classifier's
-    /// detail is a dir/host/basename only).
+    /// detail is a dir/host/basename only). `script` is the executing file
+    /// (the caller for binary/egress/php-write, the file itself for exec-dir).
     fn behavior_check(
         &mut self,
         hit: impl FnOnce(&crate::config::BehaviorConfig) -> Option<crate::behavior::BehaviorHit>,
+        script: Option<&str>,
+        sha: Option<&[u8; 32]>,
     ) -> Action {
         #[cfg(test)]
         if tests::FORCE_PANIC.with(|f| f.get()) {
@@ -377,6 +492,10 @@ impl howdah_ctx {
         let Some(crate::behavior::BehaviorHit { rule, detail }) = hit(&self.config.behavior) else {
             return Action::Allow;
         };
+        if let Some(m) = self.excepted(rule, script, sha, None) {
+            self.note_excepted_sink(rule, &m);
+            return Action::Allow;
+        }
         // Observe is propose-only: never block, and mark the line as a proposal.
         let observe = self.config.behavior.observe;
         let action = match mode {
@@ -398,7 +517,15 @@ impl howdah_ctx {
     }
 
     /// SSRF check; `recs` is a multiple of 17 bytes (see `howdah_sink_check_ssrf`).
-    fn sink_check_ssrf(&mut self, scheme: &[u8], host: &[u8], port: u16, recs: &[u8]) -> Action {
+    fn sink_check_ssrf(
+        &mut self,
+        scheme: &[u8],
+        host: &[u8],
+        port: u16,
+        recs: &[u8],
+        script: Option<&str>,
+        sha: Option<&[u8; 32]>,
+    ) -> Action {
         #[cfg(test)]
         if tests::FORCE_PANIC.with(|f| f.get()) {
             panic!("injected test panic");
@@ -460,41 +587,33 @@ impl howdah_ctx {
             ip_s,
             class.as_str()
         );
+        if let Some(m) = self.excepted(RuleId::Ssrf, script, sha, None) {
+            self.note_excepted_sink(RuleId::Ssrf, &m);
+            return Action::Allow;
+        }
         let action = if mode == Mode::Block { Action::Block } else { Action::Log };
-        let rec = EventRecord {
-            ts: now(),
-            request_id: self.request_id.clone(),
-            rule: RuleId::Ssrf,
-            action,
-            client_ip: self.meta.client_ip.clone(),
-            method: self.meta.method.clone(),
-            uri: self.meta.uri.clone(),
-            reason,
-        };
-        self.sink_log = Some(log_line(&rec));
+        self.sink_log = Some(self.record(RuleId::Ssrf, action, reason));
         action
     }
 
     /// A host too long to resolve (>256 bytes; DNS max is 253) is never
     /// legitimate and can hide a zero-padded numeric IP, so it is treated as
     /// suspicious per the effective mode. The host bytes are never logged.
-    fn sink_ssrf_oversize(&mut self) -> Action {
+    fn sink_ssrf_oversize(&mut self, script: Option<&str>, sha: Option<&[u8; 32]>) -> Action {
         let mode = self.config.sinks.effective_mode(SinkId::Ssrf, self.config.mode);
         if mode == Mode::Off {
             return Action::Allow;
         }
+        if let Some(m) = self.excepted(RuleId::Ssrf, script, sha, None) {
+            self.note_excepted_sink(RuleId::Ssrf, &m);
+            return Action::Allow;
+        }
         let action = if mode == Mode::Block { Action::Block } else { Action::Log };
-        let rec = EventRecord {
-            ts: now(),
-            request_id: self.request_id.clone(),
-            rule: RuleId::Ssrf,
+        self.sink_log = Some(self.record(
+            RuleId::Ssrf,
             action,
-            client_ip: self.meta.client_ip.clone(),
-            method: self.meta.method.clone(),
-            uri: self.meta.uri.clone(),
-            reason: "ssrf: oversize host (>256 bytes), not resolvable - treated as suspicious".to_string(),
-        };
-        self.sink_log = Some(log_line(&rec));
+            "ssrf: oversize host (>256 bytes), not resolvable - treated as suspicious".to_string(),
+        ));
         action
     }
 
@@ -968,7 +1087,7 @@ pub unsafe extern "C" fn howdah_sink_check(
         } else {
             std::slice::from_raw_parts(arg as *const u8, arg_len)
         };
-        code((*ctx).sink_check(id, n, a))
+        code((*ctx).sink_check(id, n, a, None, None))
     }));
     r.unwrap_or_else(|_| {
         report_panic(ctx);
@@ -1028,7 +1147,7 @@ pub unsafe extern "C" fn howdah_behavior_check_exec_dir(
     }
     catch_unwind(AssertUnwindSafe(|| {
         let p = copy_str(path, path_len);
-        code((*ctx).behavior_check(|cfg| crate::behavior::exec_dir_hit(&p, cfg)))
+        code((*ctx).behavior_check(|cfg| crate::behavior::exec_dir_hit(&p, cfg), None, None))
     }))
     .unwrap_or_else(|_| {
         report_panic(ctx);
@@ -1054,7 +1173,7 @@ pub unsafe extern "C" fn howdah_behavior_check_binary(
     catch_unwind(AssertUnwindSafe(|| {
         let c = copy_str(caller, caller_len);
         let p = copy_str(prog, prog_len);
-        code((*ctx).behavior_check(|cfg| crate::behavior::binary_hit(&c, &p, cfg)))
+        code((*ctx).behavior_check(|cfg| crate::behavior::binary_hit(&c, &p, cfg), None, None))
     }))
     .unwrap_or_else(|_| {
         report_panic(ctx);
@@ -1080,7 +1199,7 @@ pub unsafe extern "C" fn howdah_behavior_check_egress(
     catch_unwind(AssertUnwindSafe(|| {
         let c = copy_str(caller, caller_len);
         let h = copy_str(host, host_len);
-        code((*ctx).behavior_check(|cfg| crate::behavior::egress_hit(&c, &h, cfg)))
+        code((*ctx).behavior_check(|cfg| crate::behavior::egress_hit(&c, &h, cfg), None, None))
     }))
     .unwrap_or_else(|_| {
         report_panic(ctx);
@@ -1108,7 +1227,7 @@ pub unsafe extern "C" fn howdah_behavior_check_php_write(
     catch_unwind(AssertUnwindSafe(|| {
         let c = copy_str(caller, caller_len);
         let t = copy_str(target, target_len);
-        code((*ctx).behavior_check(|cfg| crate::behavior::php_write_hit(&c, &t, is_write_mode != 0, cfg)))
+        code((*ctx).behavior_check(|cfg| crate::behavior::php_write_hit(&c, &t, is_write_mode != 0, cfg), None, None))
     }))
     .unwrap_or_else(|_| {
         report_panic(ctx);
@@ -1199,7 +1318,7 @@ pub unsafe extern "C" fn howdah_sink_check_ssrf(
                 _ => return HOWDAH_ALLOW,
             }
         };
-        code((*ctx).sink_check_ssrf(sl(scheme, scheme_len), sl(host, host_len), port, recs))
+        code((*ctx).sink_check_ssrf(sl(scheme, scheme_len), sl(host, host_len), port, recs, None, None))
     }));
     r.unwrap_or_else(|_| {
         report_panic(ctx);
@@ -1262,7 +1381,7 @@ pub unsafe extern "C" fn howdah_sink_ssrf_oversize(ctx: *mut howdah_ctx) -> i32 
     if ctx.is_null() {
         return HOWDAH_ALLOW;
     }
-    let r = catch_unwind(AssertUnwindSafe(|| code((*ctx).sink_ssrf_oversize())));
+    let r = catch_unwind(AssertUnwindSafe(|| code((*ctx).sink_ssrf_oversize(None, None))));
     r.unwrap_or(HOWDAH_ALLOW)
 }
 
@@ -1341,6 +1460,340 @@ pub unsafe fn howdah_log_config(ctx: *const howdah_ctx) -> crate::config::LogCon
         return crate::config::LogConfig::default();
     }
     catch_unwind(AssertUnwindSafe(|| (*ctx).config.log.clone())).unwrap_or_default()
+}
+
+// ---- scoped [[exceptions]] --------------------------------------------------
+//
+// The `_at` entry points below are the originals plus the executing script
+// (and an optional 32-byte SHA-256 of its bytes) so `script` / `script_sha256`
+// facets can match. The originals stay and behave as before.
+
+/// Set the request's client IP when it is still empty (the CLI built-in
+/// server has no `sapi_getenv`, so the glue hands over the `REMOTE_ADDR`
+/// variable it sees in the input filter instead). A non-empty IP already set
+/// by `howdah_request_begin` is kept. NULL ctx or panic is a no-op.
+///
+/// # Safety
+/// `ctx` NULL or live; `ip` NULL or valid for `ip_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_request_client_ip(ctx: *mut howdah_ctx, ip: *const c_char, ip_len: usize) {
+    if ctx.is_null() {
+        return;
+    }
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        let c = &mut *ctx;
+        if c.meta.client_ip.is_empty() {
+            let v = copy_str(ip, ip_len.min(64));
+            if !v.is_empty() && v.chars().all(|ch| ch.is_ascii_hexdigit() || matches!(ch, '.' | ':')) {
+                c.meta.client_ip = v;
+            }
+        }
+    }));
+}
+
+/// Number of `[[exceptions]]` entries active in this context (0 for NULL /
+/// panic). For `php --ri howdah`.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_exceptions_count(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| (*ctx).exceptions.len().min(i32::MAX as usize) as i32)).unwrap_or(0)
+}
+
+/// 1 iff the context's config has `exceptions_log = true`; 0 otherwise, for
+/// NULL and on panic. For the startup summary line.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_exceptions_log(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| i32::from((*ctx).exceptions_log))).unwrap_or(0)
+}
+
+/// 1 iff some exception has a `script_sha256` facet that could apply to
+/// `script` (so the glue should hash the file); else 0. NULL / panic is 0.
+///
+/// # Safety
+/// `ctx` NULL or live; `script` NULL or valid for `script_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_exceptions_want_hash(
+    ctx: *mut howdah_ctx,
+    script: *const c_char,
+    script_len: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        if (*ctx).exceptions.is_empty() || script.is_null() || script_len == 0 {
+            return 0; // nothing to hash for: no copy, no walk
+        }
+        let s = copy_str(script, script_len);
+        i32::from((*ctx).exceptions.want_hash(&s))
+    }))
+    .unwrap_or(0)
+}
+
+/// `howdah_sink_check` plus the executing script (as PHP reports it) and an
+/// optional SHA-256 (`sha256_len` must be 32, else ignored).
+///
+/// # Safety
+/// `ctx` NULL or live; every pointer NULL or valid for its length.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_sink_check_at(
+    ctx: *mut howdah_ctx,
+    sink: i32,
+    name: *const c_char,
+    name_len: usize,
+    arg: *const c_char,
+    arg_len: usize,
+    script: *const c_char,
+    script_len: usize,
+    sha256: *const u8,
+    sha256_len: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let id = match sink {
+        HOWDAH_SINK_COMMAND_EXEC => SinkId::CommandExec,
+        HOWDAH_SINK_INCLUDE => SinkId::Include,
+        HOWDAH_SINK_EVAL => SinkId::Eval,
+        HOWDAH_SINK_UNSERIALIZE => SinkId::Unserialize,
+        HOWDAH_SINK_PHAR => SinkId::Phar,
+        _ => return HOWDAH_ALLOW,
+    };
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let n: &[u8] = if name.is_null() || name_len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(name as *const u8, name_len)
+        };
+        let a: &[u8] = if arg.is_null() || arg_len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(arg as *const u8, arg_len)
+        };
+        let s = copy_script(script, script_len);
+        let h = copy_sha(sha256, sha256_len);
+        code((*ctx).sink_check(id, n, a, s.as_deref(), h.as_ref()))
+    }));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// `howdah_sink_check_ssrf` plus the executing script and optional SHA-256.
+///
+/// # Safety
+/// As `howdah_sink_check_ssrf`; `script`/`sha256` NULL or valid for their lengths.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn howdah_sink_check_ssrf_at(
+    ctx: *mut howdah_ctx,
+    scheme: *const c_char,
+    scheme_len: usize,
+    host: *const c_char,
+    host_len: usize,
+    port: u16,
+    ips: *const u8,
+    ips_count: usize,
+    script: *const c_char,
+    script_len: usize,
+    sha256: *const u8,
+    sha256_len: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let sl = |p: *const c_char, n: usize| -> &[u8] {
+            if p.is_null() || n == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts(p as *const u8, n)
+            }
+        };
+        let recs: &[u8] = if ips.is_null() || ips_count == 0 {
+            &[]
+        } else {
+            match ips_count.checked_mul(17) {
+                Some(total) if total <= (1 << 24) => std::slice::from_raw_parts(ips, total),
+                _ => return HOWDAH_ALLOW,
+            }
+        };
+        let s = copy_script(script, script_len);
+        let h = copy_sha(sha256, sha256_len);
+        code((*ctx).sink_check_ssrf(
+            sl(scheme, scheme_len),
+            sl(host, host_len),
+            port,
+            recs,
+            s.as_deref(),
+            h.as_ref(),
+        ))
+    }));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// `howdah_sink_ssrf_oversize` plus the executing script and optional SHA-256.
+///
+/// # Safety
+/// `ctx` NULL or live; pointers NULL or valid for their lengths.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_sink_ssrf_oversize_at(
+    ctx: *mut howdah_ctx,
+    script: *const c_char,
+    script_len: usize,
+    sha256: *const u8,
+    sha256_len: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let s = copy_script(script, script_len);
+        let h = copy_sha(sha256, sha256_len);
+        code((*ctx).sink_ssrf_oversize(s.as_deref(), h.as_ref()))
+    }))
+    .unwrap_or(HOWDAH_ALLOW)
+}
+
+/// `howdah_behavior_check_exec_dir` plus an optional SHA-256 of the file at
+/// `path` (the executing script for this check is the file itself).
+///
+/// # Safety
+/// `ctx` NULL or live; pointers NULL or valid for their lengths.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_behavior_check_exec_dir_at(
+    ctx: *mut howdah_ctx,
+    path: *const c_char,
+    path_len: usize,
+    sha256: *const u8,
+    sha256_len: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let p = copy_str(path, path_len);
+        let h = copy_sha(sha256, sha256_len);
+        let s = (!p.is_empty()).then_some(p.as_str());
+        code((*ctx).behavior_check(|cfg| crate::behavior::exec_dir_hit(&p, cfg), s, h.as_ref()))
+    }))
+    .unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// `howdah_behavior_check_binary` plus an optional SHA-256 of `caller`.
+///
+/// # Safety
+/// `ctx` NULL or live; pointers NULL or valid for their lengths.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn howdah_behavior_check_binary_at(
+    ctx: *mut howdah_ctx,
+    caller: *const c_char,
+    caller_len: usize,
+    prog: *const c_char,
+    prog_len: usize,
+    sha256: *const u8,
+    sha256_len: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = copy_str(caller, caller_len);
+        let p = copy_str(prog, prog_len);
+        let h = copy_sha(sha256, sha256_len);
+        let s = (!c.is_empty()).then_some(c.as_str());
+        code((*ctx).behavior_check(|cfg| crate::behavior::binary_hit(&c, &p, cfg), s, h.as_ref()))
+    }))
+    .unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// `howdah_behavior_check_egress` plus an optional SHA-256 of `caller`.
+///
+/// # Safety
+/// `ctx` NULL or live; pointers NULL or valid for their lengths.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn howdah_behavior_check_egress_at(
+    ctx: *mut howdah_ctx,
+    caller: *const c_char,
+    caller_len: usize,
+    host: *const c_char,
+    host_len: usize,
+    sha256: *const u8,
+    sha256_len: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = copy_str(caller, caller_len);
+        let hst = copy_str(host, host_len);
+        let h = copy_sha(sha256, sha256_len);
+        let s = (!c.is_empty()).then_some(c.as_str());
+        code((*ctx).behavior_check(|cfg| crate::behavior::egress_hit(&c, &hst, cfg), s, h.as_ref()))
+    }))
+    .unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// `howdah_behavior_check_php_write` plus an optional SHA-256 of `caller`.
+///
+/// # Safety
+/// `ctx` NULL or live; pointers NULL or valid for their lengths.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn howdah_behavior_check_php_write_at(
+    ctx: *mut howdah_ctx,
+    caller: *const c_char,
+    caller_len: usize,
+    target: *const c_char,
+    target_len: usize,
+    is_write_mode: i32,
+    sha256: *const u8,
+    sha256_len: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = copy_str(caller, caller_len);
+        let t = copy_str(target, target_len);
+        let h = copy_sha(sha256, sha256_len);
+        let s = (!c.is_empty()).then_some(c.as_str());
+        code((*ctx).behavior_check(
+            |cfg| crate::behavior::php_write_hit(&c, &t, is_write_mode != 0, cfg),
+            s,
+            h.as_ref(),
+        ))
+    }))
+    .unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
 }
 
 #[cfg(test)]
@@ -2207,5 +2660,328 @@ mod tests {
             assert_eq!(howdah_feed(c, std::ptr::null(), 0), 0);
             howdah_free(c);
         }
+    }
+
+    // ---- scoped [[exceptions]] ------------------------------------------------
+
+    fn sink_at(c: *mut howdah_ctx, id: i32, name: &str, arg: &[u8], script: &str, sha: Option<&[u8; 32]>) -> i32 {
+        unsafe {
+            howdah_sink_check_at(
+                c,
+                id,
+                name.as_ptr() as _,
+                name.len(),
+                arg.as_ptr() as _,
+                arg.len(),
+                script.as_ptr() as _,
+                script.len(),
+                sha.map_or(std::ptr::null(), |h| h.as_ptr()),
+                sha.map_or(0, |_| 32),
+            )
+        }
+    }
+    fn begin_from(c: *mut howdah_ctx, ip: &str, uri: &str) {
+        let m = "GET";
+        let meta = RequestMeta {
+            client_ip: ip.as_ptr() as _,
+            client_ip_len: ip.len(),
+            method: m.as_ptr() as _,
+            method_len: m.len(),
+            uri: uri.as_ptr() as _,
+            uri_len: uri.len(),
+        };
+        unsafe { howdah_request_begin(c, std::ptr::null(), 0, &meta) };
+    }
+
+    const EXC_SINK: &str = "mode = \"detect\"\n[sinks]\nmode = \"block\"\n\
+        [[exceptions]]\nrule = \"sinks.command_exec\"\nscript = \"/var/www/cron.php\"\nreason = \"cron mailer\"\n";
+
+    #[test]
+    fn sink_exception_by_script_silences_only_that_script() {
+        let c = init(EXC_SINK);
+        begin(c);
+        assert_eq!(unsafe { howdah_exceptions_count(c) }, 1);
+        // Matching script: allowed, no line.
+        assert_eq!(sink_at(c, HOWDAH_SINK_COMMAND_EXEC, "system", b"id", "/var/www/cron.php", None), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        // Another script: blocked and logged.
+        assert_eq!(sink_at(c, HOWDAH_SINK_COMMAND_EXEC, "system", b"id", "/var/www/other.php", None), HOWDAH_BLOCK);
+        let line = take_sink(c).unwrap();
+        assert!(line.contains("\"rule\":\"command_exec\"") && line.contains("\"action\":\"block\""), "{line}");
+        // Same script, a different sink: not covered.
+        assert_eq!(sink_at(c, HOWDAH_SINK_EVAL, "eval", b"1;", "/var/www/cron.php", None), HOWDAH_BLOCK);
+        assert!(take_sink(c).is_some());
+        // The script-less entry point cannot match a script facet.
+        assert_eq!(sink(c, HOWDAH_SINK_COMMAND_EXEC, "system", b"id"), HOWDAH_BLOCK);
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn sink_exception_by_hash_and_want_hash_gate() {
+        let body = b"<?php system('true');";
+        let d = crate::exceptions::sha256::digest(body);
+        let hex = crate::exceptions::sha256::hex(&d);
+        let toml = format!(
+            "mode = \"detect\"\n[sinks]\nmode = \"block\"\n[[exceptions]]\nrule = \"command_exec\"\nscript_sha256 = \"{hex}\"\nreason = \"pinned\"\n"
+        );
+        let c = init(&toml);
+        begin(c);
+        let p = "/srv/x.php";
+        assert_eq!(unsafe { howdah_exceptions_want_hash(c, p.as_ptr() as _, p.len()) }, 1);
+        assert_eq!(sink_at(c, HOWDAH_SINK_COMMAND_EXEC, "system", b"true", p, Some(&d)), HOWDAH_ALLOW);
+        let other = crate::exceptions::sha256::digest(b"<?php system('false');");
+        assert_eq!(sink_at(c, HOWDAH_SINK_COMMAND_EXEC, "system", b"true", p, Some(&other)), HOWDAH_BLOCK);
+        assert_eq!(sink_at(c, HOWDAH_SINK_COMMAND_EXEC, "system", b"true", p, None), HOWDAH_BLOCK);
+        unsafe { howdah_free(c) };
+        // No hash facet anywhere: the gate says no.
+        let c = init(EXC_SINK);
+        assert_eq!(unsafe { howdah_exceptions_want_hash(c, p.as_ptr() as _, p.len()) }, 0);
+        unsafe { howdah_free(c) };
+        assert_eq!(unsafe { howdah_exceptions_want_hash(std::ptr::null_mut(), p.as_ptr() as _, p.len()) }, 0);
+    }
+
+    #[test]
+    fn sink_exception_never_widens_allowlist_or_arms_anything() {
+        // Exception present but the call comes from another script: the
+        // allowlist still decides; an exception never changes it.
+        let c = init(EXC_SINK);
+        begin(c);
+        assert_eq!(sink_at(c, HOWDAH_SINK_COMMAND_EXEC, "system", b"id", "/var/www/other.php", None), HOWDAH_BLOCK);
+        unsafe { howdah_free(c) };
+        // Sink off: an exception cannot arm it.
+        let c = init("mode = \"detect\"\n[sinks]\nmode = \"off\"\n[[exceptions]]\nrule = \"sinks\"\nscript = \"/a.php\"\nreason = \"x\"\n");
+        begin(c);
+        assert_eq!(sink_at(c, HOWDAH_SINK_COMMAND_EXEC, "system", b"id", "/b.php", None), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn exceptions_log_writes_excepted_line_for_sink() {
+        let c = init(&format!("exceptions_log = true\n{EXC_SINK}"));
+        begin(c);
+        assert_eq!(sink_at(c, HOWDAH_SINK_COMMAND_EXEC, "system", b"id", "/var/www/cron.php", None), HOWDAH_ALLOW);
+        let line = take_sink(c).expect("excepted line");
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["action"], "excepted");
+        assert_eq!(v["rule"], "command_exec");
+        assert_eq!(v["reason"], "exception #0 (sinks.command_exec): cron mailer");
+        assert!(!line.contains("\"id\""), "argument leaked: {line}");
+        unsafe { howdah_free(c) };
+    }
+
+    const EXC_L2: &str = "mode = \"detect\"\n[inspect]\nmode = \"block\"\n\
+        [[exceptions]]\nrule = \"inspect.sql_injection\"\nparam = \"q\"\nreason = \"editors\"\n";
+
+    #[test]
+    fn layer2_param_exception_silences_one_rule_for_one_param() {
+        let c = init(EXC_L2);
+        begin(c);
+        let sqli = b"' OR 1=1 --";
+        assert_eq!(inspect(c, HOWDAH_SRC_GET, "q", sqli), HOWDAH_ALLOW);
+        assert_eq!(inspect(c, HOWDAH_SRC_POST, "q", sqli), HOWDAH_ALLOW);
+        assert!(take(c).is_none());
+        // Another parameter: blocked.
+        assert_eq!(inspect(c, HOWDAH_SRC_GET, "other", sqli), HOWDAH_BLOCK);
+        let line = take(c).unwrap();
+        assert!(line.contains("sql_injection") && line.contains("\"action\":\"block\""), "{line}");
+        unsafe { howdah_free(c) };
+        // Same parameter, another class: still caught.
+        let c = init(EXC_L2);
+        begin(c);
+        assert_eq!(inspect(c, HOWDAH_SRC_GET, "q", b"../../etc/passwd"), HOWDAH_BLOCK);
+        assert!(take(c).unwrap().contains("path_traversal"));
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn layer2_param_prefix_uri_and_cidr_facets() {
+        let toml = "mode = \"detect\"\n[inspect]\nmode = \"block\"\n\
+            [[exceptions]]\nrule = \"inspect\"\nparam_prefix = \"jform[\"\nuri_prefix = \"/administrator/\"\nclient_cidr = \"10.0.0.0/8\"\nreason = \"joomla admin\"\n";
+        let c = init(toml);
+        let sqli = b"' OR 1=1 --";
+        begin_from(c, "10.1.1.1", "/administrator/index.php");
+        assert_eq!(inspect(c, HOWDAH_SRC_POST, "jform[articletext]", sqli), HOWDAH_ALLOW);
+        assert_eq!(inspect(c, HOWDAH_SRC_POST, "other", sqli), HOWDAH_BLOCK);
+        begin_from(c, "10.1.1.1", "/index.php");
+        assert_eq!(inspect(c, HOWDAH_SRC_POST, "jform[articletext]", sqli), HOWDAH_BLOCK);
+        begin_from(c, "192.0.2.1", "/administrator/index.php");
+        assert_eq!(inspect(c, HOWDAH_SRC_POST, "jform[articletext]", sqli), HOWDAH_BLOCK);
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn layer2_excepted_line_uses_request_slot_once_and_yields_to_real_hit() {
+        let c = init(&format!("exceptions_log = true\n{EXC_L2}"));
+        // No multipart boundary: a plain GET request.
+        begin_from(c, "1.2.3.4", "/up");
+        let sqli = b"' OR 1=1 --";
+        assert_eq!(inspect(c, HOWDAH_SRC_GET, "q", sqli), HOWDAH_ALLOW);
+        assert_eq!(inspect(c, HOWDAH_SRC_GET, "q", sqli), HOWDAH_ALLOW);
+        assert_eq!(unsafe { howdah_request_end(c) }, HOWDAH_ALLOW);
+        let line = take(c).unwrap();
+        assert!(line.contains("\"action\":\"excepted\"") && line.contains("sql_injection"), "{line}");
+        assert!(take(c).is_none(), "one line per request");
+        begin_from(c, "1.2.3.4", "/up");
+        assert_eq!(inspect(c, HOWDAH_SRC_GET, "q", sqli), HOWDAH_ALLOW);
+        assert_eq!(inspect(c, HOWDAH_SRC_GET, "other", sqli), HOWDAH_BLOCK);
+        let line = take(c).unwrap();
+        assert!(line.contains("\"action\":\"block\""), "real hit replaces excepted: {line}");
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn layer1_standard_exception_by_client_cidr() {
+        let toml = "mode = \"block\"\n[limits]\nmax_input_key_bytes = 4\n\
+            [[exceptions]]\nrule = \"max_input_key_bytes\"\nclient_cidr = \"127.0.0.0/8\"\nreason = \"local tooling\"\n";
+        let c = init(toml);
+        begin_from(c, "127.0.0.1", "/x");
+        let name = b"a_very_long_key";
+        assert_eq!(unsafe { howdah_input_var(c, name.as_ptr() as _, name.len()) }, HOWDAH_ALLOW);
+        assert_eq!(unsafe { howdah_request_end(c) }, HOWDAH_ALLOW);
+        assert!(take(c).is_none());
+        begin_from(c, "203.0.113.9", "/x");
+        assert_eq!(unsafe { howdah_input_var(c, name.as_ptr() as _, name.len()) }, HOWDAH_BLOCK);
+        assert!(take(c).unwrap().contains("max_input_key_bytes"));
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn layer1_critical_is_never_excepted_even_by_layer_selector() {
+        // `limits` as a layer compiles (it covers the Standard rules) and the
+        // Critical flood limit still blocks for a matching client.
+        let toml = "mode = \"detect\"\n[limits]\nmax_parts = 1\n\
+            [[exceptions]]\nrule = \"limits\"\nclient_cidr = \"1.2.3.0/24\"\nreason = \"x\"\n";
+        let c = init(toml);
+        begin(c);
+        let two = b"--B\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nx\r\n--B\r\nContent-Disposition: form-data; name=\"b\"\r\n\r\nx\r\n--B--\r\n";
+        assert_eq!(feed(c, two), HOWDAH_BLOCK);
+        assert!(take(c).unwrap().contains("max_parts"));
+        unsafe { howdah_free(c) };
+        // And a direct Critical selector never loads: safe defaults instead.
+        let c = init("[[exceptions]]\nrule = \"max_parts\"\nuri_prefix = \"/\"\nreason = \"x\"");
+        assert_eq!(unsafe { howdah_exceptions_count(c) }, 0);
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn request_client_ip_fills_only_when_empty() {
+        let c = init("mode = \"detect\"");
+        begin_from(c, "", "/x");
+        let ip = "127.0.0.1";
+        unsafe { howdah_request_client_ip(c, ip.as_ptr() as _, ip.len()) };
+        let bogus = "<script>";
+        unsafe { howdah_request_client_ip(c, bogus.as_ptr() as _, bogus.len()) };
+        assert_eq!(unsafe { (*c).meta.client_ip.as_str() }, "127.0.0.1");
+        begin_from(c, "10.0.0.1", "/x");
+        unsafe { howdah_request_client_ip(c, ip.as_ptr() as _, ip.len()) };
+        assert_eq!(unsafe { (*c).meta.client_ip.as_str() }, "10.0.0.1");
+        begin_from(c, "", "/x");
+        unsafe { howdah_request_client_ip(c, bogus.as_ptr() as _, bogus.len()) };
+        assert_eq!(unsafe { (*c).meta.client_ip.as_str() }, "");
+        unsafe { howdah_request_client_ip(std::ptr::null_mut(), ip.as_ptr() as _, ip.len()) };
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn behavior_exception_by_script_glob_and_at_entry_points() {
+        let toml = "mode = \"detect\"\n[behavior]\nmode = \"block\"\ndeny_php_writes = true\ndeny_exec_dirs = [\"/var/www/uploads\"]\n\
+            [[exceptions]]\nrule = \"behavior.php_write\"\nscript = \"/var/www/app/**\"\nreason = \"template compiler\"\n";
+        let c = init(toml);
+        begin(c);
+        let target = "/var/www/uploads/x.php";
+        let call = |caller: &str| unsafe {
+            howdah_behavior_check_php_write_at(
+                c,
+                caller.as_ptr() as _,
+                caller.len(),
+                target.as_ptr() as _,
+                target.len(),
+                1,
+                std::ptr::null(),
+                0,
+            )
+        };
+        assert_eq!(call("/var/www/app/compile.php"), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        assert_eq!(call("/var/www/other/x.php"), HOWDAH_BLOCK);
+        assert!(take_sink(c).unwrap().contains("php_write"));
+        // upload_exec is not covered by a php_write exception.
+        let p = "/var/www/uploads/shell.php";
+        assert_eq!(
+            unsafe { howdah_behavior_check_exec_dir_at(c, p.as_ptr() as _, p.len(), std::ptr::null(), 0) },
+            HOWDAH_BLOCK
+        );
+        // binary / egress _at variants behave like the originals with no exception.
+        let prog = "xmrig";
+        let caller = "/var/www/uploads/shell.php";
+        assert_eq!(
+            unsafe {
+                howdah_behavior_check_binary_at(c, caller.as_ptr() as _, caller.len(), prog.as_ptr() as _, prog.len(), std::ptr::null(), 0)
+            },
+            HOWDAH_BLOCK
+        );
+        let host = "evil.test";
+        assert_eq!(
+            unsafe {
+                howdah_behavior_check_egress_at(c, caller.as_ptr() as _, caller.len(), host.as_ptr() as _, host.len(), std::ptr::null(), 0)
+            },
+            HOWDAH_BLOCK
+        );
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn ssrf_at_entry_points_honour_script_exception() {
+        let toml = "mode = \"detect\"\n[sinks.ssrf]\nmode = \"block\"\n\
+            [[exceptions]]\nrule = \"ssrf\"\nscript = \"/var/www/fetch.php\"\nreason = \"internal api\"\n";
+        let c = init(toml);
+        begin(c);
+        let (sch, host) = ("http", "127.0.0.1");
+        let call = |script: &str| unsafe {
+            howdah_sink_check_ssrf_at(
+                c,
+                sch.as_ptr() as _,
+                sch.len(),
+                host.as_ptr() as _,
+                host.len(),
+                80,
+                std::ptr::null(),
+                0,
+                script.as_ptr() as _,
+                script.len(),
+                std::ptr::null(),
+                0,
+            )
+        };
+        assert_eq!(call("/var/www/fetch.php"), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        assert_eq!(call("/var/www/other.php"), HOWDAH_BLOCK);
+        assert!(take_sink(c).unwrap().contains("ssrf"));
+        let s = "/var/www/fetch.php";
+        assert_eq!(unsafe { howdah_sink_ssrf_oversize_at(c, s.as_ptr() as _, s.len(), std::ptr::null(), 0) }, HOWDAH_ALLOW);
+        let o = "/var/www/other.php";
+        assert_eq!(unsafe { howdah_sink_ssrf_oversize_at(c, o.as_ptr() as _, o.len(), std::ptr::null(), 0) }, HOWDAH_BLOCK);
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn no_exceptions_means_byte_identical_behaviour() {
+        // The script-aware entry points with no [[exceptions]] give the same
+        // verdicts and lines as the originals.
+        let c = init("mode = \"detect\"\n[sinks]\nmode = \"block\"");
+        begin(c);
+        assert_eq!(sink_at(c, HOWDAH_SINK_COMMAND_EXEC, "system", b"id", "/a.php", None), HOWDAH_BLOCK);
+        let a = take_sink(c).unwrap();
+        assert_eq!(sink(c, HOWDAH_SINK_COMMAND_EXEC, "system", b"id"), HOWDAH_BLOCK);
+        let b = take_sink(c).unwrap();
+        let strip = |s: &str| -> serde_json::Value {
+            let mut v: serde_json::Value = serde_json::from_str(s).unwrap();
+            v.as_object_mut().unwrap().remove("ts");
+            v
+        };
+        assert_eq!(strip(&a), strip(&b));
+        assert_eq!(unsafe { howdah_exceptions_count(c) }, 0);
+        unsafe { howdah_free(c) };
     }
 }

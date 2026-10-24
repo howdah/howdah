@@ -109,6 +109,7 @@ fn action_name(a: Action) -> &'static str {
         Action::Allow => "allow",
         Action::Log => "log",
         Action::Block => "block",
+        Action::Excepted => "excepted",
     }
 }
 
@@ -283,8 +284,16 @@ mod tests {
     }
 
     #[test]
+    fn excepted_action_name() {
+        let mut r = rec();
+        r.action = Action::Excepted;
+        let v: serde_json::Value = serde_json::from_str(&log_line(&r)).unwrap();
+        assert_eq!(v["action"], "excepted");
+    }
+
+    #[test]
     fn all_actions_and_rules_serialize() {
-        for a in [Action::Allow, Action::Log, Action::Block] {
+        for a in [Action::Allow, Action::Log, Action::Block, Action::Excepted] {
             let mut r = rec();
             r.action = a;
             r.rule = RuleId::SelfTest;

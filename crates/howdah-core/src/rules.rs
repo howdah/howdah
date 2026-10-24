@@ -5,12 +5,15 @@ use crate::config::Mode;
 use crate::limits::{LimitHit, RuleId, Severity};
 
 /// What the caller should do. Variant order is load-bearing: the FFI layer
-/// maps Allow/Log/Block to 0/1/2.
+/// maps Allow/Log/Block to 0/1/2. `Excepted` is a log-only marker (a finding
+/// a `[[exceptions]]` entry turned off, written when `exceptions_log` is on)
+/// and crosses the ABI as Allow (0); `decide` never returns it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Allow,
     Log,
     Block,
+    Excepted,
 }
 
 /// Resolve a hit into an action. A per-rule override wins over the global

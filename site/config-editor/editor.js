@@ -102,7 +102,34 @@
       out += '\n[' + t.name + ']\n';
       t.lines.forEach(function (l) { out += l.text + '\n'; });
     });
+    // [[exceptions]] last: an array of tables cannot be followed by plain
+    // [table] headers' keys without ambiguity for a reader, and the core does
+    // not care about order. Keys are written in EXCEPTION_FIELDS order; empty
+    // strings are omitted (an unset facet is a wildcard, so "" must not be
+    // sent). Validation (required keys, facets per layer) is the core's job.
+    (state.exceptions || []).forEach(function (e) {
+      out += '\n[[exceptions]]\n';
+      SCHEMA_API.EXCEPTION_FIELDS.forEach(function (f) {
+        var v = e[f.key];
+        if (v === undefined || v === null) return;
+        v = String(v);
+        if (v === '') return;
+        out += f.key + ' = ' + tomlString(v) + '\n';
+      });
+    });
     return out;
+  }
+
+  // The [[exceptions]] entries of a core-parsed config as plain objects with
+  // only the known keys (the core already rejected anything else).
+  function exceptionsFrom(config) {
+    return (config.exceptions || []).map(function (e) {
+      var o = {};
+      SCHEMA_API.EXCEPTION_FIELDS.forEach(function (f) {
+        if (e[f.key] !== undefined && e[f.key] !== null) o[f.key] = String(e[f.key]);
+      });
+      return o;
+    });
   }
 
   // The php.ini snippet; always carries all three directives.
@@ -138,7 +165,8 @@
   // Build a state from the config the core parsed. Refuses (with the key
   // names) anything the form cannot represent, so a load-then-download round
   // trip never silently drops a setting. Today that is only [log] (any key:
-  // path, destination, syslog_*, exec, exec_rate_limit).
+  // path, destination, syslog_*, exec, exec_rate_limit). `[[exceptions]]` and
+  // `exceptions_log` are carried through verbatim.
   function loadFromCanonical(config, catalog) {
     var unsupported = [];
     var log = config.log || {};
@@ -146,7 +174,10 @@
     if (unsupported.length) return { unsupported: unsupported };
     var state = SCHEMA_API.defaultState(catalog);
     state['howdah.mode'] = config.mode;
-    if (config.on_invalid_config) state.on_invalid_config = config.on_invalid_config;
+    SCHEMA_API.SCHEMA.top.forEach(function (t) {
+      if (config[t.key] !== undefined && config[t.key] !== null) state[t.key] = config[t.key];
+    });
+    state.exceptions = exceptionsFrom(config);
     SCHEMA_API.SCHEMA.sections.forEach(function (sec) {
       sec.keys.forEach(function (k) {
         var path = [sec.id].concat(k.key.split('.'));
@@ -253,7 +284,7 @@
   }
 
   var api = {
-    emitToml: emitToml, emitIni: emitIni, loadFromCanonical: loadFromCanonical,
+    emitToml: emitToml, emitIni: emitIni, loadFromCanonical: loadFromCanonical, exceptionsFrom: exceptionsFrom,
     encodePayload: encodePayload, decodePayload: decodePayload, curlCommand: curlCommand,
     tomlString: tomlString, b64urlEncode: b64urlEncode,
     TOML_MAX: TOML_MAX, PAYLOAD_MAX: PAYLOAD_MAX, CFG_BASE: CFG_BASE

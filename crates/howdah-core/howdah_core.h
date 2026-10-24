@@ -386,4 +386,152 @@ void howdah_free_str(char *s);
  */
 void howdah_free(struct howdah_ctx *ctx);
 
+/* ---- scoped [[exceptions]] ---------------------------------------------
+ * The `_at` entry points are the originals plus the executing script (as PHP
+ * reports it) and an optional 32-byte SHA-256 of its bytes (`sha256_len` must
+ * be 32, else ignored), so `script` / `script_sha256` facets can match. The
+ * originals stay and behave as before. Appended by hand in the cbindgen
+ * style (cbindgen is not installed on the builder); regenerate when it is. */
+
+/**
+ * Set the request's client IP when it is still empty (the CLI built-in server
+ * has no `sapi_getenv`, so the glue hands over the `REMOTE_ADDR` variable it
+ * sees in the input filter). A non-empty IP already set is kept.
+ *
+ * # Safety
+ * `ctx` NULL or live; `ip` NULL or valid for `ip_len` bytes.
+ */
+void howdah_request_client_ip(struct howdah_ctx *ctx, const char *ip, size_t ip_len);
+
+/**
+ * Number of `[[exceptions]]` entries active in this context (0 for NULL).
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_exceptions_count(struct howdah_ctx *ctx);
+
+/**
+ * 1 iff the context's config has `exceptions_log = true`; 0 otherwise.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_exceptions_log(struct howdah_ctx *ctx);
+
+/**
+ * 1 iff some exception has a `script_sha256` facet that could apply to
+ * `script` (so the glue should hash the file); else 0.
+ *
+ * # Safety
+ * `ctx` NULL or live; `script` NULL or valid for `script_len` bytes.
+ */
+int32_t howdah_exceptions_want_hash(struct howdah_ctx *ctx,
+                                    const char *script,
+                                    size_t script_len);
+
+/**
+ * `howdah_sink_check` plus the executing script and an optional SHA-256.
+ *
+ * # Safety
+ * `ctx` NULL or live; every pointer NULL or valid for its length.
+ */
+int32_t howdah_sink_check_at(struct howdah_ctx *ctx,
+                             int32_t sink,
+                             const char *name,
+                             size_t name_len,
+                             const char *arg,
+                             size_t arg_len,
+                             const char *script,
+                             size_t script_len,
+                             const uint8_t *sha256,
+                             size_t sha256_len);
+
+/**
+ * `howdah_sink_check_ssrf` plus the executing script and an optional SHA-256.
+ *
+ * # Safety
+ * As `howdah_sink_check_ssrf`; `script`/`sha256` NULL or valid for their lengths.
+ */
+int32_t howdah_sink_check_ssrf_at(struct howdah_ctx *ctx,
+                                  const char *scheme,
+                                  size_t scheme_len,
+                                  const char *host,
+                                  size_t host_len,
+                                  uint16_t port,
+                                  const uint8_t *ips,
+                                  size_t ips_count,
+                                  const char *script,
+                                  size_t script_len,
+                                  const uint8_t *sha256,
+                                  size_t sha256_len);
+
+/**
+ * `howdah_sink_ssrf_oversize` plus the executing script and an optional SHA-256.
+ *
+ * # Safety
+ * `ctx` NULL or live; pointers NULL or valid for their lengths.
+ */
+int32_t howdah_sink_ssrf_oversize_at(struct howdah_ctx *ctx,
+                                     const char *script,
+                                     size_t script_len,
+                                     const uint8_t *sha256,
+                                     size_t sha256_len);
+
+/**
+ * `howdah_behavior_check_exec_dir` plus an optional SHA-256 of the file at
+ * `path` (the executing script for this check is the file itself).
+ *
+ * # Safety
+ * `ctx` NULL or live; pointers NULL or valid for their lengths.
+ */
+int32_t howdah_behavior_check_exec_dir_at(struct howdah_ctx *ctx,
+                                          const char *path,
+                                          size_t path_len,
+                                          const uint8_t *sha256,
+                                          size_t sha256_len);
+
+/**
+ * `howdah_behavior_check_binary` plus an optional SHA-256 of `caller`.
+ *
+ * # Safety
+ * `ctx` NULL or live; pointers NULL or valid for their lengths.
+ */
+int32_t howdah_behavior_check_binary_at(struct howdah_ctx *ctx,
+                                        const char *caller,
+                                        size_t caller_len,
+                                        const char *prog,
+                                        size_t prog_len,
+                                        const uint8_t *sha256,
+                                        size_t sha256_len);
+
+/**
+ * `howdah_behavior_check_egress` plus an optional SHA-256 of `caller`.
+ *
+ * # Safety
+ * `ctx` NULL or live; pointers NULL or valid for their lengths.
+ */
+int32_t howdah_behavior_check_egress_at(struct howdah_ctx *ctx,
+                                        const char *caller,
+                                        size_t caller_len,
+                                        const char *host,
+                                        size_t host_len,
+                                        const uint8_t *sha256,
+                                        size_t sha256_len);
+
+/**
+ * `howdah_behavior_check_php_write` plus an optional SHA-256 of `caller`.
+ *
+ * # Safety
+ * `ctx` NULL or live; pointers NULL or valid for their lengths.
+ */
+int32_t howdah_behavior_check_php_write_at(struct howdah_ctx *ctx,
+                                           const char *caller,
+                                           size_t caller_len,
+                                           const char *target,
+                                           size_t target_len,
+                                           int32_t is_write_mode,
+                                           const uint8_t *sha256,
+                                           size_t sha256_len);
+
 #endif  /* HOWDAH_CORE_H */

@@ -23,6 +23,13 @@ extern "C" {
     /// Write one line to the SAPI error log (`php_log_err`, see `shim.c`).
     pub fn howdah_sys_log_err(msg: *const ::std::ffi::c_char);
 
+    /// The executing PHP script's path (`zend_get_executed_filename()`, the
+    /// Layer-4 origin capture in `sink_hook.c`), exported so the glue can hand
+    /// it to the core for `[[exceptions]]` `script` facets. Engine-owned
+    /// string; never freed. PHP returns a bracketed placeholder (not a path)
+    /// when nothing is executing.
+    pub fn howdah_sys_current_script() -> *const ::std::ffi::c_char;
+
     /// Install the Layer-3 function-table sink hooks (see `sink_hook.c`). Call
     /// once at MINIT. `cb` decides each intercepted call, returning the action
     /// code (0 ALLOW / 1 LOG / 2 BLOCK); on BLOCK the C trampoline neutralizes

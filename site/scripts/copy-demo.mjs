@@ -13,7 +13,7 @@
 // core gained two config sections). It is built from this checkout by
 // `npm run wasm` (packaging/build-wasm.sh); pages.yml does that before the
 // site build. A missing wasm is a hard error here, never a silent fallback.
-import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -46,4 +46,20 @@ for (const f of cfgFiles) {
 // Public signing key -> public/key.asc
 copyFileSync(resolve(here, '../../packaging/howdah-release-signing.asc'), resolve(here, '../public/key.asc'));
 
-console.log(`demo assets copied: ${files.join(', ')} -> site/public/demo/; ${cfgFiles.join(', ')} -> site/public/config/; key.asc -> site/public/`);
+// Application profiles (profiles/*.toml) -> public/profiles/, so the config
+// editor's "start from an application profile" can fetch them and the docs
+// can link https://howdah.org/profiles/<app>.toml. The repository copy is the
+// source of truth; a core test parses every one.
+const profSrc = resolve(here, '../../profiles');
+const profDst = resolve(here, '../public/profiles');
+mkdirSync(profDst, { recursive: true });
+const profFiles = readdirSync(profSrc).filter((f) => f.endsWith('.toml')).sort();
+if (!profFiles.length) {
+  console.error('no profiles/*.toml found');
+  process.exit(1);
+}
+for (const f of profFiles) {
+  copyFileSync(resolve(profSrc, f), resolve(profDst, f));
+}
+
+console.log(`demo assets copied: ${files.join(', ')} -> site/public/demo/; ${cfgFiles.join(', ')} -> site/public/config/; key.asc -> site/public/; ${profFiles.join(', ')} -> site/public/profiles/`);

@@ -249,16 +249,17 @@ jobs:
       - run: sh packaging/reproducible.test.sh
       - run: sh packaging/repo/attest-subjects.test.sh
 
-  # Dependency hygiene, reported on every PR, never gating a merge: RustSec
-  # advisories, licences, bans and sources for the Rust workspace (deny.toml),
-  # and npm audit of the site's production dependencies (the Astro site and
-  # the cfg.howdah.org worker share site/package-lock.json). A finding shows as
-  # a failed job here; fix it in its own change.
+  # Dependency hygiene on every PR. cargo deny (RustSec advisories, licences,
+  # bans and sources for the Rust workspace; policy in deny.toml) is a hard
+  # check: it passes today, and a new finding turns the job red. npm audit of
+  # the site's production dependencies (the Astro site and the cfg.howdah.org
+  # worker share site/package-lock.json) is reported, not gating: its findings
+  # go to the job summary and a ::warning:: annotation, and the step's
+  # continue-on-error keeps the job green. Fix those in their own change.
   deps:
     name: dependency checks (cargo deny, npm audit)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install cargo-deny (pinned release, sha256-verified)
@@ -278,7 +279,12 @@ jobs:
         if: ${{ !cancelled() }}
         with:
           node-version: 22
-      - name: npm audit (site and worker, production dependencies)
+      # Reported, not gating (see above). scripts/audit-summary.mjs writes the
+      # counts by severity and every advisory to the job summary, emits one
+      # ::warning:: annotation, and exits 1 on findings (2 if npm audit gave no
+      # report), which marks this step, not the job, as failed.
+      - name: npm audit (site and worker, production dependencies; not gating)
         if: ${{ !cancelled() }}
+        continue-on-error: true
         working-directory: site
-        run: npm audit --omit=dev
+        run: npm audit --omit=dev --json | node scripts/audit-summary.mjs

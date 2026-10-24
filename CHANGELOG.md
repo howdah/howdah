@@ -207,13 +207,19 @@ All notable changes to Howdah are documented here. The format follows
   scripts and reports `MATCH` or `MISMATCH`, with the `howdah.so` sha256 from
   both tarballs. Against 1.4.0 PHP 7.4 the tarball differs (it predates this)
   and the `howdah.so` is byte-identical.
-- CI: a non-blocking `deps` job runs `cargo deny check` (advisories, licences,
-  bans, sources; policy in `deny.toml`) and `npm audit --omit=dev` for the
-  site and worker. At introduction cargo deny passes (warnings only: three
-  duplicate crate versions, and the workspace path dependencies counted as
-  wildcards); npm audit reports astro 5.18.2 (critical), sharp, zod and
-  zod-to-ts (high) and esbuild (low), all fixed only by astro 7, left for a
-  separate change.
+- CI: a `deps` job. `cargo deny check` (advisories, licences, bans, sources;
+  policy in `deny.toml`) is a hard check; it passes today, with warnings only
+  (three duplicate crate versions, and the workspace path dependencies
+  counted as wildcards). `npm audit --omit=dev` for the site and worker is
+  reported but does not gate: `site/scripts/audit-summary.mjs` writes the
+  counts by severity and every advisory to the job summary and adds one
+  warning annotation, and the step's `continue-on-error` keeps the job green.
+  At introduction it reports 5 vulnerable packages (1 critical, 3 high,
+  1 low) and 16 advisories: astro 5.18.2 critical GHSA-26w7-cxv4-gfx2 (remote
+  code execution through AVIF image optimisation) plus 2 high and 8 moderate
+  or low astro advisories; sharp (libvips, libheif, librsvg), zod and
+  zod-to-ts high; esbuild low. All of them need the upgrade to astro 7, a
+  breaking change and a separate item for the owner.
 
 ### Changed
 - `lab/integration/selftest_container.sh` takes `PREINSTALLED=1` to test a PHP

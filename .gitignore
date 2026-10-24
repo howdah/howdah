@@ -9,7 +9,11 @@
 .DS_Store
 # Lab/build artifacts
 /lab/**/vendor
+/lab/integration/.matrix-out
 /packaging/out
+# cargo-fuzz crash inputs and corpora
+/fuzz/artifacts
+/fuzz/corpus
 # Site build
 /site/dist
 /site/node_modules

@@ -32,6 +32,7 @@
  */
 #include "main/php.h"
 #include "Zend/zend_API.h"
+#include "Zend/zend_execute.h"
 
 #include <string.h>
 #include <stddef.h>
@@ -66,6 +67,19 @@ static howdah_ssrf_armed_t g_armed = NULL;
 static void *g_ctx = NULL;
 
 typedef void (*howdah_zif)(INTERNAL_FUNCTION_PARAMETERS);
+
+/* The currently-executing PHP script path, for the Layer-4 origin. 5.x threads
+ * TSRMLS and returns `char *`; 7/8 take no args and return `const char *`. A
+ * local duplicate of sink_hook.c's helper so the egress / php-write paths here
+ * need no cross-TU call. Spike-proven on 5.4/5.6/7.4/8.1/8.4. */
+static const char *howdah_current_script(void) {
+#if PHP_VERSION_ID >= 70000
+    return zend_get_executed_filename();
+#else
+    TSRMLS_FETCH();
+    return zend_get_executed_filename(TSRMLS_C);
+#endif
+}
 
 /* ARG(n, var): the n-th call argument (dereferenced), or NULL if absent. */
 #if PHP_VERSION_ID >= 70000
@@ -144,8 +158,11 @@ static size_t resolve_host(const char *host, size_t hlen, unsigned char *recs) {
 }
 
 /* ---- core per-call check ------------------------------------------------ */
-/* Returns 1 iff the call must be blocked. */
-static int ssrf_should_block(const char *arg, size_t arglen, int scheme_required) {
+/* Returns 1 iff the call must be blocked. `origin`/`origin_len` are the calling
+ * script path (Layer-4 egress "caller"); may be NULL/0 (the behavior glue then
+ * sees an empty caller). */
+static int ssrf_should_block(const char *arg, size_t arglen, int scheme_required,
+                             const char *origin, size_t origin_len) {
     unsigned char hostbuf[HOWDAH_HOST_MAX + 1];
     unsigned char local[HOWDAH_MAX_IPS * HOWDAH_REC];
     const unsigned char *ips = NULL;
@@ -201,8 +218,23 @@ static int ssrf_should_block(const char *arg, size_t arglen, int scheme_required
         /* cache full: just don't cache (bounded, drop on overflow) */
     }
 
-    return g_decide(g_ctx, scheme, scheme_len, (const char *)hostbuf, hlen, port,
-                    count ? ips : NULL, count) == HOWDAH_ACTION_BLOCK;
+    {
+        /* SSRF verdict: g_decide's signature is UNCHANGED (Ruling 4) — no origin
+         * threaded into it. */
+        int ssrf_block = g_decide(g_ctx, scheme, scheme_len, (const char *)hostbuf,
+                                  hlen, port, count ? ips : NULL, count)
+                         == HOWDAH_ACTION_BLOCK;
+        /* Layer-4 egress (Ruling 4): a parallel behavior check on the same host,
+         * carrying the calling-script origin. Block iff EITHER verdict blocks.
+         * When behavior-egress is the only armed facet, Task 6's widened armed
+         * glue lets this path run (line 160 above was not short-circuited). */
+        int beh_block = 0;
+        if (howdah_g_behavior_egress) {
+            beh_block = howdah_g_behavior_egress(g_ctx, origin, origin_len,
+                            (const char *)hostbuf, hlen) == HOWDAH_ACTION_BLOCK;
+        }
+        return ssrf_block || beh_block;
+    }
 }
 
 /* ---- URL-first-arg sinks ------------------------------------------------- */
@@ -211,20 +243,101 @@ static int ssrf_should_block(const char *arg, size_t arglen, int scheme_required
     static void howdah_hook_##cname(INTERNAL_FUNCTION_PARAMETERS) {            \
         zval *a;                                                               \
         HOWDAH_ARG(1, a);                                                      \
-        if (HOWDAH_IS_STR(a)                                                   \
-            && ssrf_should_block(Z_STRVAL_P(a), Z_STRLEN_P(a), (scheme_required))) { \
-            RETVAL_FALSE;                                                      \
-            return; /* neutralize: do not call the original */                 \
+        if (HOWDAH_IS_STR(a)) {                                                \
+            const char *_org = howdah_current_script();                        \
+            if (ssrf_should_block(Z_STRVAL_P(a), Z_STRLEN_P(a), (scheme_required), \
+                                  _org, _org ? strlen(_org) : 0)) {            \
+                RETVAL_FALSE;                                                  \
+                return; /* neutralize: do not call the original */             \
+            }                                                                  \
         }                                                                      \
         howdah_orig_##cname(INTERNAL_FUNCTION_PARAM_PASSTHRU);                 \
     }
 
 HOWDAH_DEFINE_URL_SINK(file_get_contents, 1)
-HOWDAH_DEFINE_URL_SINK(fopen, 1)
 HOWDAH_DEFINE_URL_SINK(get_headers, 1)
 HOWDAH_DEFINE_URL_SINK(fsockopen, 0)
 HOWDAH_DEFINE_URL_SINK(pfsockopen, 0)
 HOWDAH_DEFINE_URL_SINK(stream_socket_client, 0)
+
+/* 1 iff a fopen mode string selects a write (any of w/a/x/c/+). Read-only ("r"
+ * / "rb") yields 0. Scanned, never logged. */
+static int howdah_mode_is_write(const char *mode, size_t len) {
+    size_t i;
+    for (i = 0; i < len; i++) {
+        char c = mode[i];
+        if (c == 'w' || c == 'a' || c == 'x' || c == 'c' || c == '+') {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* fopen (Ruling 5): fopen is ALREADY swapped by howdah_install_ssrf_hooks, so it
+ * gets a bespoke trampoline (NOT a second swap) that runs the SSRF egress check
+ * THEN, when the Layer-4 php-write facet is armed, a php-write check. arg1 =
+ * path/URL (also the SSRF target), arg2 = mode string. Final action = max(ssrf,
+ * php-write); BLOCK neutralizes (RETVAL_FALSE). */
+static howdah_zif howdah_orig_fopen = NULL;
+static void howdah_hook_fopen(INTERNAL_FUNCTION_PARAMETERS) {
+    zval *a;
+    int block = 0;
+    HOWDAH_ARG(1, a);
+    if (HOWDAH_IS_STR(a)) {
+        const char *org = howdah_current_script();
+        size_t orglen = org ? strlen(org) : 0;
+        if (ssrf_should_block(Z_STRVAL_P(a), Z_STRLEN_P(a), 1, org, orglen)) {
+            block = 1;
+        }
+        if (!block && howdah_g_behavior_php_write && howdah_g_behavior_armed
+            && howdah_g_behavior_armed(NULL, HOWDAH_BEHAVIOR_PHP_WRITE)) {
+            zval *m;
+            int is_write = 0;
+            HOWDAH_ARG(2, m);
+            if (HOWDAH_IS_STR(m)) {
+                is_write = howdah_mode_is_write(Z_STRVAL_P(m), Z_STRLEN_P(m));
+            }
+            if (howdah_g_behavior_php_write(NULL, org, orglen, Z_STRVAL_P(a),
+                    Z_STRLEN_P(a), is_write) == HOWDAH_ACTION_BLOCK) {
+                block = 1;
+            }
+        }
+    }
+    if (block) {
+        RETVAL_FALSE;
+        return;
+    }
+    howdah_orig_fopen(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
+
+/* ---- Layer-4 php-write-only sinks ---------------------------------------- */
+/* These are NOT SSRF sinks: each writes a file to disk, so Layer-4 swaps them
+ * (via howdah_install_behavior_hooks) to check the written target. `argn` is the
+ * 1-based target argument; is_write_mode is always 1 (these are inherently
+ * writes). Fail-open on a NULL callback / disarmed facet / non-string target. */
+#define HOWDAH_DEFINE_PHP_WRITE_SINK(cname, argn)                              \
+    static howdah_zif howdah_orig_##cname = NULL;                              \
+    static void howdah_hook_##cname(INTERNAL_FUNCTION_PARAMETERS) {            \
+        if (howdah_g_behavior_php_write && howdah_g_behavior_armed             \
+            && howdah_g_behavior_armed(NULL, HOWDAH_BEHAVIOR_PHP_WRITE)) {     \
+            zval *t;                                                           \
+            HOWDAH_ARG((argn), t);                                             \
+            if (HOWDAH_IS_STR(t)) {                                            \
+                const char *_org = howdah_current_script();                    \
+                if (howdah_g_behavior_php_write(NULL, _org,                    \
+                        _org ? strlen(_org) : 0, Z_STRVAL_P(t), Z_STRLEN_P(t), \
+                        1) == HOWDAH_ACTION_BLOCK) {                           \
+                    RETVAL_FALSE;                                              \
+                    return;                                                    \
+                }                                                              \
+            }                                                                  \
+        }                                                                      \
+        howdah_orig_##cname(INTERNAL_FUNCTION_PARAM_PASSTHRU);                 \
+    }
+
+HOWDAH_DEFINE_PHP_WRITE_SINK(file_put_contents, 1)
+HOWDAH_DEFINE_PHP_WRITE_SINK(move_uploaded_file, 2)
+HOWDAH_DEFINE_PHP_WRITE_SINK(rename, 2)
 
 /* ---- curl handle -> URL map ---------------------------------------------- */
 #define HOWDAH_CURLOPT_URL 10002
@@ -393,10 +506,12 @@ static void howdah_hook_curl_exec(INTERNAL_FUNCTION_PARAMETERS) {
     size_t ulen;
     HOWDAH_ARG(1, h);
     /* No URL known for the handle: chain unguarded (documented gap). */
-    if (handle_key(h, &k) && map_get(k, &u, &ulen)
-        && ssrf_should_block(u, ulen, 0)) {
-        RETVAL_FALSE;
-        return;
+    if (handle_key(h, &k) && map_get(k, &u, &ulen)) {
+        const char *org = howdah_current_script();
+        if (ssrf_should_block(u, ulen, 0, org, org ? strlen(org) : 0)) {
+            RETVAL_FALSE;
+            return;
+        }
     }
     howdah_orig_curl_exec(INTERNAL_FUNCTION_PARAM_PASSTHRU);
 }
@@ -444,6 +559,29 @@ void howdah_install_ssrf_hooks(howdah_ssrf_decide_t decide, howdah_ssrf_armed_t 
     HOWDAH_SSRF_SWAP(curl_reset, "curl_reset");
     HOWDAH_SSRF_SWAP(curl_close, "curl_close");
     HOWDAH_SSRF_SWAP(curl_exec, "curl_exec");
+}
+
+/* Install the Layer-4 behavior hooks. Sets the shared behavior callback pointers
+ * (used by both sink_hook.c and here) AND function-table-swaps the php-write
+ * sinks file_put_contents / move_uploaded_file / rename. fopen is deliberately
+ * NOT swapped here — howdah_install_ssrf_hooks already swapped it, and its
+ * bespoke trampoline's php-write branch goes live as soon as these callbacks are
+ * set. Call once at MINIT, after howdah_install_ssrf_hooks, so fopen's original
+ * handler is this file's SSRF trampoline (not re-captured). A NULL callback
+ * leaves that facet unguarded (fail-open). */
+void howdah_install_behavior_hooks(howdah_behavior_armed_t armed,
+                                   howdah_behavior_exec_dir_t exec_dir,
+                                   howdah_behavior_binary_t binary,
+                                   howdah_behavior_egress_t egress,
+                                   howdah_behavior_php_write_t php_write) {
+    howdah_g_behavior_armed = armed;
+    howdah_g_behavior_exec_dir = exec_dir;
+    howdah_g_behavior_binary = binary;
+    howdah_g_behavior_egress = egress;
+    howdah_g_behavior_php_write = php_write;
+    HOWDAH_SSRF_SWAP(file_put_contents, "file_put_contents");
+    HOWDAH_SSRF_SWAP(move_uploaded_file, "move_uploaded_file");
+    HOWDAH_SSRF_SWAP(rename, "rename");
 }
 
 /* Clear all per-request state: the curl handle->URL map, the resolution cache

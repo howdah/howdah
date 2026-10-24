@@ -1,10 +1,12 @@
 ---
 import Layout from '../layouts/Layout.astro';
 import coverage from '../data/coverage.json';
-import { REPO, PKG } from '../lib/site';
+import { REPO, PKG, VERSION } from '../lib/site';
 
 const rows = coverage.rows;
 const ranDate = (coverage.generated || '').slice(0, 10);
+// Display the major.minor (e.g. "1.2") so the install button tracks VERSION.
+const shortVersion = VERSION.split('.').slice(0, 2).join('.');
 
 // Four-layer model (design §3). Layer 1 shipped in 1.0, Layer 2 in 1.1,
 // Layer 3 in 1.2 (status 'released', log-only); 4 is the roadmap.
@@ -40,7 +42,7 @@ const compare = [
       <p class="lede">Upload-part floods are the shape of the PHP2Shell attack. Howdah is a firewall that loads into PHP itself, so it protects even end-of-life PHP (5.4 to 8.1) that will never get the official fix — on the versions tested in the coverage table.</p>
       <p class="fine">Built for sysadmins who run PHP on their own servers, including servers stuck on old PHP. Howdah is defensive only: it recognizes and refuses abusive requests, nothing else.</p>
       <div class="cta">
-        <a class="btn primary" href="/install/">Install Howdah 1.1</a>
+        <a class="btn primary" href="/install/">Install Howdah {shortVersion}</a>
         <a class="btn ghost" href="/coverage/">See exactly what has been tested</a>
         <a class="btn ghost" href="/demo/">Try the demo</a>
       </div>

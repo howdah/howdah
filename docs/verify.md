@@ -170,9 +170,10 @@ belongs to the primary key above, clones the tag, runs that tag's own
 `packaging/build-release.sh` for the minor in a freshly built release image,
 and compares. It prints `MATCH` (exit 0) or `MISMATCH` (exit 1) and the sha256
 of the `howdah.so` inside both tarballs; on a mismatch it keeps both files for
-`diffoscope`. It needs Docker, git, curl, gpg and bash, a few GB of disk, and
-about five minutes per x86_64 minor (aarch64 on an x86_64 host runs under
-QEMU and is much slower).
+`diffoscope`. It needs Docker, git, curl, gpg and bash and a few GB of disk.
+On an x86_64 machine the first run takes five to ten minutes, most of it
+building the release image (`KEEP_IMAGE=1` reuses it next time); aarch64 on
+an x86_64 host runs under QEMU and is much slower.
 
 ### What is pinned
 

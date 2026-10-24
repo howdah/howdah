@@ -6,6 +6,24 @@
 **Builds on:** `docs/superpowers/specs/2026-10-23-howdah-layer3-sink-hardening-design.md` (Layer 3 / Howdah 1.2 — the posture, mode-independence, and privacy rules below are carried from it verbatim).
 **Ships:** after 1.2, as **Howdah 1.3** — the Layer-3 fast-follow it named in §8.
 
+> **Builder-check resolutions (binding — the plan refines this design):** a fresh
+> builder review surfaced 9 load-bearing items, all resolved in the plan:
+> (1) **phar AND ssrf default OFF** (opt-in), not detect — avoids noisy phar logs
+> and DNS latency on stock installs. (2) **Install at a first-RINIT process-once
+> guard, gated on the sink being armed** — because on Debian/Ondřej curl & phar
+> are shared extensions loaded AFTER howdah (equal priority 20), so a MINIT install
+> would silently no-op; config is process-static so gating is safe. (3) phar routes
+> through the **existing `howdah_sink_check`** (new PHAR arm), not a new FFI entry.
+> (4) SSRF uses a **two-phase FFI**: `howdah_sink_ssrf_armed` (no logging) then one
+> `howdah_sink_check_ssrf`, with a pinned 17-byte IP-record ABI. (5) `parse_host`
+> takes a **HostForm** (SchemeRequired vs BareHostOk) so local paths aren't resolved
+> and schemeless curl hosts are. (6) the 5.x compile-swap is **scoped** to real
+> include/eval (not the main script, auto_prepend_file, create_function, assert).
+> (7) SSRF detail goes in the existing **`reason`** log field (no Layer-1 schema
+> change). (8) the curl handle map lives **in C**, lifecycle is lab-tested.
+> (9) coverage states provenance ("verified on 5.4/5.6/7.4/8.3/8.5"). See
+> `docs/superpowers/plans/2026-10-24-howdah-layer3-fast-follow.md`.
+
 ---
 
 ## 1. Intent — the why
@@ -276,17 +294,33 @@ allow_hosts = ["10.1.2.3", "192.168.50.0/24", "internal-api.svc"]
 ## 7. Honest limitations (stated in the design, docs, and coverage)
 
 1. **phar on PHP 8.x is detection/denial, not deserialization coverage** (§5.2).
-2. **Direct `new Phar($path)` / `getMetadata()` bypass the wrapper** — residual
-   gap, documented; needs a constructor swap (deferred).
+2. **Direct Phar API bypasses the wrapper** — `new Phar($path)`, `PharData`,
+   `Phar::loadPhar`, `Phar::mapPhar`, `Phar::getMetadata()` unserialize before any
+   wrapper op. Residual gap, documented; needs a `Phar::__construct` method-table
+   swap (deferred). Also: `stream_wrapper_unregister('phar')` +
+   `stream_wrapper_restore('phar')` is untested and could drop the proxy; another
+   extension re-registering "phar" after us, or a statically-built phar, fails open.
 3. **5.x include under a warm opcache:** a cache hit is served without calling
    `zend_compile_file`, so established app files are not re-inspected. eval is
    never cached (full coverage). include on **7.0+** is the runtime opcode
    handler and is opcache-immune — this gap is **5.x-only**. Stated in the matrix.
 4. **SSRF is best-effort, resolve-at-check-time detection**, not a connection-
-   time boundary: DNS rebinding, redirects to a new host, `curl_multi_*`,
-   `CURLOPT_RESOLVE`/`CONNECT_TO`, and non-string `CURLOPT_URL` are known bypasses.
-5. **SSRF latency:** enabling adds a `getaddrinfo` per distinct outbound host
-   (cached per request). Default off for this reason.
+   time boundary. Known bypasses: DNS rebinding, redirects to a new host,
+   `curl_multi_*` (not hooked), `CURLOPT_RESOLVE`/`CONNECT_TO` retargeting, a
+   non-string or absent `CURLOPT_URL`.
+5. **Not every outbound primitive is hooked.** Covered: `file_get_contents`,
+   `fopen`, `get_headers`, `fsockopen`, `pfsockopen`, `stream_socket_client`, and
+   curl via the handle map. **NOT covered** (documented): `copy`, `file`,
+   `readfile`, `SoapClient`, `DOMDocument::load*`, `simplexml_load_file`.
+6. **SSRF neutralize side effects:** a blocked `fsockopen`/`stream_socket_client`
+   leaves the by-ref `$errno`/`$errstr` unset; a blocked `curl_exec` returns false
+   with `curl_errno` 0 (so `curl_error()` is empty).
+7. **SSRF latency:** enabling adds a `getaddrinfo` per distinct outbound host
+   (cached per request, **no timeout** — a DNS stall blocks the call). Default off
+   for this reason.
+8. **Literal-IP decode mirrors glibc `inet_aton`;** libcurl and musl parse some
+   encoded forms differently. Resolved IPs are authoritative; literal decode is
+   belt-and-braces.
 
 ## 8. Review focus (inputs the spec implies; each pinned to a task's tests)
 
@@ -307,11 +341,15 @@ allow_hosts = ["10.1.2.3", "192.168.50.0/24", "internal-api.svc"]
 
 ## 9. Versions
 
-| sink / mechanism | 5.4–5.6 | 7.0–8.5 |
-|---|---|---|
-| phar:// (wrapper proxy) | detect/deny + **5.x/7.x deserialization** | detect/deny (8.x: **no desercustom claim**) |
-| SSRF (fn-swap + curl map) | yes (opt-in) | yes (opt-in) |
-| include/eval 5.x (compile swap) | **now active** (include: opcache caveat; eval: full) | n/a (opcode handler, already active) |
+| sink / mechanism | 5.4–5.6 | 7.0–7.4 | 8.0–8.5 |
+|---|---|---|---|
+| phar:// (wrapper proxy) | deny/detect + **deserialization** | deny/detect + **deserialization** | deny/detect **only** (8.0 removed auto-unserialize; **no deserialization claim**) |
+| SSRF (fn-swap + curl map) | yes (opt-in, off by default) | yes (opt-in) | yes (opt-in) |
+| include/eval (compile swap on 5.x; opcode handler 7.0+) | **now active** (include: opcache caveat; eval: full) | active (opcode handler) | active (opcode handler) |
+
+Provenance: mechanisms verified on **PHP 5.4, 5.6, 7.4, 8.3, 8.5**; other minors
+build and are expected to work but are not independently verified. A debug-build
+memory-leak review is a release gate (the 5.x spike ran on non-debug images).
 
 ## 10. Testing
 

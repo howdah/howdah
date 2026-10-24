@@ -13,6 +13,8 @@ pub enum SinkId {
     Include,
     Eval,
     Unserialize,
+    Phar,
+    Ssrf,
 }
 
 /// Policy outcome before mode resolution. `Allow` = allowlisted / benign;
@@ -80,6 +82,33 @@ pub fn include_allowed(path: &[u8], allow_paths: &[String]) -> bool {
     let Some(p) = normalize(path) else {
         return false;
     };
+    allow_paths.iter().any(|a| match normalize(a.as_bytes()) {
+        Some(base) => p.len() >= base.len() && p[..base.len()] == base[..],
+        None => false,
+    })
+}
+
+/// True iff a `phar://` URL names an archive under one of `allow_paths`.
+/// The scheme is matched ASCII-case-insensitively; the remainder must be
+/// absolute, is lexically normalized, and is truncated after the first
+/// `.phar` segment (the in-archive path is irrelevant) before the
+/// component-wise prefix compare. Empty `allow_paths` returns false.
+pub fn phar_allowed(url: &[u8], allow_paths: &[String]) -> bool {
+    const SCHEME: &[u8] = b"phar://";
+    let rest = if url.len() >= SCHEME.len() && url[..SCHEME.len()].eq_ignore_ascii_case(SCHEME) {
+        &url[SCHEME.len()..]
+    } else {
+        url
+    };
+    let Some(mut p) = normalize(rest) else {
+        return false;
+    };
+    if let Some(i) = p
+        .iter()
+        .position(|c| c.len() >= 5 && c[c.len() - 5..].eq_ignore_ascii_case(b".phar"))
+    {
+        p.truncate(i + 1);
+    }
     allow_paths.iter().any(|a| match normalize(a.as_bytes()) {
         Some(base) => p.len() >= base.len() && p[..base.len()] == base[..],
         None => false,
@@ -164,6 +193,41 @@ mod tests {
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn phar_allowed_strips_scheme() {
+        assert!(phar_allowed(b"phar:///srv/app/a.phar/x.php", &s(&["/srv/app"])));
+        assert!(!phar_allowed(b"phar:///tmp/a.phar/x.php", &s(&["/srv/app"])));
+    }
+
+    #[test]
+    fn phar_allowed_uppercase_scheme() {
+        assert!(phar_allowed(b"PHAR:///srv/app/a.phar", &s(&["/srv/app"])));
+        assert!(phar_allowed(b"PhAr:///srv/app/a.phar", &s(&["/srv/app"])));
+    }
+
+    #[test]
+    fn phar_allowed_prefix_under_allow() {
+        assert!(phar_allowed(b"phar:///srv/app/sub/../lib/a.phar/in", &s(&["/srv/app/lib"])));
+        assert!(!phar_allowed(b"phar:///srv/application/a.phar", &s(&["/srv/app"])));
+    }
+
+    #[test]
+    fn phar_allowed_relative_false() {
+        assert!(!phar_allowed(b"phar://a.phar", &s(&["/srv/app"])));
+        assert!(!phar_allowed(b"phar://srv/app/a.phar", &s(&["/srv/app"])));
+    }
+
+    #[test]
+    fn phar_allowed_in_archive_dotdot_false() {
+        assert!(!phar_allowed(b"phar:///srv/app/a.phar/../../evil.phar", &s(&["/srv/app"])));
+        assert!(!phar_allowed(b"phar:///srv/app/../../tmp/a.phar", &s(&["/srv/app"])));
+    }
+
+    #[test]
+    fn phar_allowed_empty_allow_false() {
+        assert!(!phar_allowed(b"phar:///srv/app/a.phar", &[]));
     }
 
     #[test]

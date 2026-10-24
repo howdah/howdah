@@ -150,6 +150,8 @@ impl SinkConfig {
             SinkId::Include => self.include.mode,
             SinkId::Eval => self.eval.mode,
             SinkId::Unserialize => self.unserialize.mode,
+            // TODO(task 3): per-sink mode knobs for phar/ssrf; section mode until then.
+            SinkId::Phar | SinkId::Ssrf => None,
         };
         sub.unwrap_or(self.mode)
     }

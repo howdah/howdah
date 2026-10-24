@@ -45,6 +45,8 @@ fn rule_name(r: RuleId) -> &'static str {
         RuleId::CommandExec => "command_exec",
         RuleId::Include => "include",
         RuleId::Eval => "eval",
+        RuleId::Phar => "phar",
+        RuleId::Ssrf => "ssrf",
         RuleId::Unserialize => "unserialize",
     }
 }
@@ -107,6 +109,12 @@ mod tests {
             uri: "/upload.php?a=1\n\"x\"".into(),
             reason: "too many\nparts".into(),
         }
+    }
+
+    #[test]
+    fn rule_name_phar_ssrf() {
+        assert_eq!(rule_name(RuleId::Phar), "phar");
+        assert_eq!(rule_name(RuleId::Ssrf), "ssrf");
     }
 
     #[test]

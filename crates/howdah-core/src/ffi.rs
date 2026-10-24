@@ -127,6 +127,8 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::Include => "file include sink called with a disallowed path",
         RuleId::Eval => "eval sink invoked",
         RuleId::Unserialize => "unserialize sink invoked on untrusted data",
+        RuleId::Phar => "phar:// stream wrapper access outside the allowlist",
+        RuleId::Ssrf => "outbound request to a disallowed destination",
     }
 }
 
@@ -299,6 +301,9 @@ impl howdah_ctx {
                     .then(|| format!("include path outside allowlist via {n}")),
             ),
             SinkId::Eval => (RuleId::Eval, Some(format!("dynamic code evaluation via {n}"))),
+            // TODO(task 4): real phar/ssrf policy evaluation; inert stubs until then.
+            SinkId::Phar => (RuleId::Phar, None),
+            SinkId::Ssrf => (RuleId::Ssrf, None),
             SinkId::Unserialize => {
                 let scan = unserialize_classes(arg);
                 let allow = &sinks.unserialize.allow_classes;

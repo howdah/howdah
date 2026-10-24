@@ -18,7 +18,9 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const src = resolve(here, '../demo');
+// HOWDAH_DEMO_SRC lets the test point this at an empty directory instead of
+// hiding the real wasm from the other tests running in parallel.
+const src = process.env.HOWDAH_DEMO_SRC ? resolve(process.env.HOWDAH_DEMO_SRC) : resolve(here, '../demo');
 const dst = resolve(here, '../public/demo');
 
 if (!existsSync(resolve(src, 'howdah_wasm.wasm'))) {

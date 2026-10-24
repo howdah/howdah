@@ -263,6 +263,44 @@ b=$(block "$(detect_in "$L/alpine-arm" aarch64)" "$L/alpine-arm/usr/local/bin/ph
 has "$b" '  matching release asset: none: musl builds are x86_64 only' && \
   has "$b" '  howdah package: none: musl builds are x86_64 only'
 check "aarch64 musl: no asset, no image (never a glibc tarball)" $?
+# musl's loader prints its version when run with no arguments (exit 1)
+fake_musl() { # <root> <version>
+  mkdir -p "$1/lib"
+  printf '#!/bin/sh\nprintf "musl libc (x86_64)\\nVersion %s\\nDynamic Program Loader\\n" >&2\nexit 1\n' "$2" > "$1/lib/ld-musl-x86_64.so.1"
+  chmod +x "$1/lib/ld-musl-x86_64.so.1"
+}
+# php:7.1-fpm-alpine: Alpine 3.10, musl 1.1.22 (older than the musl build's 1.1.24 floor)
+fake_php "$L/alpine71" /usr/local/bin/php 7.1.33 20160303 disabled \
+  /usr/local/lib/php/extensions/no-debug-non-zts-20160303 /usr/local/etc/php/conf.d
+fake_musl "$L/alpine71" 1.1.22
+out=$(detect_in "$L/alpine71")
+has "$out" 'host libc: musl 1.1.22'; check "musl host prints the musl version" $?
+b=$(block "$out" "$L/alpine71/usr/local/bin/php")
+has "$b" "  matching release asset: none: Howdah's musl build needs musl 1.1.24 or newer (Alpine 3.11+); this is musl 1.1.22"
+check "musl older than 1.1.24: no tarball offered (it would not load)" $?
+has "$b" '  howdah package: no -alpine image for PHP 7.1 (its Alpine base has musl older than 1.1.24): use the Debian image ghcr.io/howdah/howdah:<VERSION>-php7.1'
+check "php:7.1-fpm-alpine: pointed at the Debian image" $?
+# the same minor with an unreadable musl version: still no -alpine image for 7.1
+fake_php "$L/alpine70" /usr/local/bin/php 7.0.33 20151012 disabled \
+  /usr/local/lib/php/extensions/no-debug-non-zts-20151012 /usr/local/etc/php/conf.d
+mkdir -p "$L/alpine70/lib"; : > "$L/alpine70/lib/ld-musl-x86_64.so.1"
+b=$(block "$(detect_in "$L/alpine70")" "$L/alpine70/usr/local/bin/php")
+has "$b" '  howdah package: no -alpine image for PHP 7.0 (its Alpine base has musl older than 1.1.24): use the Debian image ghcr.io/howdah/howdah:<VERSION>-php7.0'
+check "no -alpine image for 7.0 even when the musl version is unknown" $?
+# a current Alpine: version shown, -alpine image offered
+fake_php "$L/alpine83" /usr/local/bin/php 8.3.36 20230831 disabled \
+  /usr/local/lib/php/extensions/no-debug-non-zts-20230831 /usr/local/etc/php/conf.d
+fake_musl "$L/alpine83" 1.2.5
+out=$(detect_in "$L/alpine83")
+has "$out" 'host libc: musl 1.2.5' && \
+  has "$(block "$out" "$L/alpine83/usr/local/bin/php")" '  matching release asset: howdah-<VERSION>-php8.3-20230831-linux-x86_64-musl.tar.gz'
+check "musl 1.2.5: version shown, the -musl tarball offered" $?
+# Alpine apk PHP on musl 1.1.22 (Alpine 3.10): no tarball, no package
+fake_php "$L/apk-old" /usr/bin/php7 7.3.33 20180731 disabled /usr/lib/php7/modules /etc/php7/conf.d
+fake_musl "$L/apk-old" 1.1.22
+b=$(block "$(detect_in "$L/apk-old")" "$L/apk-old/usr/bin/php7")
+has "$b" "  howdah package: none: Howdah's musl build needs musl 1.1.24 or newer (Alpine 3.11+); this is musl 1.1.22"
+check "apk PHP on musl 1.1.22: nothing offered" $?
 fake_php "$L/docker54" /usr/local/bin/php 5.4.45 20100525 disabled \
   /usr/local/lib/php/extensions/no-debug-non-zts-20100525 /usr/local/etc/php/conf.d
 b=$(block "$(detect_in "$L/docker54")" "$L/docker54/usr/local/bin/php")

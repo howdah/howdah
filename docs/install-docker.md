@@ -1,9 +1,11 @@
 # Install Howdah with Docker
 
-> **Status: not published yet.** The images below are built by
-> `.github/workflows/docker.yml`, which first runs after this change is merged:
-> on the next release, or when the maintainer starts it by hand for 1.4.0. Until
-> then `ghcr.io/howdah/howdah` does not exist, and you can build the same image
+> **Status:** the 1.4.0 Debian images are on GHCR (`ghcr.io/howdah/howdah:1.4.0-php<minor>`,
+> published by a manual run of `.github/workflows/docker.yml`). The run for
+> 1.5.0 (run 40140181320) published nothing: the smoke test still expected
+> 1.4.0's php-fpm refusal behaviour, and the 5.6, 7.0 and 7.1 `-alpine`
+> builds could not load the module (see "Alpine"). Both are fixed; the 1.5.0
+> images come from the next run. You can always build the same image
 > yourself (see "Build the image yourself").
 
 The image is the official `php:<minor>-fpm` image with the signed `howdah.so`
@@ -22,11 +24,11 @@ multipart limits still block, everything else only logs.
 | Tag | Base image | Platforms |
 |---|---|---|
 | `ghcr.io/howdah/howdah:<version>-php<minor>` | `php:<minor>-fpm` (Debian) | `linux/amd64`, and `linux/arm64` when the release has that minor's aarch64 tarball (1.4.0 has all of them) |
-| `ghcr.io/howdah/howdah:<version>-php<minor>-alpine` | `php:<minor>-fpm-alpine` | `linux/amd64` only, from the first release that carries `*-linux-x86_64-musl.tar.gz` tarballs (1.4.0 does not) |
+| `ghcr.io/howdah/howdah:<version>-php<minor>-alpine` | `php:<minor>-fpm-alpine` | `linux/amd64` only; PHP 7.2 to 8.5 only (see "Alpine"); from 1.5.0, the first release with `*-linux-x86_64-musl.tar.gz` tarballs |
 | `ghcr.io/howdah/howdah:php<minor>` and `php<minor>-alpine` | as above | moves to the newest release |
 
 `<minor>` is one of 5.6, 7.0, 7.1, 7.2, 7.3, 7.4, 8.0, 8.1, 8.2, 8.3, 8.4,
-8.5. There is no image for 5.4 or 5.5: `php:5.4-fpm` is a schema-1 manifest
+8.5 (`-alpine`: 7.2 and later). There is no image for 5.4 or 5.5: `php:5.4-fpm` is a schema-1 manifest
 that current Docker refuses to pull ("no longer supported since containerd
 v2.1", seen with Docker 29.9), and `php:5.5-fpm`
 has a layer Docker Hub no longer serves. Use the tarball for those.
@@ -43,6 +45,26 @@ are still pulled. On Docker Hub, 24 October 2026:
 | `php:8.0-fpm` | bullseye / 3.16 | 2023-11 |
 | `php:8.1-fpm` | trixie / 3.21 | 2025-12 |
 | `php:8.2-fpm` to `8.5-fpm` | trixie / 3.24 | maintained |
+
+### Alpine
+
+The `-alpine` images exist for PHP 7.2 to 8.5 only. For 5.6, 7.0 and 7.1
+use the Debian images. Their official Alpine bases are Alpine 3.8, 3.7 and
+3.10, with musl 1.1.19, 1.1.18 and 1.1.22, and Howdah's musl build needs
+musl 1.1.24 (Alpine 3.11) or newer: the `[log] exec` hook (added in 1.5.0)
+uses Rust's `std::process::Command`, which links
+`posix_spawn_file_actions_addchdir_np`, a function musl added in 1.1.24.
+musl binds every symbol when a module is loaded, so on those bases PHP
+refuses the whole extension:
+
+```
+PHP Warning:  PHP Startup: Unable to load dynamic library '.../howdah.so' - Error relocating .../howdah.so: posix_spawn_file_actions_addchdir_np: symbol not found
+```
+
+The musl release build now fails if the module needs any C library symbol
+that musl 1.1.24 lacks (`packaging/musl-floor-check.sh`), and
+`howdah-check detect` says so on an older musl instead of offering a
+tarball that would not load.
 
 Howdah does not patch these bases. An image built on `php:7.4-fpm` carries
 the PHP and Debian packages of November 2022. That is the reason to run Howdah
@@ -84,9 +106,11 @@ with 8.3). It does not work on:
 - **A different minor.** The Zend module API differs and PHP refuses the module.
 - **A `-zts` image.** Howdah is NTS only; see [zts.md](zts.md).
 - **Alpine with a Debian tag, or the reverse.** Use the `-alpine` tag for
-  `php:<minor>-*-alpine` bases, and on Alpine before 3.21 (PHP 5.6 to 8.0
-  images) add `RUN apk add --no-cache libgcc` (the musl build needs
-  `libgcc_s`; the `-alpine` images install it themselves).
+  `php:<minor>-*-alpine` bases (7.2 and later), and on Alpine before 3.21
+  (the PHP 7.2 to 8.0 images) add `RUN apk add --no-cache libgcc` (the musl
+  build needs `libgcc_s`; the `-alpine` images install it themselves).
+- **Alpine before 3.11** (`php:5.6`, `7.0`, `7.1` `-alpine`): no musl build
+  loads there (see "Alpine").
 
 Pin by digest (`@sha256:...`) if your build must be reproducible.
 
@@ -165,7 +189,8 @@ sh docker/smoke.sh howdah:1.4.0-php8.3
 
 Run it from the repository root (the build needs the committed key). Add
 `--platform linux/arm64` for arm64, or `--build-arg PHP_VARIANT=fpm-alpine
---build-arg HOWDAH_LIBC=musl` for Alpine (once a release has musl tarballs).
+--build-arg HOWDAH_LIBC=musl` for Alpine (PHP 7.2 and later, release 1.5.0
+and later).
 To test a release you built and signed yourself, serve its files and pass
 `--build-arg HOWDAH_DIST_URL=<url>` and `--build-arg
 HOWDAH_KEY_FILE=packaging/out/<your key>.asc`; the key's fingerprint is written
@@ -175,7 +200,9 @@ to `PROVENANCE`, so such an image cannot pass for an official one.
 pushes anything: `php -m` and `php-fpm -m`, the lab's self-test scenario
 (`lab/integration/selftest_container.sh`) on the CLI server inside the image
 in detect and block mode, and `howdah-check web` through nginx to the image's
-own php-fpm.
+own php-fpm. What it expects of the php-fpm refusal follows the Howdah
+version in the image (worker exit 70 below 1.5.0, a clean 403 from 1.5.0);
+`FPM_BLOCK=bailout|clean` forces one.
 
 ## How the images are published
 
@@ -198,13 +225,24 @@ With the 1.4.0 release, before this was published:
 | `-php8.3` | arm64, under QEMU on an amd64 host | passed (the first run of a scenario on the released aarch64 build) |
 | `-php5.6-alpine` to `-php8.5-alpine` (12 images) | amd64 | passed on all 12, built from musl tarballs of the 1.4.0 source made with `HOWDAH_LIBC=musl packaging/build-release.sh` and signed with a throwaway key (1.4.0 has no musl assets) |
 
+With the 1.5.0 release, after the fix for docker run 40140181320:
+
+| Image | Platforms | Result |
+|---|---|---|
+| `-php5.6` to `-php8.5` (12 images) | amd64 | passed on all 12; the php-fpm refusal is a 403 with the Howdah body and no worker exit |
+| `-php8.3` | arm64, under QEMU | passed |
+| `-php7.2-alpine` to `-php8.5-alpine` (9 images) | amd64 | passed on all 9 |
+| `php:5.6`, `7.0`, `7.1` `-fpm-alpine` | amd64 | the module does not load (musl below 1.1.24, see "Alpine"); no image |
+
 The smoke test is one scenario (marker, over-limit, a normal form), not the
 lab matrix: the multipart, input-shape and benign-corpus results in
 [coverage.md](coverage.md) were recorded on the lab images, not on these.
 
 ## Known limitations
 
-- **php-fpm ends the worker when it refuses a multipart request.** Measured
+- **In 1.4.0, php-fpm ends the worker when it refuses a multipart request**
+  (fixed in 1.5.0 by #44: the 403 carries the Howdah body and no worker
+  exits). Measured
   with the over-limit (`max_parts`) request; the input-shape and header
   refusals, which land later in the request, were not checked. In 1.4.0 the refusal
   calls `zend_bailout` from the multipart callback, so `php_request_startup`
@@ -215,15 +253,16 @@ lab matrix: the multipart, input-shape and benign-corpus results in
   client does not see the request id (in the final smoke runs of the 24 amd64
   images, the body was lost in 23). The event is in the log either way. This
   is not specific to Docker: the worker exit and the reset come from php-fpm
-  itself (measured with nginx 1.27 in front). The fix is PR #44
-  (`fix/refusal-path-fpm`); `docker/smoke.sh` asserts the current behaviour
-  (`FPM_BLOCK=bailout`) so that fix has to flip it.
+  itself (measured with nginx 1.27 in front). `docker/smoke.sh` expects
+  whichever behaviour the Howdah version in the image has (`FPM_BLOCK`
+  bailout below 1.5.0, clean from 1.5.0), so it fails if either regresses.
 - **Request ids repeat across forked workers in 1.4.0.** Every php-fpm (and
   Apache prefork) worker is forked from the parent with the same id generator
   state, so two workers log the same `request_id` for different requests.
   Fixed in PR #39.
 - **No ZTS image** (no FrankenPHP, no threaded Apache): [zts.md](zts.md).
-- **Alpine images are amd64 only**: there is no aarch64 musl build.
+- **Alpine images are amd64 only**: there is no aarch64 musl build. And
+  PHP 7.2 and later only: musl 1.1.24 is the floor (see "Alpine").
 - **No Apache image.** Use `COPY --from` onto `php:<minor>-apache`. That was
   checked once by hand, not by the smoke test: on `php:8.3-apache` the module
   loaded and `howdah-check web` passed under `mod_php` (marker flagged, the

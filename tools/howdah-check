@@ -15,7 +15,8 @@
 # (or Docker image) Howdah ships for
 # it (or the tarball), the SAPIs present (cli/fpm/apache) and whether the `howdah`
 # extension is loaded in each. It NEVER modifies anything: it only runs
-# `php -v/-i/-m`, `php-fpm -m`, `php-config`, and reads config files.
+# `php -v/-i/-m`, `php-fpm -m`, `php-config`, musl's loader with no arguments
+# (which prints the musl version), and reads config files.
 #
 # POSIX sh only (dash/ash/old bash; CentOS 7, Ubuntu 16.04, busybox). Every
 # probe degrades gracefully: a missing/failed probe prints "unknown" for that
@@ -54,7 +55,8 @@ ARCH=$(norm_arch "${HOWDAH_CHECK_UNAME_M:-$(uname -m 2>/dev/null)}")
 # ... and the host C library: a glibc .so does not load on musl (Alpine), which
 # has its own -musl tarball (x86_64 only). musl is recognised by its loader.
 LIBC=glibc
-for _l in "$ROOT"/lib/ld-musl-*.so.1; do [ -e "$_l" ] && LIBC=musl; done
+MUSL_LD=""
+for _l in "$ROOT"/lib/ld-musl-*.so.1; do [ -e "$_l" ] && { LIBC=musl; MUSL_LD=$_l; }; done
 SUFFIX="linux-$ARCH"
 [ "$LIBC" = musl ] && SUFFIX="linux-$ARCH-musl"
 # official runtime images (docker/Dockerfile, docs/install-docker.md)
@@ -70,6 +72,23 @@ tmo() {
     "$@"
   fi
 }
+
+# $1 < $2 for dotted numeric versions (1.1.22 < 1.1.24 < 1.2.5)
+ver_lt() {
+  awk -v a="$1" -v b="$2" 'BEGIN { n = split(a, x, "."); m = split(b, y, "."); k = (n > m ? n : m)
+    for (i = 1; i <= k; i++) { if (x[i] + 0 < y[i] + 0) exit 0; if (x[i] + 0 > y[i] + 0) exit 1 } exit 1 }'
+}
+# musl's loader prints its version when run with no arguments. Howdah's musl
+# build needs musl 1.1.24 or newer (Alpine 3.11+; packaging/musl-floor-check.sh):
+# on an older musl PHP refuses the module ("Error relocating ...: symbol not found").
+MUSL_FLOOR=1.1.24
+LIBC_VER=""
+MUSL_OLD=0
+if [ "$LIBC" = musl ] && [ -x "$MUSL_LD" ]; then
+  LIBC_VER=$(tmo "$MUSL_LD" </dev/null 2>&1 | sed -n 's/^Version \([0-9][0-9.]*\).*/\1/p' | head -n 1)
+fi
+if [ -n "$LIBC_VER" ] && ver_lt "$LIBC_VER" "$MUSL_FLOOR"; then MUSL_OLD=1; fi
+MUSL_OLD_MSG="Howdah's musl build needs musl $MUSL_FLOOR or newer (Alpine 3.11+); this is musl $LIBC_VER"
 
 realp() {
   _r=$(readlink -f "$1" 2>/dev/null)
@@ -272,6 +291,8 @@ report_install() {
   say "  thread_safety: $_tsl"
   if [ "$LIBC" = musl ] && [ "$ARCH" != x86_64 ]; then
     say "  matching release asset: none: musl builds are x86_64 only"
+  elif [ "$MUSL_OLD" = 1 ]; then
+    say "  matching release asset: none: $MUSL_OLD_MSG"
   elif [ -n "$_api" ] && [ -n "$_mm" ] && [ "$ARCH" != unknown ]; then
     say "  matching release asset: howdah-<VERSION>-php$_mm-$_api-$SUFFIX.tar.gz"
   else
@@ -427,11 +448,19 @@ howdah_package() {
     case "$_pm" in
       5.[45]) echo "no image for PHP $_pm: use the tarball for API $_pa ($_tar)"; return 0 ;;
     esac
+    # -alpine images only where the Alpine base has musl 1.1.24+ (7.2 and later)
+    _old=$MUSL_OLD
+    case "$_pm" in 5.6|7.0|7.1) [ "$LIBC" = musl ] && _old=1 ;; esac
+    if [ "$_old" = 1 ]; then
+      echo "no -alpine image for PHP $_pm (its Alpine base has musl older than $MUSL_FLOOR): use the Debian image $IMAGE_REPO:<VERSION>-php$_pm"
+      return 0
+    fi
     _img="$IMAGE_REPO:<VERSION>-php$_pm"; [ "$LIBC" = musl ] && _img="$_img-alpine"
     echo "image $_img, or in your Dockerfile: COPY --from=$_img /howdah/ /"
     return 0
   fi
   # apt/yum packages are glibc builds
+  if [ "$MUSL_OLD" = 1 ]; then echo "none: $MUSL_OLD_MSG"; return 0; fi
   if [ "$LIBC" = musl ]; then echo "not yet packaged for musl: use the tarball for API $_pa ($_tar)"; return 0; fi
   _deb=0; [ -f "$ROOT/etc/debian_version" ] && _deb=1
   _fmt=rpm; _repo=""; _arches="x86_64 aarch64"
@@ -466,7 +495,7 @@ report_layout() {
 
 cmd_detect() {
   say "host arch: $ARCH"
-  say "host libc: $LIBC"
+  say "host libc: $LIBC${LIBC_VER:+ $LIBC_VER}"
   say "release assets and howdah-check: https://github.com/howdah/howdah/releases (replace <VERSION> with the latest release)"
   discover
   _oifs=$IFS; IFS=$NL

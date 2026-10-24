@@ -59,6 +59,29 @@ n=$(printf '%s\n' "$out" | grep -o '"variant":"fpm-alpine"' | wc -l | tr -d ' ')
 has "$out" '"minor":"8.3","variant":"fpm","libc":"glibc"'
 check "the glibc image is still planned next to the alpine one" $?
 
+# a full musl release (1.5.0 has 15 musl tarballs): -alpine images only where
+# the base's musl is 1.1.24 or newer (php:7.2-fpm-alpine and later)
+allmusl=$(printf '%s\n' "$full"; for m in 5.4 5.5 5.6 7.0 7.1 7.2 7.3 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do sums "howdah-$V-php$m-20990101-linux-x86_64-musl.tar.gz"; done)
+out=$(printf '%s\n' "$allmusl" | sh "$M" "$V")
+for m in 5.6 7.0 7.1; do
+  has "$out" "\"minor\":\"$m\",\"variant\":\"fpm-alpine\""; [ $? -ne 0 ]
+  check "no $m-alpine image: php:$m-fpm-alpine's musl is older than 1.1.24" $?
+  has "$out" "\"minor\":\"$m\",\"variant\":\"fpm\","; check "$m keeps its Debian image" $?
+done
+n=$(printf '%s\n' "$out" | grep -o '"variant":"fpm-alpine"' | wc -l | tr -d ' ')
+[ "$n" = 9 ]; check "9 -alpine images (7.2 to 8.5) for a full musl release (got $n)" $?
+has "$out" '"minor":"7.2","variant":"fpm-alpine"'; check "7.2 is the oldest -alpine image" $?
+
+# smoke.sh's php-fpm refusal expectation follows the Howdah version in the image
+fb() { sh "$D/smoke.sh" --fpm-block-for "$1" 2>/dev/null; }
+[ "$(fb 1.4.0)" = bailout ]; check "smoke: howdah 1.4.0 -> FPM_BLOCK=bailout (worker exit 70)" $?
+[ "$(fb 1.3.2)" = bailout ]; check "smoke: howdah 1.3.2 -> bailout" $?
+[ "$(fb 1.5.0)" = clean ]; check "smoke: howdah 1.5.0 -> FPM_BLOCK=clean (#44)" $?
+[ "$(fb 1.5.1)" = clean ]; check "smoke: howdah 1.5.1 -> clean" $?
+[ "$(fb 1.10.0)" = clean ]; check "smoke: howdah 1.10.0 -> clean (versions compare numerically)" $?
+[ "$(fb 2.0.0)" = clean ]; check "smoke: howdah 2.0.0 -> clean" $?
+fb "" >/dev/null; rc=$?; [ "$rc" -eq 2 ]; check "smoke: an unreadable version is an error, not a guess (exit 2)" $?
+
 # the musl tarball is never mistaken for the glibc one
 only_musl=$(sums "howdah-$V-php8.3-20230831-linux-x86_64-musl.tar.gz")
 out=$(printf '%s\n' "$only_musl" | sh "$M" "$V")

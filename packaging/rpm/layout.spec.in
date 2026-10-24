@@ -1,0 +1,51 @@
+# Howdah RPM for one PHP minor in one vendor layout (a row of
+# packaging/layouts.tsv). Rendered by packaging/build-layouts.sh: the
+# at-sign-delimited tokens are substituted, and the REQUIRES, INSTALL_INIS and
+# FILES_INIS token lines expand to one line per entry. Not a standalone spec.
+# The Remi SCL package keeps its own spec (howdah.spec.in), unchanged.
+%global moddir @MODDIR@
+
+# Prebuilt binary (glibc-2.17 build): no debuginfo/strip, gzip payload for old rpm.
+%global debug_package %{nil}
+%global __strip /bin/true
+%global _binary_payload w9.gzdio
+%global _build_id_links none
+
+Name:           @PKG@
+Version:        @VERSION@
+Release:        @RELEASE@
+Summary:        Howdah defensive WAF extension for PHP @MINOR@ (@LABEL@)
+License:        MIT OR Apache-2.0
+URL:            https://github.com/howdah/howdah
+Packager:       Howdah Maintainers <packages@howdah.org>
+Source0:        howdah.so
+Source1:        howdah.ini
+# Install only against the PHP this layout ships for this minor (the minor
+# fixes the Zend module API, so this is the ABI guard).
+@REQUIRES@
+
+%description
+Howdah is an open-source defensive web application firewall for PHP, loaded as
+a PHP extension. It refuses abusive multipart/form-data requests before PHP
+allocates per-part memory. This package is built for PHP @MINOR@ (Zend module
+API @API@, NTS) and installs into the @LABEL@ layout. It ships in DETECT mode:
+it logs what it would block, and only the critical limits block. See
+https://howdah.org/install/ for how this layout loads the module.
+
+%prep
+%build
+
+%install
+install -D -m 0755 %{SOURCE0} %{buildroot}%{moddir}/howdah.so
+@INSTALL_INIS@
+
+# Enabling is the ini drop-in, so there is no %post/%postun: nothing that can
+# wedge PHP or the transaction. Each ini is %config(noreplace): local edits
+# survive upgrades and removal (saved as .rpmsave).
+%files
+%{moddir}/howdah.so
+@FILES_INIS@
+
+%changelog
+* Sat Oct 24 2026 Howdah Maintainers <packages@howdah.org> - @VERSION@-@RELEASE@
+- @LABEL@ package for PHP @MINOR@ wrapping the glibc-2.17 howdah.so

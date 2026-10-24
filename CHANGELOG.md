@@ -179,6 +179,41 @@ All notable changes to Howdah are documented here. The format follows
 - Drafts, not sent, of inclusion requests to Remi's repository and to
   deb.sury.org, with what a distribution `.spec` and `debian/` would need
   (`docs/distro-requests/`).
+- Build provenance and SBOM attestations. The release workflow attests every
+  tarball, `howdah-check` and `SHA256SUMS` with SLSA v1 build provenance
+  (`actions/attest-build-provenance`, signed through Sigstore with the
+  workflow's OIDC identity) and binds a CycloneDX SBOM of `howdah.so` to each
+  flavour's tarballs (x86_64, aarch64, x86_64-musl), after the GPG signing,
+  which is unchanged. The SBOM comes from `packaging/sbom.sh` (pinned,
+  sha256-checked cargo-cyclonedx) in a separate read-only job; only the
+  release job gets `id-token: write` and `attestations: write`. The Sigstore
+  bundles ship as release assets (`*.sigstore.json`) for offline checks with
+  cosign. `publish-repos.yml` attests the `.deb` and `.rpm` files each real
+  publish builds (the pool `.deb`, the `.rpm` after `rpmsign`), main and
+  layout repositories. `attest-selftest.yml` (manual) runs the same steps on
+  dummy files and verifies them. Releases up to 1.4.0 have no attestations.
+- Reproducible release tarballs: the same commit gives byte-identical
+  tarballs. The release compiler is pinned in `packaging/rust-toolchain.toml`
+  (Rust 1.99.1, the compiler that built 1.4.0) and every release image
+  installs it; `centos:7` is pinned by digest; `--remap-path-prefix` drops
+  builder paths from `howdah.so`; each tarball is written by a deterministic
+  tar in the release image (sorted, modes normalised, owner 0/0, mtime
+  `SOURCE_DATE_EPOCH` = the tag's commit date, `gzip -n`). Two clean builds
+  of one commit gave identical PHP 7.4 and 8.3 x86_64 tarballs. `.deb`
+  packages are reproducible for a given dpkg; `.rpm` payloads are, but EL7's
+  rpm stamps the build time in the header.
+- `packaging/verify-reproducible.sh <tag> <minor> [x86_64|aarch64|x86_64-musl]`:
+  checks the signed `SHA256SUMS`, rebuilds the minor with the tag's own build
+  scripts and reports `MATCH` or `MISMATCH`, with the `howdah.so` sha256 from
+  both tarballs. Against 1.4.0 PHP 7.4 the tarball differs (it predates this)
+  and the `howdah.so` is byte-identical.
+- CI: a non-blocking `deps` job runs `cargo deny check` (advisories, licences,
+  bans, sources; policy in `deny.toml`) and `npm audit --omit=dev` for the
+  site and worker. At introduction cargo deny passes (warnings only: three
+  duplicate crate versions, and the workspace path dependencies counted as
+  wildcards); npm audit reports astro 5.18.2 (critical), sharp, zod and
+  zod-to-ts (high) and esbuild (low), all fixed only by astro 7, left for a
+  separate change.
 
 ### Changed
 - `lab/integration/selftest_container.sh` takes `PREINSTALLED=1` to test a PHP
@@ -222,6 +257,11 @@ All notable changes to Howdah are documented here. The format follows
   the script's side effect does not happen (`lab/integration/refusal.sh`).
   `docs/config.md` "Enforcement timing" lists what is refused before the
   script and what stays post-hoc, per SAPI.
+- Release tarball entries are owned by 0/0 (they were the CI user, uid 1001,
+  so `sudo tar -x` left files owned by that uid) with fixed modes. The
+  `Installed-Size` of the `.deb` packages is counted from file sizes, not
+  `du -sk` (which gave 12 KiB on tmpfs and 40 KiB on ext4 for one test tree),
+  so it is a few KiB different from earlier packages.
 
 ### Fixed
 - `[log] path` in the TOML file was parsed but ignored. It is now used when
@@ -289,6 +329,19 @@ All notable changes to Howdah are documented here. The format follows
   destinations, the hook and a "Ship to a SIEM" section. `docs/config.md`
   documents rotation (the file is opened per event, so rename-based rotation
   and `copytruncate` both work without a reload) and file permissions.
+- `docs/verify.md` and https://howdah.org/docs/verify/ (linked from the docs
+  index, the footer and the install page): the GPG fingerprint check,
+  `SHA256SUMS.asc`, `gh attestation verify` and the cosign offline check,
+  the SBOM, the reproducible rebuild with what is pinned and the residual
+  causes of a mismatch, and how to tie an apt or yum package to the signed
+  tarball. `SECURITY.md` and `docs/install-repos.md` link to it, and
+  `SECURITY.md` names the reproducible rebuild as the independent
+  verification path.
+- `docs/security-audit-brief.md`: the scope (C shim and FFI boundary, hook
+  installation and displacement, multipart parser, log writer and exec hook,
+  config parsing, fail-open guarantees), threat model, artefacts and the
+  assumptions we want an independent audit to challenge. Howdah has had no
+  third-party audit yet.
 
 ## [1.4.0] - 2026-10-24
 

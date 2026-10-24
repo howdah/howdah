@@ -1,0 +1,93 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { REPO, RELEASES, KEY_FPR } from '../../lib/site';
+
+// Source of truth: docs/verify.md (site/test/verify.test.mjs checks that the
+// commands here are also there). Code blocks are raw strings so $, quotes and
+// braces reach the page unchanged.
+const VERIFY_MD = `${REPO}/blob/main/docs/verify.md`;
+const AUDIT_MD = `${REPO}/blob/main/docs/security-audit-brief.md`;
+const SCRIPT = `${REPO}/blob/main/packaging/verify-reproducible.sh`;
+
+const key = String.raw`curl -fsSL https://howdah.org/key.asc | gpg --show-keys --with-fingerprint`;
+
+const gpg = String.raw`V=1.5.0
+B=https://github.com/howdah/howdah/releases/download/v$V
+T=howdah-$V-php7.4-20190902-linux-x86_64.tar.gz
+curl -fLO $B/$T -O $B/SHA256SUMS -O $B/SHA256SUMS.asc -O $B/howdah-release-signing.asc
+gpg --import howdah-release-signing.asc
+gpg --verify SHA256SUMS.asc SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS`;
+
+const gh = String.raw`gh attestation verify "$T" -R howdah/howdah \
+  --signer-workflow howdah/howdah/.github/workflows/release.yml \
+  --source-ref refs/tags/v$V \
+  --deny-self-hosted-runners`;
+
+const cosign = String.raw`curl -fLO $B/howdah-$V.provenance.sigstore.json
+cosign verify-blob-attestation "$T" \
+  --bundle howdah-$V.provenance.sigstore.json \
+  --type slsaprovenance1 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity "https://github.com/howdah/howdah/.github/workflows/release.yml@refs/tags/v$V"`;
+
+const sbom = String.raw`gh attestation verify "$T" -R howdah/howdah \
+  --predicate-type https://cyclonedx.org/bom --format json \
+  --jq '.[0].verificationResult.statement.predicate.components[] | "\(.name) \(.version)"'`;
+
+const rebuild = String.raw`git clone https://github.com/howdah/howdah && cd howdah
+packaging/verify-reproducible.sh v1.5.0 7.4                 # x86_64
+packaging/verify-reproducible.sh v1.5.0 8.3 x86_64-musl     # or aarch64`;
+---
+<Layout
+  title="Verify a Howdah release"
+  description="Check a Howdah download four ways: the GPG-signed checksums, SLSA build provenance, the SBOM, and an independent reproducible rebuild from the tag."
+  path="/docs/verify/"
+>
+  <div class="pagehead">
+    <div class="wrap">
+      <p class="crumbs"><a href="/">Home</a> / <a href="/docs/">Docs</a> / <span aria-current="page">Verify a release</span></p>
+      <h1>Verify a release</h1>
+      <p class="lede">Four checks for a file from the <a href={RELEASES}>releases page</a>, from quickest to strongest. The full steps, including the apt and yum packages, are in <a href={VERIFY_MD}>docs/verify.md</a>.</p>
+    </div>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <div class="note" role="note" aria-labelledby="scope-heading">
+        <h3 id="scope-heading">What these checks do not tell you</h3>
+        <ul>
+          <li>They tie a file to the public source, the project key and the release workflow. They do not say the code is free of bugs. Howdah has had no third-party security audit yet; <a href={AUDIT_MD}>the audit brief</a> is the scope we are asking one to cover.</li>
+          <li>Build provenance and the SBOM start with the first release after 1.4.0. Releases 1.4.0 and earlier have no attestations; their GPG signatures are unchanged.</li>
+        </ul>
+      </div>
+
+      <h2 id="gpg">1. GPG signature and checksums</h2>
+      <p>Check the key's primary fingerprint first. It must be <code>{KEY_FPR}</code>.</p>
+      <pre tabindex="0"><code>{key}</code></pre>
+      <p>Then check the signature over <code>SHA256SUMS</code> and the file against it. <code>gpg --verify</code> must print <code>Good signature</code> and that primary key fingerprint.</p>
+      <pre tabindex="0"><code>{gpg}</code></pre>
+
+      <h2 id="provenance">2. Build provenance</h2>
+      <p>Every tarball, <code>howdah-check</code> and <code>SHA256SUMS</code> has a SLSA build provenance attestation from the release workflow, signed through Sigstore with that workflow run's identity and recorded in Sigstore's public transparency log. It names the repository, workflow, tag and commit that built the file. With the GitHub CLI (logged in):</p>
+      <pre tabindex="0"><code>{gh}</code></pre>
+      <p>Without a GitHub account, use the Sigstore bundle shipped with the release and cosign (tested with cosign 3.1.4). A changed file fails with <code>provided artifact digests do not match digests in statement</code>.</p>
+      <pre tabindex="0"><code>{cosign}</code></pre>
+      <p>The packages on <code>pkg.howdah.org</code> carry provenance from the publish workflow too; see <a href={`${VERIFY_MD}#5-apt-and-yum-packages`}>the packages section</a>.</p>
+
+      <h2 id="sbom">3. SBOM</h2>
+      <p>A CycloneDX SBOM of <code>howdah.so</code> is attested against each flavour's tarballs: the Rust crates compiled in, and the build-time crates that generate part of it, with versions and licences, from <code>Cargo.lock</code> at the tag.</p>
+      <pre tabindex="0"><code>{sbom}</code></pre>
+
+      <h2 id="rebuild">4. Reproducible rebuild</h2>
+      <p>The release tarballs are reproducible: the same tag gives byte-identical tarballs on any machine with Docker. <a href={SCRIPT}>packaging/verify-reproducible.sh</a> checks the signed <code>SHA256SUMS</code>, rebuilds one PHP minor with that tag's own build scripts, and prints <code>MATCH</code> or <code>MISMATCH</code> along with the sha256 of the <code>howdah.so</code> inside each tarball.</p>
+      <pre tabindex="0"><code>{rebuild}</code></pre>
+      <p>The compiler, base image, build tools, PHP sources and archive metadata are pinned. Known residual causes of a mismatch: the PHP 5.4 to 8.1 headers for x86_64 come from Remi's EL7 repository by name, and the musl build installs Alpine 3.21 packages by name. The <code>.deb</code> packages are reproducible for a given dpkg version; the <code>.rpm</code> packages are not byte-reproducible (EL7's rpm stamps the build time, and the published rpm is signed), but their payload is. Tags up to 1.4.0 do not rebuild to the same tarball; for 1.4.0 the <code>howdah.so</code> inside does. Details: <a href={`${VERIFY_MD}#4-reproducible-rebuild`}>docs/verify.md</a>.</p>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .note ul { margin: .25rem 0 0; padding-left: 1.2rem; }
+  .note li { margin-bottom: .4rem; }
+</style>

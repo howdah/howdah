@@ -323,3 +323,9 @@ fingerprint is `1152 1035 C600 F638 31F8 2551 2087 B872 0997 807B`:
 ```sh
 curl -fsSL https://howdah.org/key.asc | gpg --show-keys --with-fingerprint
 ```
+
+apt and yum check the package and metadata signatures with this key on every
+install. Packages published after 1.4.0 also carry a build provenance
+attestation, and the `howdah.so` inside a package built from a release tag is
+byte-identical to the one in that release's signed, reproducible tarball. How
+to check both: [verify.md](verify.md#5-apt-and-yum-packages).

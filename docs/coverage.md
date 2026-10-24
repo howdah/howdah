@@ -347,4 +347,20 @@ Limitations, stated plainly:
   is treated as suspicious.
 - **PHP 5.x `include` is checked at compile time only:** a file served from a
   **warm opcache** is not re-inspected. `eval` is never cached and is fully
-  covered. On 7.0+ the opcode handler is not affected by opcache.
+  covered. On 7.0+ the default opcode handler is not affected by opcache; with
+  `[sinks] hook = "compile"` the 5.x caveat applies there too.
+- **OPcache JIT (PHP 8.0+).** PHP turns its JIT off while any user opcode
+  handler is installed, and one of the two include/eval mechanisms is one.
+  Nothing is installed unless the `eval` sink is on, the `include` sink has
+  `allow_paths`, or `[behavior] deny_exec_dirs` is set. The default
+  `[sinks] hook = "auto"` uses the compile pointer when only `eval` needs the
+  hook (the shipped default), so **a default install keeps the JIT on**; it
+  uses the opcode handler when `include` has `allow_paths` or
+  `deny_exec_dirs` is set (where warm-opcache includes matter), and
+  `hook = "compile"` keeps the JIT on even then. `lab/integration/jit.sh`
+  asserts `opcache_get_status()['jit']['on']` in each state on PHP 8.1 and
+  8.3 (default config: on, with eval detect still logging; include
+  `allow_paths`: off; `hook = "compile"`: on) and shows the warm-opcache
+  caveat (two includes of one file: two events in `opcode` mode, one in
+  `compile` mode); compile-mode include/eval behaviour is also checked on 7.4
+  and 5.6.

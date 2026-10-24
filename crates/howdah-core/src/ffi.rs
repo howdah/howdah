@@ -1822,6 +1822,64 @@ pub unsafe extern "C" fn howdah_behavior_check_php_write_at(
     })
 }
 
+// ---- include/eval hook selection (`[sinks] hook`; JIT compatibility) -------
+// Appended after the [[exceptions]] `_at` entry points (append-only file).
+
+// Mechanism half of `howdah_sink_hook_plan` (low nibble).
+/// Install nothing (nothing armed needs the hook; JIT stays on).
+pub const HOWDAH_HOOK_PLAN_NONE: i32 = 0;
+/// Install the `ZEND_INCLUDE_OR_EVAL` user opcode handler.
+pub const HOWDAH_HOOK_PLAN_OPCODE: i32 = 1;
+/// Install the `zend_compile_file`/`zend_compile_string` pointer swap.
+pub const HOWDAH_HOOK_PLAN_COMPILE: i32 = 2;
+// Reason half (`plan >> 4`), for the phpinfo row.
+pub const HOWDAH_HOOK_WHY_CONFIGURED: i32 = 0;
+pub const HOWDAH_HOOK_WHY_EVAL_ONLY: i32 = 1;
+pub const HOWDAH_HOOK_WHY_INCLUDE_ALLOW_PATHS: i32 = 2;
+pub const HOWDAH_HOOK_WHY_DENY_EXEC_DIRS: i32 = 3;
+
+/// The startup plan for the include/eval hook: `mechanism | (reason << 4)`
+/// with the `HOWDAH_HOOK_PLAN_*` / `HOWDAH_HOOK_WHY_*` codes. Mechanism
+/// `NONE` means nothing armed needs the hook (the Layer-3 `eval`/`include`
+/// verdict combined with Layer 4's `deny_exec_dirs`, which the plan takes
+/// from `howdah_behavior_armed`); otherwise what `[sinks] hook` resolves to
+/// (`auto`, the default: compile when only eval needs it, opcode when include
+/// has `allow_paths` or `deny_exec_dirs` is set). NULL ctx or panic is `NONE`
+/// (install nothing: the fail-open direction for a startup decision that only
+/// adds visibility). Never stashes a log line. The only hook-selection export;
+/// the glue reads nothing else for this decision.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_sink_hook_plan(ctx: *mut howdah_ctx) -> i32 {
+    use crate::config::{HookReason, SinkHook};
+    if ctx.is_null() {
+        return HOWDAH_HOOK_PLAN_NONE;
+    }
+    let l4 = howdah_behavior_armed(ctx, HOWDAH_BEHAVIOR_EXEC_DIR) != 0;
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = &*ctx;
+        match c.config.sinks.include_eval_hook_plan(c.config.mode, l4) {
+            None => HOWDAH_HOOK_PLAN_NONE,
+            Some((mech, why)) => {
+                let m = match mech {
+                    SinkHook::Compile => HOWDAH_HOOK_PLAN_COMPILE,
+                    SinkHook::Opcode | SinkHook::Auto => HOWDAH_HOOK_PLAN_OPCODE,
+                };
+                let w = match why {
+                    HookReason::Configured => HOWDAH_HOOK_WHY_CONFIGURED,
+                    HookReason::EvalOnly => HOWDAH_HOOK_WHY_EVAL_ONLY,
+                    HookReason::IncludeAllowPaths => HOWDAH_HOOK_WHY_INCLUDE_ALLOW_PATHS,
+                    HookReason::DenyExecDirs => HOWDAH_HOOK_WHY_DENY_EXEC_DIRS,
+                };
+                m | (w << 4)
+            }
+        }
+    }))
+    .unwrap_or(HOWDAH_HOOK_PLAN_NONE)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2670,6 +2728,36 @@ mod tests {
         let c = init("[log]\nexec = \"relative\"");
         assert_eq!(unsafe { howdah_log_config(c) }, crate::config::LogConfig::default());
         unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn sink_hook_plan_follows_config() {
+        assert_eq!(unsafe { howdah_sink_hook_plan(std::ptr::null_mut()) }, HOWDAH_HOOK_PLAN_NONE);
+        // Shipped defaults: eval inherits detect -> the hook is needed; auto
+        // picks compile (eval only), so the JIT stays on by default.
+        let c = init("");
+        assert_eq!(unsafe { howdah_sink_hook_plan(c) }, HOWDAH_HOOK_PLAN_COMPILE | (HOWDAH_HOOK_WHY_EVAL_ONLY << 4));
+        unsafe { howdah_free(c) };
+        let c = init("[sinks]\nhook = \"compile\"");
+        assert_eq!(unsafe { howdah_sink_hook_plan(c) }, HOWDAH_HOOK_PLAN_COMPILE | (HOWDAH_HOOK_WHY_CONFIGURED << 4));
+        unsafe { howdah_free(c) };
+        let c = init("[sinks]\nhook = \"opcode\"");
+        assert_eq!(unsafe { howdah_sink_hook_plan(c) }, HOWDAH_HOOK_PLAN_OPCODE | (HOWDAH_HOOK_WHY_CONFIGURED << 4));
+        unsafe { howdah_free(c) };
+        // include allow_paths flips auto to opcode.
+        let c = init("[sinks.include]\nallow_paths = [\"/srv/app\"]");
+        assert_eq!(unsafe { howdah_sink_hook_plan(c) }, HOWDAH_HOOK_PLAN_OPCODE | (HOWDAH_HOOK_WHY_INCLUDE_ALLOW_PATHS << 4));
+        unsafe { howdah_free(c) };
+        // Layer 4 deny_exec_dirs flips auto to opcode even with sinks disabled.
+        let c = init("[sinks]\nenabled = false\n[behavior]\ndeny_exec_dirs = [\"/var/www/uploads\"]");
+        assert_eq!(unsafe { howdah_sink_hook_plan(c) }, HOWDAH_HOOK_PLAN_OPCODE | (HOWDAH_HOOK_WHY_DENY_EXEC_DIRS << 4));
+        unsafe { howdah_free(c) };
+        // Nothing armed, or global off: plan NONE.
+        for toml in ["[sinks.eval]\nmode = \"off\"", "[sinks]\nenabled = false", "mode = \"off\"\n[behavior]\ndeny_exec_dirs = [\"/x\"]"] {
+            let c = init(toml);
+            assert_eq!(unsafe { howdah_sink_hook_plan(c) }, HOWDAH_HOOK_PLAN_NONE, "{toml}");
+            unsafe { howdah_free(c) };
+        }
     }
 
     #[test]

@@ -105,9 +105,18 @@ check does not depend on opcache; the `require`d-file case is checked at first
 compile and is best-effort. Allowlists can be bypassed. The `.php`-write facet
 is scoped by origin and can still flag frameworks that compile templates into
 such a directory. Observe only proposes. Verified on PHP 5.4, 5.6, 7.4, 8.3, 8.4
-and 8.5. On PHP 7.0+ Howdah installs a user opcode handler (for include/eval),
-which turns OPcache JIT off; this is unchanged since 1.3 and independent of
-Layer 4.
+and 8.5.
+
+**OPcache JIT.** PHP turns its JIT off whenever an extension installs a user
+opcode handler, and one of Howdah's two `include`/`eval` mechanisms on PHP
+7.0+ is one. By default (`[sinks] hook = "auto"`) Howdah uses the
+compile-pointer mechanism when only `eval` needs guarding (the shipped
+default), so **a default install keeps the JIT on**; it switches to the opcode
+handler only when `[sinks.include] allow_paths` or `[behavior] deny_exec_dirs`
+is set, where an include served from a warm opcache matters, and then writes
+one startup line naming `hook = "compile"` as the way to keep the JIT on.
+`php --ri howdah` shows which mechanism is in use and why. See `hook` in
+[docs/config.md](docs/config.md).
 
 See the `[behavior]` section of [docs/config.md](docs/config.md) and the
 [CHANGELOG](CHANGELOG.md).

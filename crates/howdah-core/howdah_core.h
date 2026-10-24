@@ -10,6 +10,22 @@
 #include <stdlib.h>
 
 /**
+ * Default `[log] exec_rate_limit` (hook spawns per second per process).
+ */
+#define DEFAULT_EXEC_RATE_LIMIT 10
+
+/**
+ * Highest accepted `[log] exec_rate_limit`.
+ */
+#define MAX_EXEC_RATE_LIMIT 100
+
+/**
+ * Longest path the matcher looks at (PATH_MAX). A longer path never matches:
+ * no exception, the rule stays armed.
+ */
+#define MAX_PATH 4096
+
+/**
  * Action codes returned over the ABI. Pinned: Allow=0, Log=1, Block=2.
  */
 #define HOWDAH_ALLOW 0
@@ -55,6 +71,34 @@
 #define HOWDAH_BEHAVIOR_EGRESS 2
 
 #define HOWDAH_BEHAVIOR_PHP_WRITE 3
+
+/**
+ * Install nothing (nothing armed needs the hook; JIT stays on).
+ */
+#define HOWDAH_HOOK_PLAN_NONE 0
+
+/**
+ * Install the `ZEND_INCLUDE_OR_EVAL` user opcode handler.
+ */
+#define HOWDAH_HOOK_PLAN_OPCODE 1
+
+/**
+ * Install the `zend_compile_file`/`zend_compile_string` pointer swap.
+ */
+#define HOWDAH_HOOK_PLAN_COMPILE 2
+
+#define HOWDAH_HOOK_WHY_CONFIGURED 0
+
+#define HOWDAH_HOOK_WHY_EVAL_ONLY 1
+
+#define HOWDAH_HOOK_WHY_INCLUDE_ALLOW_PATHS 2
+
+#define HOWDAH_HOOK_WHY_DENY_EXEC_DIRS 3
+
+/**
+ * Version of the event line format. 1 was the unversioned 1.0 to 1.4.0 line.
+ */
+#define SCHEMA_VERSION 2
 
 /**
  * Maximum number of class names reported by `unserialize_classes`.
@@ -386,17 +430,24 @@ void howdah_free_str(char *s);
  */
 void howdah_free(struct howdah_ctx *ctx);
 
-/* ---- scoped [[exceptions]] ---------------------------------------------
- * The `_at` entry points are the originals plus the executing script (as PHP
- * reports it) and an optional 32-byte SHA-256 of its bytes (`sha256_len` must
- * be 32, else ignored), so `script` / `script_sha256` facets can match. The
- * originals stay and behave as before. Appended by hand in the cbindgen
- * style (cbindgen is not installed on the builder); regenerate when it is. */
+/**
+ * 1 iff Layer 2 can return Block for at least one class: the `[inspect]`
+ * effective mode is not off AND (it is `block`, or a `[inspect.rule_modes]`
+ * override is `block`). Mirrors the decision `howdah_inspect_value` makes,
+ * so the glue can decide per process whether to force `$_SERVER` at RINIT
+ * and refuse before the script. A global `block` never arms it. NULL ctx or
+ * panic is 0. Never stashes a log line.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_inspect_armed(struct howdah_ctx *ctx);
 
 /**
- * Set the request's client IP when it is still empty (the CLI built-in server
- * has no `sapi_getenv`, so the glue hands over the `REMOTE_ADDR` variable it
- * sees in the input filter). A non-empty IP already set is kept.
+ * Set the request's client IP when it is still empty (the CLI built-in
+ * server has no `sapi_getenv`, so the glue hands over the `REMOTE_ADDR`
+ * variable it sees in the input filter instead). A non-empty IP already set
+ * by `howdah_request_begin` is kept. NULL ctx or panic is a no-op.
  *
  * # Safety
  * `ctx` NULL or live; `ip` NULL or valid for `ip_len` bytes.
@@ -404,7 +455,8 @@ void howdah_free(struct howdah_ctx *ctx);
 void howdah_request_client_ip(struct howdah_ctx *ctx, const char *ip, size_t ip_len);
 
 /**
- * Number of `[[exceptions]]` entries active in this context (0 for NULL).
+ * Number of `[[exceptions]]` entries active in this context (0 for NULL /
+ * panic). For `php --ri howdah`.
  *
  * # Safety
  * `ctx` NULL or live.
@@ -412,7 +464,8 @@ void howdah_request_client_ip(struct howdah_ctx *ctx, const char *ip, size_t ip_
 int32_t howdah_exceptions_count(struct howdah_ctx *ctx);
 
 /**
- * 1 iff the context's config has `exceptions_log = true`; 0 otherwise.
+ * 1 iff the context's config has `exceptions_log = true`; 0 otherwise, for
+ * NULL and on panic. For the startup summary line.
  *
  * # Safety
  * `ctx` NULL or live.
@@ -421,17 +474,16 @@ int32_t howdah_exceptions_log(struct howdah_ctx *ctx);
 
 /**
  * 1 iff some exception has a `script_sha256` facet that could apply to
- * `script` (so the glue should hash the file); else 0.
+ * `script` (so the glue should hash the file); else 0. NULL / panic is 0.
  *
  * # Safety
  * `ctx` NULL or live; `script` NULL or valid for `script_len` bytes.
  */
-int32_t howdah_exceptions_want_hash(struct howdah_ctx *ctx,
-                                    const char *script,
-                                    size_t script_len);
+int32_t howdah_exceptions_want_hash(struct howdah_ctx *ctx, const char *script, size_t script_len);
 
 /**
- * `howdah_sink_check` plus the executing script and an optional SHA-256.
+ * `howdah_sink_check` plus the executing script (as PHP reports it) and an
+ * optional SHA-256 (`sha256_len` must be 32, else ignored).
  *
  * # Safety
  * `ctx` NULL or live; every pointer NULL or valid for its length.
@@ -448,7 +500,7 @@ int32_t howdah_sink_check_at(struct howdah_ctx *ctx,
                              size_t sha256_len);
 
 /**
- * `howdah_sink_check_ssrf` plus the executing script and an optional SHA-256.
+ * `howdah_sink_check_ssrf` plus the executing script and optional SHA-256.
  *
  * # Safety
  * As `howdah_sink_check_ssrf`; `script`/`sha256` NULL or valid for their lengths.
@@ -467,7 +519,7 @@ int32_t howdah_sink_check_ssrf_at(struct howdah_ctx *ctx,
                                   size_t sha256_len);
 
 /**
- * `howdah_sink_ssrf_oversize` plus the executing script and an optional SHA-256.
+ * `howdah_sink_ssrf_oversize` plus the executing script and optional SHA-256.
  *
  * # Safety
  * `ctx` NULL or live; pointers NULL or valid for their lengths.
@@ -535,16 +587,20 @@ int32_t howdah_behavior_check_php_write_at(struct howdah_ctx *ctx,
                                            size_t sha256_len);
 
 /**
- * 1 iff Layer 2 can return Block for at least one class: the `[inspect]`
- * effective mode is not off AND (it is `block`, or a `[inspect.rule_modes]`
- * override is `block`). Mirrors the decision `howdah_inspect_value` makes,
- * so the glue can decide per process whether to force `$_SERVER` at RINIT
- * and refuse before the script. A global `block` never arms it. NULL ctx or
- * panic is 0. Never stashes a log line.
+ * The startup plan for the include/eval hook: `mechanism | (reason << 4)`
+ * with the `HOWDAH_HOOK_PLAN_*` / `HOWDAH_HOOK_WHY_*` codes. Mechanism
+ * `NONE` means nothing armed needs the hook (the Layer-3 `eval`/`include`
+ * verdict combined with Layer 4's `deny_exec_dirs`, which the plan takes
+ * from `howdah_behavior_armed`); otherwise what `[sinks] hook` resolves to
+ * (`auto`, the default: compile when only eval needs it, opcode when include
+ * has `allow_paths` or `deny_exec_dirs` is set). NULL ctx or panic is `NONE`
+ * (install nothing: the fail-open direction for a startup decision that only
+ * adds visibility). Never stashes a log line. The only hook-selection export;
+ * the glue reads nothing else for this decision.
  *
  * # Safety
  * `ctx` NULL or live.
  */
-int32_t howdah_inspect_armed(struct howdah_ctx *ctx);
+int32_t howdah_sink_hook_plan(struct howdah_ctx *ctx);
 
 #endif  /* HOWDAH_CORE_H */

@@ -33,8 +33,23 @@ extern "C" {
     /// Install the Layer-3 function-table sink hooks (see `sink_hook.c`). Call
     /// once at MINIT. `cb` decides each intercepted call, returning the action
     /// code (0 ALLOW / 1 LOG / 2 BLOCK); on BLOCK the C trampoline neutralizes
-    /// the call (returns false without invoking the original).
+    /// the call (returns false without invoking the original). Does NOT install
+    /// the include/eval hook: see `howdah_install_include_eval_hook`.
     pub fn howdah_install_sink_hooks(cb: HowdahSinkDecide);
+
+    /// Install the include/require/eval hook, once, at MINIT after
+    /// `howdah_install_sink_hooks`. `mechanism`: 0 nothing, 1 the
+    /// `ZEND_INCLUDE_OR_EVAL` user opcode handler (PHP 7.0+; turns OPcache JIT
+    /// off), 2 the `zend_compile_file`/`zend_compile_string` pointer swap
+    /// (JIT-compatible; a warm-opcache include is not re-inspected). On PHP
+    /// 5.x, 1 is mapped to 2. Returns what was actually installed (0/1/2).
+    pub fn howdah_install_include_eval_hook(mechanism: ::std::ffi::c_int) -> ::std::ffi::c_int;
+
+    /// 1 iff OPcache is loaded and the parsed php.ini says its JIT is on
+    /// (PHP 8.0+; always 0 before). Read from the raw ini hash, since opcache's
+    /// ini entries are not yet registered when module MINIT runs. Advisory:
+    /// drives one startup log line.
+    pub fn howdah_jit_enabled_in_ini() -> ::std::ffi::c_int;
 
     /// Proxy the `phar://` stream wrapper's ops (see `phar_hook.c`). Returns 1 if
     /// phar was found and proxied, 0 if phar is not registered (honest no-op).

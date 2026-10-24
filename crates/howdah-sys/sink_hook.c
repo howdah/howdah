@@ -11,23 +11,34 @@
  * macros, which is why this lives in C (like `shim.c`) rather than in bindgen.
  * NTS only, like the rest of Howdah.
  *
- * Two mechanisms:
+ * Three mechanisms:
  *  - a function-table handler swap over the command/code-exec functions and
- *    `unserialize` (all PHP versions), and
- *  - a ZEND_INCLUDE_OR_EVAL user opcode handler for include/require/eval
- *    (PHP 7.0+). On BLOCK the opcode is skipped (result set NULL, opline
- *    advanced) so the include/eval never runs and the script continues.
- *  - PHP 5.x: the VM keeps opcode operands behind a static-inline accessor not
- *    callable from an extension, so instead the global zend_compile_file /
- *    zend_compile_string pointers are swapped (scoped to real runtime
- *    include/eval; see the 5.x block below).
+ *    `unserialize` (all PHP versions, always installed);
+ *  - for include/require/eval, ONE of two, chosen at MINIT and installed only
+ *    when something is armed that needs it (otherwise nothing is installed and
+ *    OPcache JIT stays on):
+ *    * a ZEND_INCLUDE_OR_EVAL user opcode handler (PHP 7.0+, `[sinks] hook =
+ *      "opcode"`, the default when armed): full coverage, including files
+ *      served from a warm opcache. On BLOCK the opcode is skipped (result set
+ *      NULL, opline advanced). PHP's zend_jit_check_support() refuses to run
+ *      the JIT alongside any user opcode handler, so this turns JIT off.
+ *    * the global zend_compile_file / zend_compile_string pointer swap (all
+ *      versions; the only mechanism on PHP 5.x, whose VM keeps opcode operands
+ *      behind a static-inline accessor; `[sinks] hook = "compile"` on 7.0+).
+ *      Invisible to the JIT check. Scoped to real runtime include/eval; an
+ *      include served from a warm opcache is not compiled again and so is not
+ *      re-inspected (see the block below).
  */
 #include "main/php.h"
+#include "main/php_ini.h"
+#include "main/SAPI.h"
 #include "Zend/zend_API.h"
 #include "Zend/zend_compile.h"
 #include "Zend/zend_execute.h"
+#include "Zend/zend_extensions.h"
 
 #include <string.h>
+#include <strings.h>
 #include <stddef.h>
 
 #include "howdah_sink.h"
@@ -250,16 +261,22 @@ static int howdah_include_or_eval(zend_execute_data *execute_data) {
 }
 #endif
 
-#if PHP_VERSION_ID < 70000
-/* ---- include/require/eval on PHP 5.x: compile-pointer swap ----
- * Spike-proven on 5.6. We swap the global zend_compile_file/zend_compile_string
- * pointers. BLOCK = return NULL (no compile): include -> false, require does NOT
- * fatal (the require fatal lives in the opcode's open step, not the compile
- * step), eval -> false.
+/* ---- include/require/eval: compile-pointer swap (all versions) ----
+ * Spike-proven on 5.6 (the only mechanism on 5.x) and, since the JIT fix, the
+ * `[sinks] hook = "compile"` choice on 7.0+. We swap the global
+ * zend_compile_file/zend_compile_string pointers. BLOCK = return NULL (no
+ * compile): include -> false, require does NOT fatal (the require fatal lives
+ * in the opcode's open step, not the compile step), eval -> false. On 7/8 the
+ * ZEND_INCLUDE_OR_EVAL handler turns a NULL op_array (with no exception) into a
+ * false result and continues, the same as 5.x.
+ *
+ * WHY IT IS JIT-COMPATIBLE: opcache's zend_jit_check_support() refuses to run
+ * the JIT when any user opcode handler is set (or zend_execute_ex is replaced).
+ * It does not look at the compile pointers, so this mechanism leaves JIT on.
  *
  * SCOPING (critical): these pointers are ALSO used for the main script,
  * auto_prepend/append_file, create_function, assert("..."), preg /e and CLI -r.
- * Verified on 5.6.40:
+ * Verified on 5.6.40 and re-verified on 7.4/8.1/8.3 by lab/integration/jit.sh:
  *  - the main script is compiled via zend_compile_file(h, ZEND_INCLUDE) too, so
  *    `type` alone cannot tell it apart; but at that point nothing is executing:
  *    EG(current_execute_data) == NULL. A runtime include/require(_once) is always
@@ -271,57 +288,119 @@ static int howdah_include_or_eval(zend_execute_data *execute_data) {
  *
  * OPCACHE CAVEAT: with opcache, an already-cached file is served without calling
  * zend_compile_file, so include guarding only sees the FIRST compile of a file
- * (cache misses). eval is never cached and is always seen. */
-static zend_op_array *(*howdah_orig_compile_file)(zend_file_handle *fh, int type TSRMLS_DC) = NULL;
-static zend_op_array *(*howdah_orig_compile_string)(zval *src, char *filename TSRMLS_DC) = NULL;
+ * (cache misses). eval is never cached and is always seen. (opcache swaps
+ * zend_compile_file at zend-extension startup, AFTER module MINIT, so it saves
+ * our hook as its "original" and calls it on every miss.) */
+#if PHP_VERSION_ID >= 80100
+# define HOWDAH_FH_NAME(fh) ((fh)->filename ? ZSTR_VAL((fh)->filename) : NULL)
+# define HOWDAH_FH_LEN(fh)  ((fh)->filename ? ZSTR_LEN((fh)->filename) : 0)
+#else
+# define HOWDAH_FH_NAME(fh) ((fh)->filename)
+# define HOWDAH_FH_LEN(fh)  ((fh)->filename ? strlen((fh)->filename) : 0)
+#endif
+
+#if PHP_VERSION_ID >= 70000
+# define HOWDAH_TSRMLS_DC
+# define HOWDAH_TSRMLS_CC
+#else
+# define HOWDAH_TSRMLS_DC TSRMLS_DC
+# define HOWDAH_TSRMLS_CC TSRMLS_CC
+#endif
+
+typedef zend_op_array *(*howdah_compile_file_t)(zend_file_handle *fh, int type HOWDAH_TSRMLS_DC);
+#if PHP_VERSION_ID >= 80200
+typedef zend_op_array *(*howdah_compile_string_t)(zend_string *src, const char *filename,
+                                                  zend_compile_position position);
+#elif PHP_VERSION_ID >= 80000
+typedef zend_op_array *(*howdah_compile_string_t)(zend_string *src, const char *filename);
+#else
+typedef zend_op_array *(*howdah_compile_string_t)(zval *src, char *filename HOWDAH_TSRMLS_DC);
+#endif
+
+static howdah_compile_file_t howdah_orig_compile_file = NULL;
+static howdah_compile_string_t howdah_orig_compile_string = NULL;
 
 #define HOWDAH_EVAL_DESC_SUFFIX " : eval()'d code"
 
-static zend_op_array *howdah_compile_file(zend_file_handle *fh, int type TSRMLS_DC) {
+static zend_op_array *howdah_compile_file(zend_file_handle *fh, int type HOWDAH_TSRMLS_DC) {
+    const char *name = fh ? HOWDAH_FH_NAME(fh) : NULL;
+#if PHP_VERSION_ID >= 70400
+    /* opcache.preload (7.4+): the preload script runs at server startup, so
+     * the files it require()s arrive here with EG(current_execute_data) set,
+     * looking like runtime includes, but there is no request to attribute
+     * them to and nothing to refuse. Chain unguarded. (opcache calls the
+     * compile function it saved at its startup, i.e. this hook, for every
+     * preload compile.) */
+    if (CG(compiler_options) & ZEND_COMPILE_PRELOAD) {
+        return howdah_orig_compile_file(fh, type HOWDAH_TSRMLS_CC);
+    }
+#endif
     if (EG(current_execute_data) != NULL
         && (type == ZEND_INCLUDE || type == ZEND_REQUIRE
             || type == ZEND_INCLUDE_ONCE || type == ZEND_REQUIRE_ONCE)
-        && fh && fh->filename) {
+        && name) {
+        size_t len = HOWDAH_FH_LEN(fh);
         if (howdah_g_decide) {
-            int d = howdah_g_decide(HOWDAH_SINK_INCLUDE, "include", 7,
-                                    fh->filename, strlen(fh->filename));
+            int d = howdah_g_decide(HOWDAH_SINK_INCLUDE, "include", 7, name, len);
             if (d == HOWDAH_ACTION_BLOCK) {
                 return NULL;
             }
         }
-        /* Layer-4 exec-dir (Ruling 3, 5.x included-file case): the file being
+        /* Layer-4 exec-dir (Ruling 3, included-file case): the file being
          * compiled for a runtime include/require is checked against the
          * deny_exec_dirs policy. BLOCK reuses the include-neutralize path
          * (return NULL = no op_array), the same bail include guarding uses. */
         if (howdah_g_behavior_exec_dir && howdah_g_behavior_armed
             && howdah_g_behavior_armed(NULL, HOWDAH_BEHAVIOR_EXEC_DIR)
-            && howdah_g_behavior_exec_dir(NULL, fh->filename, strlen(fh->filename))
-               == HOWDAH_ACTION_BLOCK) {
+            && howdah_g_behavior_exec_dir(NULL, name, len) == HOWDAH_ACTION_BLOCK) {
             return NULL;
         }
     }
-    return howdah_orig_compile_file(fh, type TSRMLS_CC);
+    return howdah_orig_compile_file(fh, type HOWDAH_TSRMLS_CC);
 }
 
-static zend_op_array *howdah_compile_string(zval *src, char *filename TSRMLS_DC) {
-    if (howdah_g_decide && src && Z_TYPE_P(src) == IS_STRING && filename) {
-        size_t fl = strlen(filename);
-        size_t sl = sizeof(HOWDAH_EVAL_DESC_SUFFIX) - 1;
-        if (fl >= sl && memcmp(filename + fl - sl, HOWDAH_EVAL_DESC_SUFFIX, sl) == 0) {
-            int d = howdah_g_decide(HOWDAH_SINK_EVAL, "eval", 4,
-                                    Z_STRVAL_P(src), Z_STRLEN_P(src));
-            if (d == HOWDAH_ACTION_BLOCK) {
-                return NULL;
-            }
-        }
+/* 1 iff `filename` is an eval()'d-code description. */
+static int howdah_is_eval_desc(const char *filename) {
+    size_t fl, sl = sizeof(HOWDAH_EVAL_DESC_SUFFIX) - 1;
+    if (!filename) return 0;
+    fl = strlen(filename);
+    return fl >= sl && memcmp(filename + fl - sl, HOWDAH_EVAL_DESC_SUFFIX, sl) == 0;
+}
+
+#if PHP_VERSION_ID >= 80200
+static zend_op_array *howdah_compile_string(zend_string *src, const char *filename,
+                                            zend_compile_position position) {
+    if (howdah_g_decide && src && howdah_is_eval_desc(filename)
+        && howdah_g_decide(HOWDAH_SINK_EVAL, "eval", 4, ZSTR_VAL(src), ZSTR_LEN(src))
+           == HOWDAH_ACTION_BLOCK) {
+        return NULL;
     }
-    return howdah_orig_compile_string(src, filename TSRMLS_CC);
+    return howdah_orig_compile_string(src, filename, position);
+}
+#elif PHP_VERSION_ID >= 80000
+static zend_op_array *howdah_compile_string(zend_string *src, const char *filename) {
+    if (howdah_g_decide && src && howdah_is_eval_desc(filename)
+        && howdah_g_decide(HOWDAH_SINK_EVAL, "eval", 4, ZSTR_VAL(src), ZSTR_LEN(src))
+           == HOWDAH_ACTION_BLOCK) {
+        return NULL;
+    }
+    return howdah_orig_compile_string(src, filename);
+}
+#else
+static zend_op_array *howdah_compile_string(zval *src, char *filename HOWDAH_TSRMLS_DC) {
+    if (howdah_g_decide && src && Z_TYPE_P(src) == IS_STRING && howdah_is_eval_desc(filename)
+        && howdah_g_decide(HOWDAH_SINK_EVAL, "eval", 4, Z_STRVAL_P(src), Z_STRLEN_P(src))
+           == HOWDAH_ACTION_BLOCK) {
+        return NULL;
+    }
+    return howdah_orig_compile_string(src, filename HOWDAH_TSRMLS_CC);
 }
 #endif
 
-/* Install all Layer-3 hooks. Call once at MINIT, after the builtin modules have
- * registered their functions. `cb` is the glue decision callback; a NULL cb
- * leaves the trampolines chaining unguarded. */
+/* Install the Layer-3 function-table hooks. Call once at MINIT, after the
+ * builtin modules have registered their functions. `cb` is the glue decision
+ * callback; a NULL cb leaves the trampolines chaining unguarded. The
+ * include/eval hook is NOT installed here: see howdah_install_include_eval_hook. */
 void howdah_install_sink_hooks(howdah_sink_decide_t cb) {
     howdah_g_decide = cb;
     HOWDAH_INSTALL_SINK(system, "system");
@@ -331,11 +410,31 @@ void howdah_install_sink_hooks(howdah_sink_decide_t cb) {
     HOWDAH_INSTALL_SINK(popen, "popen");
     HOWDAH_INSTALL_SINK(proc_open, "proc_open");
     HOWDAH_INSTALL_SINK(unserialize, "unserialize");
+}
+
+/* Install the include/require/eval hook. Call once at MINIT, after
+ * howdah_install_sink_hooks (which sets the decide callback), and ONLY when
+ * something is armed that needs it (the glue asks the core): with no hook
+ * installed PHP never learns Howdah is there, and OPcache JIT stays on.
+ *
+ * `mechanism`: 0 = install nothing; 1 = the ZEND_INCLUDE_OR_EVAL user opcode
+ * handler (PHP 7.0+; full coverage, JIT off); 2 = the compile-pointer swap
+ * (JIT-compatible; warm-opcache includes not re-inspected). PHP 5.x has no
+ * usable opcode-operand access, so 1 is mapped to 2 there. Returns what was
+ * actually installed (0/1/2), for the phpinfo row. Idempotent. */
+int howdah_install_include_eval_hook(int mechanism) {
+    static int installed = 0;
+    if (installed || mechanism == 0) {
+        return installed;
+    }
 #if PHP_VERSION_ID >= 70000
-    zend_set_user_opcode_handler(ZEND_INCLUDE_OR_EVAL, howdah_include_or_eval);
-#else
-    /* Always swap on 5.x; per-call decide + scoping handle off/armed. Guard
-     * against double-install so we never chain to ourselves. */
+    if (mechanism == 1) {
+        zend_set_user_opcode_handler(ZEND_INCLUDE_OR_EVAL, howdah_include_or_eval);
+        installed = 1;
+        return installed;
+    }
+#endif
+    /* Guard against double-install so we never chain to ourselves. */
     if (!howdah_orig_compile_file) {
         howdah_orig_compile_file = zend_compile_file;
         zend_compile_file = howdah_compile_file;
@@ -344,5 +443,66 @@ void howdah_install_sink_hooks(howdah_sink_decide_t cb) {
         howdah_orig_compile_string = zend_compile_string;
         zend_compile_string = howdah_compile_string;
     }
+    installed = 2;
+    return installed;
+}
+
+/* ---- OPcache JIT ini probe (PHP 8.0+) -------------------------------------
+ * 1 iff OPcache is loaded and its php.ini says the JIT is on (opcache.jit not a
+ * disabling word, opcache.jit_buffer_size > 0, opcache.enable on, and under the
+ * CLI opcache.enable_cli on). Read with cfg_get_string from the parsed ini,
+ * NOT zend_ini_*: opcache is a zend_extension whose ini entries are registered
+ * in its own startup, which runs AFTER module MINIT (verified on 8.1/8.3 by
+ * lab/integration/jit.sh), so at MINIT they are not registered yet, but the raw
+ * values from php.ini and -d are already in the configuration hash. Absent keys
+ * take PHP's per-version defaults (8.4 changed both). Advisory only: it drives
+ * one startup log line. Always 0 before PHP 8.0 (no JIT). */
+static int howdah_ini_falsey(const char *s) {
+    return !s || !*s || !strcasecmp(s, "0") || !strcasecmp(s, "off") || !strcasecmp(s, "no")
+           || !strcasecmp(s, "false") || !strcasecmp(s, "disable") || !strcasecmp(s, "disabled")
+           || !strcasecmp(s, "none");
+}
+
+/* Parse "64M" / "0" / "128k" the way PHP's quantity parser does (K/M/G). */
+static long howdah_ini_bytes(const char *s) {
+    long v = 0;
+    if (!s) return 0;
+    while (*s == ' ' || *s == '\t') s++;
+    while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; }
+    switch (*s) {
+        case 'g': case 'G': v *= 1024; /* fallthrough */
+        case 'm': case 'M': v *= 1024; /* fallthrough */
+        case 'k': case 'K': v *= 1024; break;
+        default: break;
+    }
+    return v;
+}
+
+int howdah_jit_enabled_in_ini(void) {
+#if PHP_VERSION_ID >= 80000
+    char *s = NULL;
+    const char *jit, *buf, *en, *cli;
+# if PHP_VERSION_ID >= 80400
+    const char *jit_default = "disable", *buf_default = "64M";
+# else
+    const char *jit_default = "tracing", *buf_default = "0";
+# endif
+    if (!zend_get_extension("Zend OPcache")) return 0;
+    jit = (cfg_get_string("opcache.jit", &s) == SUCCESS && s) ? s : jit_default;
+    if (howdah_ini_falsey(jit)) return 0;
+    s = NULL;
+    buf = (cfg_get_string("opcache.jit_buffer_size", &s) == SUCCESS && s) ? s : buf_default;
+    if (howdah_ini_bytes(buf) <= 0) return 0;
+    s = NULL;
+    en = (cfg_get_string("opcache.enable", &s) == SUCCESS && s) ? s : "1";
+    if (howdah_ini_falsey(en)) return 0;
+    if (sapi_module.name && !strcmp(sapi_module.name, "cli")) {
+        s = NULL;
+        cli = (cfg_get_string("opcache.enable_cli", &s) == SUCCESS && s) ? s : "0";
+        if (howdah_ini_falsey(cli)) return 0;
+    }
+    return 1;
+#else
+    return 0;
 #endif
 }

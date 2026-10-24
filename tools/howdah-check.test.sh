@@ -135,5 +135,136 @@ eq "ini: php.ini untouched" "$(cksum < "$T/ini/php.ini")" "$sum1"
 
 sh "$HC" ini "$T/nonexistent-php" >/dev/null 2>&1; rc=$?; eq "ini with a missing php exits 2" "$rc" 2
 
+# --- detect: layout + the package (or tarball) Howdah provides, per install ---
+# Fake vendor trees under $T: each fake php answers -v/-i/-m like the vendor's
+# build would (paths in its -i output are the vendor's real ones).
+# fake_php <root> <bin-path> <version> <api> <thread-safety> <extension_dir> <scan_dir>
+fake_php() {
+  _f="$1$2"; mkdir -p "$(dirname "$_f")"
+  cat > "$_f" <<P
+#!/bin/sh
+case "\$1" in
+  -v) echo "PHP $3 (cli)" ;;
+  -i) printf '%s\n' 'PHP Version => $3' 'PHP API => $4' 'Thread Safety => $5' \
+        'extension_dir => $6 => $6' 'Scan this dir for additional .ini files => $7' ;;
+  -m) printf '[PHP Modules]\nCore\n' ;;
+esac
+P
+  chmod +x "$_f"
+}
+# the detect lines of one install (from its "php:" line to the next install)
+block() { printf '%s\n' "$1" | awk -v p="php: $2" '$0==p{on=1;print;next} /^(php: |found |no PHP|note: )/{on=0} on'; }
+detect_in() { HOWDAH_CHECK_ROOT=$1 HOWDAH_CHECK_UNAME_M=${2:-x86_64} PATH=/nonexistent:/usr/bin:/bin sh "$HC" detect 2>/dev/null </dev/null; }
+has() { printf '%s\n' "$1" | grep -qF -- "$2"; }  # fixed-string match
+
+L=$T/layouts
+deb() { mkdir -p "$1/etc"; echo 12.0 > "$1/etc/debian_version"; }
+fake_php "$L/cpanel-rpm" /opt/cpanel/ea-php74/root/usr/bin/php 7.4.33 20190902 disabled \
+  /opt/cpanel/ea-php74/root/usr/lib64/php/modules /opt/cpanel/ea-php74/root/etc/php.d
+fake_php "$L/cpanel-deb" /opt/cpanel/ea-php74/root/usr/bin/php 7.4.33 20190902 disabled \
+  /opt/cpanel/ea-php74/root/usr/lib64/php/modules /opt/cpanel/ea-php74/root/etc/php.d
+deb "$L/cpanel-deb"
+fake_php "$L/plesk-rpm" /opt/plesk/php/7.4/bin/php 7.4.33 20190902 disabled \
+  /opt/plesk/php/7.4/lib64/php/modules /opt/plesk/php/7.4/etc/php.d
+fake_php "$L/plesk-deb" /opt/plesk/php/7.4/bin/php 7.4.33 20190902 disabled \
+  /opt/plesk/php/7.4/lib/php/modules /opt/plesk/php/7.4/etc/php.d
+deb "$L/plesk-deb"
+fake_php "$L/cloudlinux-rpm" /opt/alt/php74/usr/bin/php 7.4.33 20190902 disabled \
+  /opt/alt/php74/usr/lib64/php/modules /opt/alt/php74/link/conf
+fake_php "$L/stock-rhel-rpm" /usr/bin/php 7.4.33 20190902 disabled /usr/lib64/php/modules /etc/php.d
+fake_php "$L/al2023" /usr/bin/php 8.2.35 20220829 disabled /usr/lib64/php8.2/modules /etc/php.d
+fake_php "$L/directadmin" /usr/local/php74/bin/php 7.4.33 20190902 disabled \
+  /usr/local/php74/lib/php/extensions/no-debug-non-zts-20190902 /usr/local/php74/lib/php.conf.d
+fake_php "$L/stock-debian" /usr/bin/php7.4 7.4.33 20190902 disabled /usr/lib/php/20190902 /etc/php/7.4/cli/conf.d
+deb "$L/stock-debian"
+fake_php "$L/sury" /usr/bin/php7.4 7.4.33-1+ubuntu22.04.1+deb.sury.org+1 20190902 disabled \
+  /usr/lib/php/20190902 /etc/php/7.4/cli/conf.d
+deb "$L/sury"
+fake_php "$L/remi" /opt/remi/php74/root/usr/bin/php 7.4.33 20190902 disabled \
+  /opt/remi/php74/root/usr/lib64/php/modules /etc/opt/remi/php74/php.d
+fake_php "$L/unknown" /opt/php81/bin/php 8.1.34 20210902 disabled \
+  /opt/php81/lib/php/extensions/no-debug-non-zts-20210902 /opt/php81/etc/conf.d
+fake_php "$L/zts" /opt/cpanel/ea-php74/root/usr/bin/php 7.4.33 20190902 enabled \
+  /opt/cpanel/ea-php74/root/usr/lib64/php/modules /opt/cpanel/ea-php74/root/etc/php.d
+PKG=https://pkg.howdah.org
+
+b=$(block "$(detect_in "$L/cpanel-rpm")" "$L/cpanel-rpm/opt/cpanel/ea-php74/root/usr/bin/php")
+for want in 'version: 7.4.33' 'api: 20190902' 'thread_safety: NTS' \
+    'extension_dir: /opt/cpanel/ea-php74/root/usr/lib64/php/modules' \
+    'ini_scan_dir: /opt/cpanel/ea-php74/root/etc/php.d' 'layout: cpanel' \
+    "howdah package: ea-php74-php-howdah (yum/dnf repo $PKG/cpanel/yum)"; do
+  has "$b" "  $want"; check "cpanel (EL) install reports '$want'" $?
+done
+b=$(block "$(detect_in "$L/cpanel-deb")" "$L/cpanel-deb/opt/cpanel/ea-php74/root/usr/bin/php")
+has "$b" "  howdah package: ea-php74-php-howdah (apt repo $PKG/cpanel/apt, suite stable, component main)"
+check "cpanel on Ubuntu points at the cpanel apt repo" $?
+b=$(block "$(detect_in "$L/plesk-rpm")" "$L/plesk-rpm/opt/plesk/php/7.4/bin/php")
+has "$b" '  layout: plesk' && has "$b" "  howdah package: plesk-php74-howdah (yum/dnf repo $PKG/plesk/yum)"
+check "plesk (EL) layout + package" $?
+b=$(block "$(detect_in "$L/plesk-deb")" "$L/plesk-deb/opt/plesk/php/7.4/bin/php")
+has "$b" '  layout: plesk' && has "$b" "  howdah package: plesk-php74-howdah (apt repo $PKG/plesk/apt, suite stable, component main)"
+check "plesk (Debian/Ubuntu) layout + package" $?
+b=$(block "$(detect_in "$L/cloudlinux-rpm")" "$L/cloudlinux-rpm/opt/alt/php74/usr/bin/php")
+has "$b" '  layout: cloudlinux' && has "$b" "  howdah package: alt-php74-howdah (yum/dnf repo $PKG/cloudlinux/yum)"
+check "cloudlinux layout + package" $?
+b=$(block "$(detect_in "$L/stock-rhel-rpm")" "$L/stock-rhel-rpm/usr/bin/php")
+has "$b" '  layout: stock-rhel' && has "$b" "  howdah package: php-howdah (yum/dnf repo $PKG/el/php7.4/yum)"
+check "stock RHEL/Alma/Rocky layout + per-minor el repo" $?
+b=$(block "$(detect_in "$L/al2023")" "$L/al2023/usr/bin/php")
+has "$b" '  layout: stock-rhel' && has "$b" "  howdah package: php-howdah (yum/dnf repo $PKG/el/php8.2/yum)"
+check "Amazon Linux 2023 (/usr/lib64/php8.2/modules) is stock-rhel" $?
+b=$(block "$(detect_in "$L/directadmin")" "$L/directadmin/usr/local/php74/bin/php")
+has "$b" '  layout: directadmin' && \
+  has "$b" '  howdah package: not yet packaged: use the tarball for API 20190902 (howdah-<VERSION>-php7.4-20190902-linux-x86_64.tar.gz)'
+check "directadmin: tarball, not a package" $?
+b=$(block "$(detect_in "$L/stock-debian")" "$L/stock-debian/usr/bin/php7.4")
+has "$b" '  layout: stock-debian' && has "$b" "  howdah package: php7.4-howdah (apt repo $PKG/apt, suite stable, component main)"
+check "stock Debian/Ubuntu PHP uses the main apt package" $?
+b=$(block "$(detect_in "$L/sury")" "$L/sury/usr/bin/php7.4")
+has "$b" '  layout: sury' && has "$b" "  howdah package: php7.4-howdah (apt repo $PKG/apt, suite stable, component main)"
+check "Sury PHP layout + package" $?
+b=$(block "$(detect_in "$L/remi")" "$L/remi/opt/remi/php74/root/usr/bin/php")
+has "$b" '  layout: remi' && has "$b" "  howdah package: php74-howdah (yum/dnf repo $PKG/yum)"
+check "Remi SCL layout + package" $?
+b=$(block "$(detect_in "$L/unknown")" "$L/unknown/opt/php81/bin/php")
+has "$b" '  layout: unknown' && \
+  has "$b" '  howdah package: not yet packaged: use the tarball for API 20210902 (howdah-<VERSION>-php8.1-20210902-linux-x86_64.tar.gz)'
+check "unknown layout falls back to the tarball" $?
+b=$(block "$(detect_in "$L/zts")" "$L/zts/opt/cpanel/ea-php74/root/usr/bin/php")
+has "$b" '  howdah package: none: Howdah is built for NTS PHP only and this PHP is ZTS'
+check "ZTS PHP is never offered a package" $?
+b=$(block "$(detect_in "$L/cpanel-rpm" aarch64)" "$L/cpanel-rpm/opt/cpanel/ea-php74/root/usr/bin/php")
+has "$b" '  howdah package: not yet packaged for aarch64: use the tarball for API 20190902 (howdah-<VERSION>-php7.4-20190902-linux-aarch64.tar.gz)'
+check "a layout with no aarch64 package says so on aarch64" $?
+
+# The packaging table and detect agree: every row of packaging/layouts.tsv, for
+# PHP 7.4, is the package + repo detect names for that layout and format.
+TSV=$D/../packaging/layouts.tsv
+TAB=$(printf '\t')
+rows=0
+while IFS=$TAB read -r lay fmt arches pkg rel moddir ext inis reqs repo label; do
+  case "$lay" in ''|'#'*) continue ;; esac
+  rows=$((rows + 1))
+  name=$(printf '%s' "$pkg" | sed -e 's/@XY@/74/g' -e 's/@MINOR@/7.4/g')
+  rp=$(printf '%s' "$repo" | sed -e 's/@MINOR@/7.4/g')
+  if [ "$fmt" = deb ]; then want="$name (apt repo $PKG/$rp/apt, suite stable, component main)"
+  else want="$name (yum/dnf repo $PKG/$rp/yum)"; fi
+  r=$L/$lay-$fmt
+  bin=$(cd "$r" && find . -type f -name php | head -1 | sed 's/^\.//')
+  out=$(detect_in "$r")
+  has "$(block "$out" "$r$bin")" "  howdah package: $want"
+  check "layouts.tsv row $lay/$fmt matches detect ($want)" $?
+  # a row's mod dir is the vendor extension_dir detect classifies (minor 7.4)
+  md=$(printf '%s' "$moddir" | sed -e 's/@XY@/74/g' -e 's/@MINOR@/7.4/g')
+  has "$(block "$out" "$r$bin")" "  extension_dir: $md"
+  check "layouts.tsv row $lay/$fmt moddir is the fake vendor extension_dir" $?
+  case ",$arches," in
+    *,aarch64,*) ;;
+    *) has "$(block "$(detect_in "$r" aarch64)" "$r$bin")" '  howdah package: not yet packaged for aarch64'
+       check "layouts.tsv row $lay/$fmt (x86_64 only) is not offered on aarch64" $? ;;
+  esac
+done < "$TSV"
+[ "$rows" -ge 6 ]; check "layouts.tsv has the panel and stock-EL rows ($rows)" $?
+
 [ $fail -eq 0 ] && echo "all passed"
 exit $fail

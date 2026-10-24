@@ -52,7 +52,7 @@ const compare = [
       <div>
         <h2>What is Howdah, and why the name?</h2>
         <p>Howdah is a native extension for PHP. When a web request arrives, PHP starts parsing it before any of your code runs. Howdah watches that parsing step and refuses requests that are built to exhaust memory, while PHP is still working through them.</p>
-        <p>Version 1.0 completes Howdah's first layer: limits on <code>multipart/form-data</code> uploads, on the number and shape of input variables, and on request headers. The critical resource-exhaustion limits block by default, even in detect mode; everything else starts in log-only mode so you can watch it before you let it block. Version 1.1 adds Layer 2, which inspects request content for injection patterns and logs them; it does not block by default. Version 1.2 adds Layer 3, which guards two dangerous PHP sinks, command execution and <code>unserialize</code>, and also logs first.</p>
+        <p>Version 1.0 completes Howdah's first layer: limits on <code>multipart/form-data</code> uploads, on the number and shape of input variables, and on request headers. The critical resource-exhaustion limits block by default, even in detect mode; everything else starts in log-only mode so you can watch it before you let it block. Version 1.1 adds Layer 2, which inspects request content for injection patterns and logs them; it does not block by default. Version 1.2 adds Layer 3, which guards four dangerous PHP sinks (command execution and <code>unserialize</code> on every supported PHP, <code>include</code> and <code>eval</code> on PHP 7.0+), and also logs first.</p>
         <p>It is not a replacement for patching. Upgrade PHP when you can. Use Howdah when you cannot, or until you can.</p>
       </div>
       <aside class="card" aria-labelledby="howdah-word">
@@ -164,10 +164,10 @@ const compare = [
   <section id="sinks" class="alt">
     <div class="wrap">
       <h2>Layer 3 — the sinks Howdah guards <span class="pill ok">1.2 · log-only</span></h2>
-      <p>Layer 2 looks at request values. Layer 3 looks at what the application does with them: it guards dangerous PHP functions, called <em>sinks</em>, with a flat allowlist policy in the style of Snuffleupagus. Version 1.2 <strong>actively guards two sinks. It detects and logs; it does not block by default.</strong> This is sink hardening, not XSS or output inspection.</p>
+      <p>Layer 2 looks at request values. Layer 3 looks at what the application does with them: it guards dangerous PHP functions, called <em>sinks</em>, with a flat allowlist policy in the style of Snuffleupagus. Version 1.2 <strong>actively guards four sinks. It detects and logs; it does not block by default.</strong> This is sink hardening, not XSS or output inspection.</p>
       <div class="cols two" style="margin-top:1.5rem">
         <div>
-          <h3>Two active sinks</h3>
+          <h3>Four active sinks</h3>
           <div class="tablewrap" tabindex="0" role="region" aria-label="Layer 3 active sinks (scrolls sideways on narrow screens)">
             <table>
               <caption class="sr-only">Layer 3 sinks guarded in 1.2</caption>
@@ -175,16 +175,30 @@ const compare = [
               <tbody>
                 <tr><th scope="row">Command execution</th><td><code>system</code>, <code>exec</code>, <code>shell_exec</code>, <code>passthru</code>, <code>popen</code>, <code>proc_open</code></td><td>Logs when not allowlisted</td></tr>
                 <tr><th scope="row">Unserialize</th><td><code>unserialize</code></td><td><strong>Off</strong>; opt in to log</td></tr>
+                <tr><th scope="row">Include</th><td><code>include</code>, <code>require</code> (PHP 7.0+)</td><td>Inert until <code>allow_paths</code> is set</td></tr>
+                <tr><th scope="row">Eval</th><td><code>eval</code> (PHP 7.0+)</td><td>Logs when reached</td></tr>
               </tbody>
             </table>
           </div>
           <p class="legend">Known limitation: <code>proc_open</code> with an array command (PHP 7.4+) is not inspected.</p>
-          <h3 style="margin-top:1.5rem">Not in 1.2: the roadmap</h3>
-          <p><code>include</code> and <code>eval</code> are <strong>reserved</strong>: their config keys exist, but nothing is hooked, so they do nothing in 1.2. <code>phar://</code> and SSRF coverage are roadmap too. None of these is shipped.</p>
+          <h3 style="margin-top:1.5rem">Coverage by PHP version</h3>
+          <div class="tablewrap" tabindex="0" role="region" aria-label="Layer 3 coverage by PHP version (scrolls sideways on narrow screens)">
+            <table>
+              <caption class="sr-only">Layer 3 sink coverage by PHP version</caption>
+              <thead><tr><th scope="col">Sink</th><th scope="col">PHP 5.4–5.6</th><th scope="col">PHP 7.0–8.5</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">Command execution</th><td><span class="pill ok">detect + block</span></td><td><span class="pill ok">detect + block</span></td></tr>
+                <tr><th scope="row"><code>unserialize</code> (off by default)</th><td><span class="pill ok">detect + block</span></td><td><span class="pill ok">detect + block</span></td></tr>
+                <tr><th scope="row"><code>include</code> / <code>require</code></th><td><span class="pill na">not available</span></td><td><span class="pill ok">detect + block</span></td></tr>
+                <tr><th scope="row"><code>eval</code></th><td><span class="pill na">not available</span></td><td><span class="pill ok">detect + block</span></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="legend">Command execution and <code>unserialize</code> work on every supported PHP version. <code>include</code> and <code>eval</code> require PHP 7.0+; the mechanism is not feasible on the 5.x VM. Blocking an include or eval skips the opcode, so it never runs and the script continues. <code>phar://</code> and SSRF coverage are roadmap and are not in this table because they are not shipped.</p>
         </div>
         <div>
           <h3>Log-first, on purpose</h3>
-          <p>Layer 3 has its own <code>sinks.mode</code>, which defaults to <code>detect</code> (log only). It is independent of the global <code>howdah.mode</code>: setting <code>howdah.mode = block</code> does <strong>not</strong> arm sinks. Only command execution and <code>unserialize</code> can block in 1.2, and only when an operator sets that sink to <code>block</code> explicitly, after setting its allowlist.</p>
+          <p>Layer 3 has its own <code>sinks.mode</code>, which defaults to <code>detect</code> (log only). It is independent of the global <code>howdah.mode</code>: setting <code>howdah.mode = block</code> does <strong>not</strong> arm sinks. Any active sink can block, and only when an operator sets that sink to <code>block</code> explicitly, after setting its allowlist.</p>
           <h3 style="margin-top:1.5rem">The argument is never logged</h3>
           <p>An event records the sink and the function name (plus the class name for <code>unserialize</code>). The command line and the serialized payload are never written to the log.</p>
         </div>

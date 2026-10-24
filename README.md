@@ -48,8 +48,9 @@ section of [docs/config.md](docs/config.md) and the [CHANGELOG](CHANGELOG.md).
 ## Layer 3: sink hardening (in 1.2)
 
 Layer 3 ships in 1.2. It guards dangerous PHP functions ("sinks"). Version 1.2
-**actively guards two sinks**: `command_exec` (`system`, `exec`, `shell_exec`,
-`passthru`, `popen`, `proc_open`) and `unserialize`. It is a flat allowlist
+**actively guards four sinks**: `command_exec` (`system`, `exec`, `shell_exec`,
+`passthru`, `popen`, `proc_open`) and `unserialize` on every supported PHP
+(5.4-8.5), plus `include`/`require` and `eval` on PHP 7.0+ only. It is a flat allowlist
 policy in the Snuffleupagus style. It **detects and logs; it does not block by
 default.** It has its own `sinks.mode`, which defaults to `detect` and is
 independent of the global `howdah.mode`: `howdah.mode = block` does not arm
@@ -58,8 +59,10 @@ or the serialized payload) is never logged. This is not XSS or output
 inspection. It is best-effort virtual patching and can be bypassed; one known
 gap is that `proc_open` with an array command (PHP 7.4+) is not inspected.
 
-`include` and `eval` are **reserved**: their config keys exist but nothing is
-hooked in 1.2. `phar://` and SSRF coverage are roadmap, not shipped. See the
+`include`/`require` and `eval` are **not available on PHP 5.x** (the opcode
+mechanism is not feasible on the 5.x VM); on PHP 7.0+ they detect and block, and
+blocking skips the opcode so the include/eval never runs. `include` is inert
+until `allow_paths` is set. `phar://` and SSRF coverage are roadmap, not shipped. See the
 `[sinks]` section of [docs/config.md](docs/config.md) and the
 [CHANGELOG](CHANGELOG.md).
 

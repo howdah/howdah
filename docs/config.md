@@ -141,17 +141,30 @@ request; values past a budget are not scanned.
 
 **Sinks log by default; they do not block.** Layer 3 watches dangerous PHP
 functions ("sinks") and writes an event when one is called with something your
-allowlist does not cover. In 1.2 it **actively guards two sinks**:
+allowlist does not cover. In 1.2 it **actively guards four sinks**:
 
 - `command_exec` — `system`, `exec`, `shell_exec`, `passthru`, `popen` and
   `proc_open`.
 - `unserialize` — object unserialization.
+- `include` / `require` — **PHP 7.0+ only**. Inert until `allow_paths` is set.
+- `eval` — **PHP 7.0+ only**.
+
+| Sink | PHP 5.4–5.6 | PHP 7.0–8.5 |
+|------|-------------|-------------|
+| `command_exec` | detect + block | detect + block |
+| `unserialize` (off by default) | detect + block | detect + block |
+| `include` / `require` | not available | detect + block |
+| `eval` | not available | detect + block |
+
+`command_exec` and `unserialize` work on every supported PHP version;
+`include`/`eval` require PHP 7.0+ (the opcode mechanism is not feasible on the
+5.x VM). phar:// and SSRF are roadmap, not shipped.
 
 `sinks.mode` defaults to `detect` (log only) and is **independent of the global
 `howdah.mode`**: a global `howdah.mode = block` does **not** arm any sink. To
 block, set a sink's mode to `block` explicitly, and **set its allowlist first**
-— with an empty allowlist every call is "not allowlisted". Only `command_exec`
-and `unserialize` can block in 1.2.
+— with an empty allowlist every call is "not allowlisted". Any active sink can
+block when explicitly armed.
 
 **The sink argument is never logged.** An event records only the sink and the
 function name (plus the class name for `unserialize`) — never the command line
@@ -173,10 +186,11 @@ allow = []                # commands that are fine; anything else is logged (or 
 # mode = "detect"         # opt in (log only). "block" refuses non-allowlisted classes.
 allow_classes = []        # class names that may be unserialized
 
-# Reserved -- NOT ACTIVE in 1.2. Nothing is hooked, so setting these has NO effect.
-# The keys exist so a config written now keeps working when they arrive in a later release.
-[sinks.include]           # reserved: arriving in a later release
-[sinks.eval]              # reserved: arriving in a later release
+# PHP 7.0+ ONLY. Not available on PHP 5.x (accepted there, but nothing is hooked).
+[sinks.include]           # include/require. Inert until allow_paths is set.
+# mode = "block"          # optional per-sink override; unset inherits sinks.mode
+allow_paths = []          # directories include/require may load from
+[sinks.eval]              # eval
 ```
 
 ### `command_exec`
@@ -195,12 +209,14 @@ unserialize calls that create objects of classes not listed in `allow_classes`.
 Set `mode = "block"` only after the log shows your application's legitimate
 classes are all in `allow_classes`.
 
-### Reserved: `include` and `eval` (not active in 1.2)
+### `include` / `require` and `eval` (PHP 7.0+ only)
 
-`[sinks.include]` and `[sinks.eval]` are **reserved and not active in 1.2**.
-Their config keys are accepted so your file stays forward-compatible, but no
-hook is installed, so they log nothing and block nothing. They arrive in a later
-release; do not rely on them as guards today.
+Active on PHP 7.0 and later, in detect and block modes. **Not available on
+PHP 5.x**: the opcode-operand mechanism is not feasible on the 5.x VM, so there
+these tables are accepted but nothing is hooked. `include`/`require` is **inert
+until `allow_paths` is set**. Blocking works by skipping the opcode: the
+include/eval never runs and the script continues. As always, the argument is
+never logged.
 
 ### Known limitations
 

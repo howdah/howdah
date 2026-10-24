@@ -12,8 +12,8 @@ All notable changes to Howdah are documented here. The format follows
   `proc_open`) and `unserialize`.
 - Detects and logs; **does not block by default.** Layer 3 is governed by its
   own `sinks.mode` (default `detect`), independent of `howdah.mode`: a global
-  `howdah.mode = block` does not arm sinks. Only `command_exec` and
-  `unserialize` can block, and only when explicitly armed; set the allowlist
+  `howdah.mode = block` does not arm sinks. Sinks can block only
+  when explicitly armed; set the allowlist
   first.
 - `unserialize` is off by default. The sink argument (command line or
   serialized payload) is never logged.
@@ -22,9 +22,13 @@ All notable changes to Howdah are documented here. The format follows
 - Best-effort, bypassable virtual patching. Known limitation: `proc_open`
   with an array command (PHP 7.4+) is not inspected.
 
-### Reserved / roadmap (not active in 1.2)
-- `include` and `eval`: config keys (`[sinks.include]`, `[sinks.eval]`) are
-  accepted but nothing is hooked, so they log and block nothing.
+- `include` / `require` and `eval` are also active sinks, on **PHP 7.0+ only**
+  (detect and block). They are not available on PHP 5.x. `include` is inert
+  until `[sinks.include] allow_paths` is set. Block works by skipping the
+  opcode: the include/eval never runs and the script continues.
+  `command_exec` and `unserialize` work on every supported PHP (5.4-8.5).
+
+### Roadmap (not shipped)
 - `phar://` and SSRF coverage are roadmap.
 
 ## [1.1.0] - 2026-10-23

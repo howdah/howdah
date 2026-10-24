@@ -132,10 +132,15 @@ pub fn log_line(rec: &EventRecord) -> String {
     serde_json::to_string(&v).unwrap_or_else(|_| "{}".to_string())
 }
 
-/// Generate a request id: a process-wide monotonic counter (guarantees
-/// uniqueness) followed by 16 hex chars of per-process-random hash (makes
-/// ids unguessable across restarts). Alphanumeric only, so it is safe in
-/// URLs and headers.
+/// Generate a request id: a process-wide monotonic counter (unique within the
+/// process) followed by 16 hex chars of a keyed hash (makes ids unguessable
+/// across restarts). Alphanumeric only, so it is safe in URLs and headers.
+///
+/// The hash also takes the process id and the clock. php-fpm and Apache
+/// prefork fork their workers from a parent that already loaded Howdah, so
+/// every worker starts with the same counter and the same hash keys; without
+/// the pid and time, workers handed out the same ids (seen in the lab, three
+/// FPM workers, one id), and a recycled pid would repeat them later.
 pub fn new_request_id() -> String {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
@@ -145,6 +150,15 @@ pub fn new_request_id() -> String {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut h = RandomState::new().build_hasher();
     h.write_u64(n);
+    // wasm32-unknown-unknown has no pid and no clock (both panic there); the
+    // browser demo never forks.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        h.write_u32(std::process::id());
+        if let Ok(d) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            h.write_u128(d.as_nanos());
+        }
+    }
     format!("{:x}{:016x}", n, h.finish())
 }
 

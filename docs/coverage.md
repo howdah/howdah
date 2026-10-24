@@ -325,6 +325,53 @@ Verified on PHP 5.4, 5.6, 7.4, 8.3 and 8.5. Other minors build and are expected
 to work but are **not independently verified**. A debug-build leak review is
 still pending.
 
+### Legacy-era sinks (1.5 additions)
+
+Seven cheaper sinks for functions and behaviours that mostly matter on the PHP
+5.x/7.x third of the web; each is a no-op where the function no longer exists.
+All inherit `sinks.mode` (log by default, block only when armed) and never log
+the argument. From `lab/integration/legacy_sinks.sh`.
+
+| sink (rule) | PHP 5.x | PHP 7.x | PHP 8.x |
+|---|---|---|---|
+| `mail` (`mail_injection`) | detect + block | detect + block | detect + block |
+| `preg_eval` (`preg_eval`) | detect + block | **not covered** (/e removed in 7.0) | **not covered** |
+| `create_function` (`create_function`) | detect + block | detect + block | **not covered** (removed in 8.0) |
+| `assert` (`assert_string`) | detect + block | detect + block | **not covered** (8.0 stopped evaluating strings) |
+| `callback` (`dangerous_callback`) | detect + block | detect + block | detect + block |
+| `xml` (`xxe`) | detect + block | detect + block | detect + block |
+| `tls` (`tls_verify`) | detect only | detect only | detect only |
+
+Verified on PHP 5.4, 5.6, 7.4 and 8.3. Limitations, stated plainly:
+
+- **`preg_eval`, `create_function` and string `assert` fire nothing** on the
+  PHP versions where the function or modifier is gone (7.0+ for `/e`, 8.0+ for
+  `create_function` and string `assert`). The `Layer-3 legacy sinks` row of
+  `php --ri howdah` names what installed on a given PHP.
+- **The `callback` sink matches a string callback name only.** An array,
+  closure, first-class callable or variable function callback is not matched,
+  and a callback reached through a function Howdah does not hook is not seen.
+  **On PHP 7.0+ a literal, unqualified `call_user_func` /
+  `call_user_func_array` in the global namespace is compiled to
+  `ZEND_INIT_USER_CALL` and never calls the function, so that shape is not
+  seen there** (a namespaced or dynamic call, and the other hooked functions,
+  are); PHP 5.x sees every form. Pinned per version by the lab.
+- **The `xml` sink sees `simplexml_load_string` and `DOMDocument::loadXML`
+  only**, and only the first 64 KiB of a document; `new SimpleXMLElement`,
+  `simplexml_import_dom`, `XMLReader`, ext/xml (`xml_parse`),
+  `DOMDocument::loadHTML` and the by-path readers (`simplexml_load_file`,
+  `DOMDocument::load`, `XMLReader::open`) are not hooked. A hit is the
+  *declaration*, not proof the entity was fetched; a bare external DTD
+  reference (the XHTML/SVG doctypes) is detect only and never blocked.
+  `[sinks.xml] external_entities = "deny"` is a libxml-level toggle (off by
+  default) that also disables loading documents by path through libxml; PHP 8
+  already defaults to not substituting external entities.
+- **`tls` cannot block in this release** (detect only): a block mode is logged,
+  the call proceeds. Only the option name is logged, never the URL.
+- **`mail`** matches the one-string first/4th/5th arguments only; an array of
+  headers (PHP 7.2+) is left to PHP, and extra `Bcc:`-style headers that look
+  like headers are not flagged.
+
 Limitations, stated plainly:
 
 - **phar on 8.x is detection and denial, not deserialization coverage.** On

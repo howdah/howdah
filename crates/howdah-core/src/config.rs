@@ -379,6 +379,53 @@ pub struct SinkConfig {
     /// Include/eval hook mechanism on PHP 7.0+; `None` = `auto`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hook: Option<SinkHook>,
+    /// Legacy-era sinks (1.5). Each `mode: None` inherits `sinks.mode`.
+    pub mail: LegacySinkConfig,
+    pub preg_eval: LegacySinkConfig,
+    pub create_function: LegacySinkConfig,
+    pub assert: LegacySinkConfig,
+    pub callback: LegacySinkConfig,
+    pub xml: XmlConfig,
+    /// Detect-only in this release: a `block` here or inherited is logged,
+    /// not enforced.
+    pub tls: LegacySinkConfig,
+}
+
+/// Settings of one legacy-era sink: a mode that inherits `sinks.mode`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LegacySinkConfig {
+    pub mode: Option<Mode>,
+}
+
+/// `[sinks.xml] external_entities`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum XmlExternalEntities {
+    /// Leave libxml's behaviour alone (the default).
+    Allow,
+    /// Turn libxml's external entity loader off for every request
+    /// (`libxml_disable_entity_loader(true)`); see docs/config.md for the
+    /// side effect on loading documents by path.
+    Deny,
+}
+
+/// Layer-3 XML sink settings: the `xxe` rule's mode (inherits `sinks.mode`)
+/// plus the libxml-level toggle.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct XmlConfig {
+    pub mode: Option<Mode>,
+    /// `None` = `allow`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_entities: Option<XmlExternalEntities>,
+}
+
+impl XmlConfig {
+    /// True iff `external_entities = "deny"` is set.
+    pub fn deny_external_entities(&self) -> bool {
+        self.external_entities == Some(XmlExternalEntities::Deny)
+    }
 }
 
 impl Default for SinkConfig {
@@ -393,6 +440,13 @@ impl Default for SinkConfig {
             phar: PharConfig::default(),
             ssrf: SsrfConfig::default(),
             hook: None,
+            mail: LegacySinkConfig::default(),
+            preg_eval: LegacySinkConfig::default(),
+            create_function: LegacySinkConfig::default(),
+            assert: LegacySinkConfig::default(),
+            callback: LegacySinkConfig::default(),
+            xml: XmlConfig::default(),
+            tls: LegacySinkConfig::default(),
         }
     }
 }
@@ -454,8 +508,23 @@ impl SinkConfig {
             SinkId::Unserialize => self.unserialize.mode,
             SinkId::Phar => self.phar.mode,
             SinkId::Ssrf => self.ssrf.mode,
+            SinkId::Mail => self.mail.mode,
+            SinkId::PregEval => self.preg_eval.mode,
+            SinkId::CreateFunction => self.create_function.mode,
+            SinkId::Assert => self.assert.mode,
+            SinkId::Callback => self.callback.mode,
+            SinkId::Xml => self.xml.mode,
+            SinkId::Tls => self.tls.mode,
         };
         sub.unwrap_or(self.mode)
+    }
+
+    /// True iff the `[sinks.xml] external_entities = "deny"` toggle is in
+    /// force: set, and Layer 3 not switched off (global off or `enabled =
+    /// false` disarm it like every other sink; `sinks.mode` does not matter,
+    /// the toggle is an explicit opt-in deny).
+    pub fn xml_deny_external_entities(&self, global: Mode) -> bool {
+        global != Mode::Off && self.enabled && self.xml.deny_external_entities()
     }
 }
 
@@ -1166,6 +1235,48 @@ self_test = "off"
         // Everything off: not needed.
         let c = Config::from_toml("[sinks]\nmode = \"off\"").unwrap();
         assert!(!c.sinks.include_eval_hook_needed(Mode::Block));
+    }
+
+    // ---- legacy-era sinks (mail, preg_eval, create_function, assert, callback, xml, tls)
+
+    #[test]
+    fn legacy_sinks_inherit_sinks_mode_and_parse() {
+        use crate::sinks::SinkId;
+        let c = Config::from_toml("").unwrap();
+        for s in [
+            SinkId::Mail,
+            SinkId::PregEval,
+            SinkId::CreateFunction,
+            SinkId::Assert,
+            SinkId::Callback,
+            SinkId::Xml,
+            SinkId::Tls,
+        ] {
+            assert_eq!(c.sinks.effective_mode(s, Mode::Detect), Mode::Detect, "{s:?}");
+            assert_eq!(c.sinks.effective_mode(s, Mode::Off), Mode::Off, "{s:?}");
+        }
+        assert!(!c.sinks.xml_deny_external_entities(Mode::Detect));
+        assert!(serde_json::to_value(&c).unwrap()["sinks"]["xml"].get("external_entities").is_none());
+        let c = Config::from_toml(
+            "[sinks]\nmode=\"off\"\n[sinks.mail]\nmode=\"block\"\n[sinks.callback]\nmode=\"detect\"\n[sinks.xml]\nexternal_entities=\"deny\"\n[sinks.tls]\nmode=\"detect\"",
+        )
+        .unwrap();
+        assert_eq!(c.sinks.effective_mode(SinkId::Mail, Mode::Detect), Mode::Block);
+        assert_eq!(c.sinks.effective_mode(SinkId::Callback, Mode::Detect), Mode::Detect);
+        assert_eq!(c.sinks.effective_mode(SinkId::PregEval, Mode::Detect), Mode::Off);
+        assert_eq!(c.sinks.effective_mode(SinkId::Xml, Mode::Detect), Mode::Off);
+        assert!(c.sinks.xml_deny_external_entities(Mode::Detect));
+        assert!(!c.sinks.xml_deny_external_entities(Mode::Off));
+        let c = Config::from_toml("[sinks]\nenabled=false\n[sinks.xml]\nexternal_entities=\"deny\"").unwrap();
+        assert!(!c.sinks.xml_deny_external_entities(Mode::Block));
+        let c = Config::from_toml("[sinks.xml]\nexternal_entities=\"allow\"").unwrap();
+        assert!(!c.sinks.xml_deny_external_entities(Mode::Block));
+        assert!(Config::from_toml("[sinks.xml]\nexternal_entities=\"maybe\"").is_err());
+        assert!(Config::from_toml("[sinks.mail]\nnope=1").is_err());
+        assert!(Config::from_toml("[sinks.tls]\nallow=[]").is_err());
+        // A global or [sinks] block never arms them past what the others get.
+        let c = Config::from_toml("mode=\"block\"").unwrap();
+        assert_eq!(c.sinks.effective_mode(SinkId::Callback, Mode::Block), Mode::Detect);
     }
 
     // ---- [log] (schema 2 log contract) ------------------------------------

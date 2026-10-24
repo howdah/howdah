@@ -51,6 +51,25 @@ extern "C" {
     /// drives one startup log line.
     pub fn howdah_jit_enabled_in_ini() -> ::std::ffi::c_int;
 
+    /// Install the legacy-era sink swaps named by `mask` (`HOWDAH_LEGACY_*`
+    /// bits; see `legacy_hook.c`). Call once at first RINIT. `cb` is the
+    /// one-argument decide callback, `mail_cb` the two-argument `mail()` one.
+    /// Returns the mask of sinks actually installed (a function missing on
+    /// this PHP is skipped).
+    pub fn howdah_install_legacy_hooks(
+        cb: HowdahSinkDecide,
+        mail_cb: HowdahMailDecide,
+        mask: ::std::ffi::c_int,
+    ) -> ::std::ffi::c_int;
+
+    /// `[sinks.xml] external_entities = "deny"`: turn libxml's external
+    /// entity loader off for the current request (PHP's own
+    /// `libxml_disable_entity_loader(true)`, through the function table, with
+    /// error_reporting at 0 so PHP 8's deprecation is not logged per request).
+    /// Call at every RINIT. Returns 1 when the call was made, 0 when the
+    /// function does not exist.
+    pub fn howdah_xml_deny_external_entities() -> ::std::ffi::c_int;
+
     /// Proxy the `phar://` stream wrapper's ops (see `phar_hook.c`). Returns 1 if
     /// phar was found and proxied, 0 if phar is not registered (honest no-op).
     /// Each op passes the full `phar://...` URL to `cb`; on BLOCK it returns the
@@ -113,6 +132,25 @@ extern "C" {
     /// by `ssrf_hook.c`. Implemented in howdah-core. 0 allow / 1 log / 2 block.
     pub fn howdah_sink_ssrf_oversize(ctx: *mut ::std::ffi::c_void) -> ::std::ffi::c_int;
 }
+
+/// Legacy sink install mask bits (mirror `HOWDAH_LEGACY_*` in `howdah_sink.h`).
+pub const HOWDAH_LEGACY_MAIL: ::std::ffi::c_int = 1;
+pub const HOWDAH_LEGACY_PREG_EVAL: ::std::ffi::c_int = 2;
+pub const HOWDAH_LEGACY_CREATE_FUNCTION: ::std::ffi::c_int = 4;
+pub const HOWDAH_LEGACY_ASSERT: ::std::ffi::c_int = 8;
+pub const HOWDAH_LEGACY_CALLBACK: ::std::ffi::c_int = 16;
+pub const HOWDAH_LEGACY_XML: ::std::ffi::c_int = 32;
+pub const HOWDAH_LEGACY_TLS: ::std::ffi::c_int = 64;
+
+/// The `mail()` decide callback: 4th argument (headers) and 5th
+/// (additional_parameters), either NULL/0 when absent or not a string.
+/// Returns 0 ALLOW / 1 LOG / 2 BLOCK.
+pub type HowdahMailDecide = unsafe extern "C" fn(
+    headers: *const ::std::ffi::c_char,
+    headers_len: usize,
+    params: *const ::std::ffi::c_char,
+    params_len: usize,
+) -> ::std::ffi::c_int;
 
 /// `howdah_sink_ssrf_armed`-shaped callback: 1 iff SSRF guarding is armed.
 pub type HowdahSsrfArmed = unsafe extern "C" fn(ctx: *mut ::std::ffi::c_void) -> ::std::ffi::c_int;

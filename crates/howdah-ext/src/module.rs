@@ -67,6 +67,10 @@ static mut DISP_EXCEPTIONS: Option<CString> = None;
 static mut DISP_HOOK: Option<CString> = None;
 /// The include/eval hook actually installed at MINIT (phpinfo row).
 static mut DISP_INCLUDE_HOOK: Option<CString> = None;
+/// The legacy sinks actually installed at first RINIT (phpinfo row).
+static mut DISP_LEGACY: Option<CString> = None;
+/// `[sinks.xml] external_entities = "deny"` in force (decided once).
+static mut XML_DENY: bool = false;
 
 const SUCCESS: c_int = 0;
 /// Zend's `FAILURE` (-1): what MINIT returns to refuse the load.
@@ -299,6 +303,23 @@ unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
                     crate::behavior_filter::php_write,
                 );
             }
+            // Legacy-era sinks (mail, preg_eval, create_function, assert,
+            // callback, xml, tls): swap only the armed ones, and only the
+            // functions this PHP has. After the SSRF install so the tls hook
+            // on curl_setopt chains onto the SSRF trampoline (either order
+            // works; this one is fixed so the chain is predictable).
+            let armed = crate::legacy_filter::armed_mask(CTX);
+            let installed = if armed != 0 {
+                sys::howdah_install_legacy_hooks(
+                    crate::sink_filter::decide,
+                    crate::legacy_filter::mail_decide,
+                    armed,
+                )
+            } else {
+                0
+            };
+            DISP_LEGACY = Some(cstring(&crate::legacy_filter::describe(armed, installed)));
+            XML_DENY = core::howdah_sink_xml_deny_external_entities(CTX) != 0;
         }));
     }
     // Layer 2 armed: build `$_SERVER` now (a no-op unless auto_globals_jit
@@ -308,6 +329,13 @@ unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
     // apps that never read it; not paid by the default (log-only) install.
     if INSPECT_ARMED.load(Ordering::Relaxed) {
         let _ = catch_unwind(AssertUnwindSafe(|| sys::howdah_force_server_global()));
+    }
+    // `[sinks.xml] external_entities = "deny"`: ext/libxml re-enables its
+    // loader at every request start, so the toggle is re-applied per request
+    // (after libxml's RINIT, which runs before ours). Fail-open: a panic or a
+    // missing function leaves libxml alone.
+    if *ptr::addr_of!(XML_DENY) {
+        let _ = catch_unwind(AssertUnwindSafe(|| sys::howdah_xml_deny_external_entities()));
     }
     // Layer-4 main-script exec-dir check: the primary, opcache-independent
     // control. Runs every request, BEFORE the script executes, and records a
@@ -890,6 +918,12 @@ unsafe extern "C" fn minfo(_module: *mut sys::zend_module_entry) {
     row(b"Log schema\0", cstring(&howdah_core::log::SCHEMA_VERSION.to_string()).as_bytes_with_nul());
     if let Some(h) = (*ptr::addr_of!(DISP_INCLUDE_HOOK)).as_ref() {
         row(b"Include/eval hook\0", h.as_bytes_with_nul());
+    }
+    if let Some(l) = (*ptr::addr_of!(DISP_LEGACY)).as_ref() {
+        row(b"Layer-3 legacy sinks\0", l.as_bytes_with_nul());
+    }
+    if *ptr::addr_of!(XML_DENY) {
+        row(b"XML external entities\0", b"denied ([sinks.xml] external_entities)\0");
     }
     row(
         b"Panic guard (catch_unwind active)\0",

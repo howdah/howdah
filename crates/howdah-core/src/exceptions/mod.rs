@@ -51,7 +51,14 @@ impl Layer {
             | RuleId::Eval
             | RuleId::Unserialize
             | RuleId::Phar
-            | RuleId::Ssrf => Layer::Sinks,
+            | RuleId::Ssrf
+            | RuleId::MailInjection
+            | RuleId::PregEval
+            | RuleId::CreateFunction
+            | RuleId::AssertString
+            | RuleId::DangerousCallback
+            | RuleId::Xxe
+            | RuleId::TlsVerify => Layer::Sinks,
             RuleId::UploadExec
             | RuleId::UnexpectedBinary
             | RuleId::UnexpectedEgress

@@ -48,6 +48,14 @@
 
 #define HOWDAH_SINK_SSRF 5
 
+#define HOWDAH_BEHAVIOR_EXEC_DIR 0
+
+#define HOWDAH_BEHAVIOR_BINARY 1
+
+#define HOWDAH_BEHAVIOR_EGRESS 2
+
+#define HOWDAH_BEHAVIOR_PHP_WRITE 3
+
 /**
  * Maximum number of class names reported by `unserialize_classes`.
  */
@@ -206,6 +214,69 @@ int32_t howdah_sink_check(struct howdah_ctx *ctx,
                           size_t arg_len);
 
 /**
+ * 1 iff the given Layer-4 facet (`HOWDAH_BEHAVIOR_*`) is armed; NULL ctx,
+ * unknown facet or panic is 0.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_behavior_armed(struct howdah_ctx *ctx, int32_t facet);
+
+/**
+ * 1 iff the behavior egress facet is armed (for the widened SSRF hook).
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_behavior_egress_active(struct howdah_ctx *ctx);
+
+/**
+ * Layer-4: script about to execute at realpath `path`. 0/1/2; fail-open.
+ *
+ * # Safety
+ * `ctx` NULL or live; `path` NULL or valid for `path_len`.
+ */
+int32_t howdah_behavior_check_exec_dir(struct howdah_ctx *ctx, const char *path, size_t path_len);
+
+/**
+ * Layer-4: caller spawning program `prog`. 0/1/2; fail-open.
+ *
+ * # Safety
+ * `ctx` NULL or live; pointers NULL or valid for their lengths.
+ */
+int32_t howdah_behavior_check_binary(struct howdah_ctx *ctx,
+                                     const char *caller,
+                                     size_t caller_len,
+                                     const char *prog,
+                                     size_t prog_len);
+
+/**
+ * Layer-4: caller connecting out to `host`. 0/1/2; fail-open.
+ *
+ * # Safety
+ * `ctx` NULL or live; pointers NULL or valid for their lengths.
+ */
+int32_t howdah_behavior_check_egress(struct howdah_ctx *ctx,
+                                     const char *caller,
+                                     size_t caller_len,
+                                     const char *host,
+                                     size_t host_len);
+
+/**
+ * Layer-4: caller opening `target`; `is_write_mode` non-zero for write modes.
+ * 0/1/2; fail-open.
+ *
+ * # Safety
+ * `ctx` NULL or live; pointers NULL or valid for their lengths.
+ */
+int32_t howdah_behavior_check_php_write(struct howdah_ctx *ctx,
+                                        const char *caller,
+                                        size_t caller_len,
+                                        const char *target,
+                                        size_t target_len,
+                                        int32_t is_write_mode);
+
+/**
  * 1 iff SSRF guarding is armed (effective mode != off); NULL ctx or panic is
  * 0. Never stashes a log line. Lets the shim skip DNS work when disarmed.
  *
@@ -252,8 +323,10 @@ int32_t howdah_sink_check_ssrf(struct howdah_ctx *ctx,
  * (suspicious: nothing is written; call `howdah_sink_ssrf_oversize`). Returns 1 ("act") after writing the clean host (no userinfo/brackets/
  * port, lowercased) to `out_host`, its length to `*out_host_len` and the port
  * (0 if none) to `*out_port`. Returns 0 ("skip") for a non-network target
- * (local path, `unix://`, no scheme when required), a host that does not fit
- * `out_host_cap`, any NULL argument, or a panic: fail-open, the call is chained.
+ * (local path, `unix://`, no scheme when required), any NULL argument, or a
+ * panic: fail-open, the call is chained. Return codes: 0 = skip (not a network
+ * target), 1 = host written, 2 = oversize (host longer than the buffer; the
+ * caller treats it as suspicious via `howdah_sink_ssrf_oversize`).
  *
  * # Safety
  * `input` NULL or valid for `input_len` bytes; `out_host` NULL or writable for

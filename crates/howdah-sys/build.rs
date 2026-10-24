@@ -32,11 +32,13 @@ fn main() {
     println!("cargo:rerun-if-changed=shim.c");
     println!("cargo:rerun-if-changed=sink_hook.c");
     println!("cargo:rerun-if-changed=phar_hook.c");
+    println!("cargo:rerun-if-changed=ssrf_hook.c");
     println!("cargo:rerun-if-changed=howdah_sink.h");
     let mut shim = cc::Build::new();
     shim.file("shim.c")
         .file("sink_hook.c")
         .file("phar_hook.c")
+        .file("ssrf_hook.c")
         .warnings(false);
     for inc in includes.split_whitespace() {
         if let Some(dir) = inc.strip_prefix("-I") {

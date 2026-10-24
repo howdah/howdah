@@ -30,7 +30,7 @@ use crate::limits::{LimitHit, RuleId, Severity};
 use crate::log::{log_line, new_request_id, EventRecord};
 use crate::multipart::{Event, MultipartState};
 use crate::rules::{decide, Action};
-use crate::sinks::ssrf::{classify_ip, decode_literal_ip, host_allowed, IpRepr};
+use crate::sinks::ssrf::{classify_ip, decode_literal_ip, host_allowed, parse_host, HostForm, IpRepr};
 use crate::sinks::{command_allowed, include_allowed, phar_allowed, unserialize_classes, SinkId};
 
 /// Action codes returned over the ABI. Pinned: Allow=0, Log=1, Block=2.
@@ -881,6 +881,47 @@ pub unsafe extern "C" fn howdah_sink_check_ssrf(
     })
 }
 
+/// SSRF parse seam: parse the target of an intercepted outbound call so the C
+/// shim never parses URLs itself. `scheme_required != 0` selects
+/// `HostForm::SchemeRequired` (URL-only sinks), else `BareHostOk` (fsockopen,
+/// curl). Returns 1 ("act") after writing the clean host (no userinfo/brackets/
+/// port, lowercased) to `out_host`, its length to `*out_host_len` and the port
+/// (0 if none) to `*out_port`. Returns 0 ("skip") for a non-network target
+/// (local path, `unix://`, no scheme when required), a host that does not fit
+/// `out_host_cap`, any NULL argument, or a panic: fail-open, the call is chained.
+///
+/// # Safety
+/// `input` NULL or valid for `input_len` bytes; `out_host` NULL or writable for
+/// `out_host_cap` bytes; `out_host_len` / `out_port` NULL or writable.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_ssrf_prepare(
+    input: *const u8,
+    input_len: usize,
+    scheme_required: i32,
+    out_host: *mut u8,
+    out_host_cap: usize,
+    out_host_len: *mut usize,
+    out_port: *mut u16,
+) -> i32 {
+    if input.is_null() || out_host.is_null() || out_host_len.is_null() || out_port.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let form = if scheme_required != 0 { HostForm::SchemeRequired } else { HostForm::BareHostOk };
+        let Some(h) = parse_host(std::slice::from_raw_parts(input, input_len), form) else {
+            return 0;
+        };
+        if h.name.len() > out_host_cap {
+            return 0;
+        }
+        std::ptr::copy_nonoverlapping(h.name.as_ptr(), out_host, h.name.len());
+        *out_host_len = h.name.len();
+        *out_port = h.port.unwrap_or(0);
+        1
+    }))
+    .unwrap_or(0)
+}
+
 /// Take the pending sink log line, or NULL if none. Same ownership contract as
 /// `howdah_take_log_line`; free with `howdah_free_str`.
 ///
@@ -1451,6 +1492,36 @@ mod tests {
         unsafe {
             howdah_sink_check_ssrf(c, s.as_ptr() as _, s.len(), host.as_ptr() as _, host.len(), 80, flat.as_ptr(), ips.len())
         }
+    }
+
+    #[test]
+    fn ssrf_prepare_act_writes_host_and_port() {
+        let u = b"http://user:pw@Example.COM:8080/p?q=1";
+        let (mut buf, mut n, mut port) = ([0u8; 64], 0usize, 0u16);
+        let r = unsafe { howdah_ssrf_prepare(u.as_ptr(), u.len(), 1, buf.as_mut_ptr(), 64, &mut n, &mut port) };
+        assert_eq!(r, 1);
+        assert_eq!(&buf[..n], b"example.com");
+        assert_eq!(port, 8080);
+        // bare host ok when scheme not required; no port -> 0
+        let b = b"10.0.0.5";
+        let r = unsafe { howdah_ssrf_prepare(b.as_ptr(), b.len(), 0, buf.as_mut_ptr(), 64, &mut n, &mut port) };
+        assert_eq!((r, &buf[..n], port), (1, &b"10.0.0.5"[..], 0));
+    }
+
+    #[test]
+    fn ssrf_prepare_skips() {
+        let (mut buf, mut n, mut port) = ([0u8; 8], 0usize, 0u16);
+        let mut run = |i: &[u8], f: i32| unsafe {
+            howdah_ssrf_prepare(i.as_ptr(), i.len(), f, buf.as_mut_ptr(), 8, &mut n, &mut port)
+        };
+        assert_eq!(run(b"/etc/passwd", 1), 0); // local path
+        assert_eq!(run(b"unix:///var/run/x.sock", 0), 0);
+        assert_eq!(run(b"example.com", 1), 0); // no scheme when required
+        assert_eq!(run(b"http://averyveryverylonghost.example/", 1), 0); // oversize
+        let r = unsafe {
+            howdah_ssrf_prepare(std::ptr::null(), 0, 1, std::ptr::null_mut(), 0, std::ptr::null_mut(), std::ptr::null_mut())
+        };
+        assert_eq!(r, 0);
     }
 
     #[test]

@@ -649,6 +649,19 @@
     },
     {
       "date": "2026-10-24",
+      "runtime": "Lab image (lab/images/php-X.Y.Dockerfile + dev.Dockerfile), PHP CLI server, extension built from source on arm64",
+      "sapi": "cli",
+      "php": [
+        "7.4.33",
+        "8.3 (php:8.3-fpm of 2026-10-24)"
+      ],
+      "arch": "aarch64 (native, CI lab-aarch64 on ubuntu-24.04-arm)",
+      "script": "lab/integration/block_shaped.sh, lab/integration/selftest.sh",
+      "result": "PASS",
+      "detail": "the same checks as the QEMU rows; GitHub Actions run 40130522874 on PR #46"
+    },
+    {
+      "date": "2026-10-24",
       "runtime": "FrankenPHP 1.13.3 (ZTS PHP, threads) with a throwaway ZTS build (not shipped)",
       "sapi": "frankenphp",
       "php": [

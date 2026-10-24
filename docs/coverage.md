@@ -151,6 +151,7 @@ wrong and is why that runtime is not supported.
 | Docker image (docker/Dockerfile) on php:X.Y-fpm, php-fpm behind nginx 1.27 (`fpm`) | aarch64 (QEMU) | 8.3.36 | PASS (2026-10-24) | `docker/smoke.sh` | released 1.4.0 aarch64 .so, emulated on an x86_64 host; the same checks as the x86_64 rows |
 | Docker image on php:X.Y-fpm-alpine (musl build of the 1.4.0 source; no musl release yet) (`fpm`) | x86_64 musl | 5.6.40, 7.0.33, 7.1.33, 7.2.34, 7.3.33, 7.4.33, 8.0.30, 8.1.34, 8.2.35, 8.3.36, 8.4.27, 8.5.12 | PASS (2026-10-24) | `docker/smoke.sh` | HOWDAH_LIBC=musl packaging/build-release.sh, signed with a throwaway key; the same checks as the Debian rows |
 | Lab image (lab/images/php-X.Y.Dockerfile + dev.Dockerfile), PHP CLI server, extension built from source on arm64 (`cli`) | aarch64 (QEMU) | 7.4.33, 8.3.36 | PASS (2026-10-24) | `lab/integration/block_shaped.sh, lab/integration/selftest.sh` | block mode: shaped upload 403 with request id, normal form 200; detect mode: standard rule logged and 200, critical rule 403; self-test in detect and block mode |
+| Lab image (lab/images/php-X.Y.Dockerfile + dev.Dockerfile), PHP CLI server, extension built from source on arm64 (`cli`) | aarch64 (native, CI lab-aarch64 on ubuntu-24.04-arm) | 7.4.33, 8.3 (php:8.3-fpm of 2026-10-24) | PASS (2026-10-24) | `lab/integration/block_shaped.sh, lab/integration/selftest.sh` | the same checks as the QEMU rows; GitHub Actions run 40130522874 on PR #46 |
 | FrankenPHP 1.13.3 (ZTS PHP, threads) with a throwaway ZTS build (not shipped) (`frankenphp`) | x86_64 | 8.3.36 | **FAIL** (2026-10-24) | `docs/zts.md` | one request at a time: marker flagged, over-limit blocked; 8+8 concurrent clients: 1 normal request refused 403, 16 over-limit requests served 200, then FrankenPHP aborted (malloc(): unaligned tcache chunk detected) |
 
 Not covered by any row: LiteSpeed Enterprise, lsphp other than 8.3 and lsphp
@@ -209,9 +210,9 @@ made locally; no release carried musl tarballs when they ran.
    tarball for that reason). The release assets are the definitive per-arch
    list. The core is arch-agnostic pure Rust. Every matrix result in the
    tables above was recorded on x86_64; the scenario matrix has not been run
-   on arm64. On arm64 only the self-test scenario has run (Table 5, under
-   QEMU), and the non-blocking `lab-aarch64` CI job runs the lab's
-   block-shaped and self-test scripts for 7.4 and 8.3 on native arm64 runners.
+   on arm64. On arm64 only the lab's block-shaped and self-test scripts have
+   run, for 7.4 and 8.3, under QEMU and on native arm64 CI runners (Table 5;
+   the non-blocking `lab-aarch64` job runs them on every pull request).
    A musl (Alpine) build exists for x86_64 only, from the release after 1.4.0.
    ZTS PHP has no build: [zts.md](zts.md).
 

@@ -351,9 +351,9 @@ made locally; no release carried musl tarballs when they ran.
    tarball for that reason). The release assets are the definitive per-arch
    list. The core is arch-agnostic pure Rust. Every matrix result in the
    tables above was recorded on x86_64; the scenario matrix has not been run
-   on arm64. On arm64 only the self-test scenario has run (Table 5, under
-   QEMU), and the non-blocking \`lab-aarch64\` CI job runs the lab's
-   block-shaped and self-test scripts for 7.4 and 8.3 on native arm64 runners.
+   on arm64. On arm64 only the lab's block-shaped and self-test scripts have
+   run, for 7.4 and 8.3, under QEMU and on native arm64 CI runners (Table 5;
+   the non-blocking \`lab-aarch64\` job runs them on every pull request).
    A musl (Alpine) build exists for x86_64 only, from the release after 1.4.0.
    ZTS PHP has no build: [zts.md](zts.md).
 

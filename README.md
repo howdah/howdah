@@ -9,13 +9,15 @@ tool: it recognizes and blocks abusive input. It is not a hacking tool, and it
 is not a replacement for patching PHP. Upgrade when you can; use Howdah when you
 can't, or until you can.
 
-> **Status: 1.3.0 is released** — Layer 1 (request-parsing limits), Layer 2 (input
-> inspection, log-only) plus Layer 3 (sink hardening, log-first). 1.3 extends Layer 3
-> with phar://, SSRF, and PHP 5.x include/eval guards (the phar and SSRF sinks are off
-> by default). Signed tarballs for PHP 5.4 to 8.5 are on the
-> [v1.3.0 release page](https://github.com/howdah/howdah/releases/tag/v1.3.0).
+> **Status: 1.4.0 is released** — Layer 1 (request-parsing limits), Layer 2 (input
+> inspection, log-only), Layer 3 (sink hardening, log-first) and Layer 4
+> (after-breach behaviour, log-first). 1.4 adds Layer 4, which watches PHP run
+> from upload directories, unexpected binaries, unexpected outbound hosts and
+> `.php` writes, and does nothing until you set its lists. Signed tarballs for
+> PHP 5.4 to 8.5 are on the
+> [v1.4.0 release page](https://github.com/howdah/howdah/releases/tag/v1.4.0).
 > See the [changelog](CHANGELOG.md).
-> Defaults may still change; Layer 4 is the roadmap.
+> Defaults may still change.
 > Start in `detect` mode. Not every PHP version has been tested:
 > see [docs/coverage.md](docs/coverage.md). Install, verify and rollback steps
 > are on the project site (built from `site/`).
@@ -75,6 +77,39 @@ is not inspected.
   expected to work but are not independently verified.
 
 See the `[sinks]` section of [docs/config.md](docs/config.md) and the
+[CHANGELOG](CHANGELOG.md).
+
+## Layer 4: after a breach (1.4)
+
+Layer 4 watches what PHP does once something has gone wrong, such as a webshell
+dropped in an upload directory. It **detects and logs; it does not block by
+default**, and it does nothing until you fill in its lists. It has its own
+`behavior.mode` (default `detect`), independent of the global `howdah.mode`.
+Four facets, each driven by its own setting:
+
+- **Execution origin** (`deny_exec_dirs`): PHP run from a denied directory,
+  either as the requested script or `require`d by another script.
+- **Expected binaries** (`allow_exec_binaries`): `exec`/`system`/`popen`/
+  `proc_open`/`shell_exec`/`passthru` to a program not on the list.
+- **Expected egress** (`allow_egress_hosts`): an outbound connection to a host
+  not on the list.
+- **`.php` writes** (`deny_php_writes`): writing a PHP file into a denied
+  directory, or from a script that lives in one.
+
+`behavior.observe = true` logs what would have been flagged as `proposed` lines
+to help you build the lists; it never blocks and never edits config.
+
+Honest limits: Howdah only sees what PHP itself does, so a detached or forked
+process, or a dropper that never touched PHP, is invisible. The main-script
+check does not depend on opcache; the `require`d-file case is checked at first
+compile and is best-effort. Allowlists can be bypassed. The `.php`-write facet
+is scoped by origin and can still flag frameworks that compile templates into
+such a directory. Observe only proposes. Verified on PHP 5.4, 5.6, 7.4, 8.3, 8.4
+and 8.5. On PHP 7.0+ Howdah installs a user opcode handler (for include/eval),
+which turns OPcache JIT off; this is unchanged since 1.3 and independent of
+Layer 4.
+
+See the `[behavior]` section of [docs/config.md](docs/config.md) and the
 [CHANGELOG](CHANGELOG.md).
 
 ## PHP versions

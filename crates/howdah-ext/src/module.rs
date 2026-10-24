@@ -268,7 +268,7 @@ unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
 
 /// Layer-4 RINIT main-script exec-dir check. When the EXEC_DIR facet is armed,
 /// read the main script path from the SAPI (`request_info.path_translated`,
-/// NUL-terminated; NULL on e.g. the CLI) and ask the core whether it falls under
+/// NUL-terminated; NULL when the SAPI supplies no main script path. The CLI does set it, so a CLI main script is checked too) and ask the core whether it falls under
 /// a denied exec dir. On BLOCK, emit the block response + `zend_bailout` before
 /// the script runs. The decision is computed inside a panic guard and the bail
 /// is performed OUTSIDE it (mirrors `rfc1867::callback`), so no Rust-owned heap
@@ -295,7 +295,7 @@ unsafe fn exec_dir_decision() -> Option<(c_int, String)> {
     let ri = (*ptr::addr_of!(sys::sapi_globals)).request_info;
     let pt = ri.path_translated;
     if pt.is_null() {
-        return None; // no main script path (CLI, some SAPIs)
+        return None; // SAPI supplied no main script path (the CLI does set one)
     }
     let plen = CStr::from_ptr(pt).to_bytes().len();
     if plen == 0 {

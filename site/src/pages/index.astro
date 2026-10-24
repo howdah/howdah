@@ -9,13 +9,13 @@ const ranDate = (coverage.generated || '').slice(0, 10);
 const shortVersion = VERSION.split('.').slice(0, 2).join('.');
 
 // Four-layer model (design §3). Layer 1 shipped in 1.0, Layer 2 in 1.1,
-// Layer 3 in 1.2, extended in 1.3 (status 'released', log-only); 4 is the roadmap.
+// Layer 3 in 1.2, extended in 1.3, Layer 4 in 1.4 (all 'released', log-only).
 // Non-active layers are dimmed so the page never implies they are in 1.0.
 const layers = [
   { n: 1, name: 'Request parsing', covers: 'Upload/multipart floods (PHP2Shell), input-variable floods, deeply nested arrays, oversized headers — refused while PHP parses the request.', status: 'active' },
   { n: 2, name: 'Request inspection', covers: 'Content inspection of decoded GET/POST/cookie/path values for SQL injection, path traversal and command/code injection. It detects and logs; it does not block by default.', status: 'released' },
   { n: 3, name: 'Runtime checks', covers: 'Sink hardening: guards command execution, unserialize, include and eval with a flat allowlist policy, plus phar:// and an SSRF egress guard (both off by default, new in 1.3). It detects and logs; it does not block by default.', status: 'released' },
-  { n: 4, name: 'After a breach', covers: 'Blocking execution of PHP from upload dirs, webshell behaviour, unexpected outbound connections.', status: 'planned' },
+  { n: 4, name: 'After a breach', covers: 'Watches PHP run from upload directories, unexpected binaries, unexpected outbound hosts and .php writes. It detects and logs; it does not block by default, and does nothing until you set its lists.', status: 'released' },
 ];
 
 // Comparison facts compiled Oct 2026 from each project's own documentation.
@@ -54,7 +54,7 @@ const compare = [
       <div>
         <h2>What is Howdah, and why the name?</h2>
         <p>Howdah is a native extension for PHP. When a web request arrives, PHP starts parsing it before any of your code runs. Howdah watches that parsing step and refuses requests that are built to exhaust memory, while PHP is still working through them.</p>
-        <p>Version 1.0 completes Howdah's first layer: limits on <code>multipart/form-data</code> uploads, on the number and shape of input variables, and on request headers. The critical resource-exhaustion limits block by default, even in detect mode; everything else starts in log-only mode so you can watch it before you let it block. Version 1.1 adds Layer 2, which inspects request content for injection patterns and logs them; it does not block by default. Version 1.2 adds Layer 3, which guards four dangerous PHP sinks, and also logs first. Version 1.3 extends it with <code>phar://</code> and SSRF guards (off by default) and brings <code>include</code> and <code>eval</code> to PHP 5.x.</p>
+        <p>Version 1.0 completes Howdah's first layer: limits on <code>multipart/form-data</code> uploads, on the number and shape of input variables, and on request headers. The critical resource-exhaustion limits block by default, even in detect mode; everything else starts in log-only mode so you can watch it before you let it block. Version 1.1 adds Layer 2, which inspects request content for injection patterns and logs them; it does not block by default. Version 1.2 adds Layer 3, which guards four dangerous PHP sinks, and also logs first. Version 1.3 extends it with <code>phar://</code> and SSRF guards (off by default) and brings <code>include</code> and <code>eval</code> to PHP 5.x. Version 1.4 adds Layer 4, which watches what PHP does after a breach (PHP run from upload directories, unexpected binaries and outbound hosts, <code>.php</code> writes). It also logs first and does nothing until you set its lists.</p>
         <p>It is not a replacement for patching. Upgrade PHP when you can. Use Howdah when you cannot, or until you can.</p>
       </div>
       <aside class="card" aria-labelledby="howdah-word">
@@ -68,13 +68,13 @@ const compare = [
   <section id="how" class="alt">
     <div class="wrap">
       <h2>How it works: four layers</h2>
-      <p>Howdah's protection is organised in four layers. <strong>Version 1.0 delivered Layer 1; version 1.1 added Layer 2; version 1.2 added Layer 3, extended in 1.3.</strong> Layer 2 detects and logs SQL injection, path traversal and command/code injection in request values; Layer 3 guards dangerous sinks (command execution, <code>unserialize</code>, <code>include</code>, <code>eval</code>, and in 1.3 <code>phar://</code> and SSRF); neither blocks by default. Layer 4 is the roadmap, and this page never claims it is here yet.</p>
+      <p>Howdah's protection is organised in four layers. <strong>Version 1.0 delivered Layer 1; version 1.1 added Layer 2; version 1.2 added Layer 3, extended in 1.3; version 1.4 added Layer 4.</strong> Layer 2 detects and logs SQL injection, path traversal and command/code injection in request values; Layer 3 guards dangerous sinks (command execution, <code>unserialize</code>, <code>include</code>, <code>eval</code>, and in 1.3 <code>phar://</code> and SSRF); Layer 4 watches what PHP does after a breach (PHP run from upload directories, unexpected binaries and outbound hosts, <code>.php</code> writes). None of the three blocks by default.</p>
       <ol class="layers" aria-label="The four protection layers; a request flows from the top down">
         {layers.map((l) => (
           <li class={l.status}>
             <span class="lnum" aria-hidden="true">{l.n}</span>
             <div>
-              <h3>Layer {l.n}: {l.name} {l.status === 'active' ? <span class="pill ok">Active in 1.0</span> : l.status === 'released' ? <span class="pill ok">Active in {l.n === 3 ? '1.2' : '1.1'} · log-only</span> : <span class="pill na">Planned</span>}</h3>
+              <h3>Layer {l.n}: {l.name} {l.status === 'active' ? <span class="pill ok">Active in 1.0</span> : l.status === 'released' ? <span class="pill ok">Active in {l.n === 4 ? '1.4' : l.n === 3 ? '1.2' : '1.1'} · log-only</span> : <span class="pill na">Planned</span>}</h3>
               <p>{l.covers}</p>
             </div>
           </li>
@@ -210,6 +210,38 @@ const compare = [
         </div>
       </div>
       <p class="legend" style="margin-top:1.5rem"><strong>Honest caveat.</strong> A flat allowlist policy is best-effort virtual patching and can be bypassed, which is why Layer 3 logs rather than blocks. Use the log to learn what your application really calls, then fix the application (no shell calls on user input, no unserialize of untrusted data). To configure it, see the <code>[sinks]</code> section of the <a href="/docs/configuration/#layer-3-sinks">configuration reference</a>.</p>
+    </div>
+  </section>
+
+  <section id="behavior">
+    <div class="wrap">
+      <h2>Layer 4 — what Howdah watches after a breach <span class="pill ok">1.4 · log-only</span></h2>
+      <p>Layers 1 to 3 try to stop the attack. Layer 4 assumes something got through, such as a webshell uploaded into a writable directory, and watches what PHP then does. <strong>It detects and logs; it does not block by default, and it does nothing until you set its lists.</strong> Events name the script that made the call, so a finding points at the webshell even when a legitimate script <code>require</code>d it.</p>
+      <div class="cols two" style="margin-top:1.5rem">
+        <div>
+          <h3>Four things it watches</h3>
+          <div class="tablewrap" tabindex="0" role="region" aria-label="Layer 4 facets (scrolls sideways on narrow screens)">
+            <table>
+              <caption class="sr-only">Layer 4 facets in 1.4</caption>
+              <thead><tr><th scope="col">Facet</th><th scope="col">Setting</th><th scope="col">Flags</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">Execution origin</th><td><code>deny_exec_dirs</code></td><td>PHP run from a denied directory, as the requested script or <code>require</code>d by another</td></tr>
+                <tr><th scope="row">Expected binaries</th><td><code>allow_exec_binaries</code></td><td><code>exec</code>, <code>system</code>, <code>popen</code>, <code>proc_open</code>, <code>shell_exec</code>, <code>passthru</code> to a program not on the list</td></tr>
+                <tr><th scope="row">Expected egress</th><td><code>allow_egress_hosts</code></td><td>An outbound connection to a host not on the list</td></tr>
+                <tr><th scope="row"><code>.php</code> writes</th><td><code>deny_php_writes</code></td><td>A PHP file written into a denied directory, or from a script that lives in one</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="legend">Lab-verified on PHP 5.4, 5.6, 7.4, 8.3, 8.4 and 8.5: 27 checks per version, covering each facet in <code>detect</code> and <code>block</code>, that a framework-style view write and a plain read of a <code>.php</code> file are not flagged, and that the default configuration is inert. Other minors are not independently verified. More detail on the <a href="/coverage/">coverage page</a>.</p>
+        </div>
+        <div>
+          <h3>Hybrid policy: you set it, Howdah helps you find it</h3>
+          <p>You supply the allowlists (<code>allow_exec_binaries</code>, <code>allow_egress_hosts</code>) and the denied directories. To learn what your application really does, set <code>observe = true</code>: Howdah logs each would-be finding as a <code>proposed</code> line, such as the binary that was run or the host contacted, which you can fold into the lists. Observe never blocks and never edits your config, and its output needs your review.</p>
+          <h3 style="margin-top:1.5rem">Log-first, on purpose</h3>
+          <p>Layer 4 has its own <code>behavior.mode</code>, which defaults to <code>detect</code> (log only). It is independent of the global <code>howdah.mode</code>: setting <code>howdah.mode = block</code> does <strong>not</strong> arm it. Every list ships empty, so a fresh install blocks nothing.</p>
+        </div>
+      </div>
+      <p class="legend" style="margin-top:1.5rem"><strong>Honest caveat.</strong> Howdah only sees what PHP itself does: a process PHP launches and then detaches, a reverse shell that forks away, or a dropper that never ran through PHP is invisible to Layer 4. For <code>deny_exec_dirs</code>, the requested-script case does not depend on opcache, but the <code>require</code>d-file case is checked at first compile and is best-effort, so a file served from a warm opcache may not be re-checked. Allowlists are best-effort and can be bypassed. The <code>.php</code>-write facet is scoped by origin and can still flag frameworks that compile templates into a denied directory, so scope it before you use <code>block</code>. Observe only proposes. To configure it, see the <code>[behavior]</code> section of the <a href="/docs/configuration/#layer-4-behavior">configuration reference</a>.</p>
     </div>
   </section>
 

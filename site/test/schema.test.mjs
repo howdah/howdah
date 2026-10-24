@@ -80,7 +80,7 @@ test('Layer 2/3 rule names under [rules] are marked as having no effect', () => 
   // The extension resolves Layer 2 overrides only from [inspect.rule_modes]
   // and never reads [rules] for sinks; the core merely accepts these keys.
   for (const k of sectionKeys('rules')) {
-    const noop = k.layer === 'inspect' || k.layer === 'sinks';
+    const noop = k.layer === 'inspect' || k.layer === 'sinks' || k.layer === 'behavior';
     assert.equal(!!k.noop, noop, k.key);
     if (noop) assert.match(k.note, /no effect/);
     else assert.doesNotMatch(k.note, /no effect/);

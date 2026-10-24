@@ -14,16 +14,21 @@
 # for 5.6, 7.0-7.4 and 8.0-8.5, amd64 and arm64. php:5.4-fpm is a schema-1
 # manifest that Docker 28+ (containerd 2.1) refuses to pull, and php:5.5-fpm
 # has a missing layer, so neither gets an image. php:<minor>-fpm-alpine needs
-# the release's *-linux-x86_64-musl tarballs; ALPINE_MINORS are the minors
-# whose musl build was loaded and smoke-tested in the matching alpine image
-# (all 12, with a locally built and signed musl release of the 1.4.0 source).
+# the release's *-linux-x86_64-musl tarballs. ALPINE_MINORS are the minors
+# whose official Alpine base has musl 1.1.24 or newer, the floor of the musl
+# build (packaging/musl-floor-check.sh): 7.2 (Alpine 3.12) to 8.5. The 5.6,
+# 7.0 and 7.1 Alpine bases are Alpine 3.8, 3.7 and 3.10 (musl 1.1.19, 1.1.18,
+# 1.1.22); from 1.5.0 the [log] exec hook's std::process::Command needs
+# posix_spawn_file_actions_addchdir_np, which musl added in 1.1.24, so PHP
+# there refuses the module ("Error relocating ...: symbol not found"; docker
+# run 40140181320). Those minors keep their Debian images.
 set -eu
 
 VERSION=${1:?usage: docker/matrix.sh <version> [floating] < SHA256SUMS}
 FLOATING=${2:-0}
 IMAGE=${IMAGE:-ghcr.io/howdah/howdah}
 DEBIAN_MINORS="5.6 7.0 7.1 7.2 7.3 7.4 8.0 8.1 8.2 8.3 8.4 8.5"
-ALPINE_MINORS=${ALPINE_MINORS:-"5.6 7.0 7.1 7.2 7.3 7.4 8.0 8.1 8.2 8.3 8.4 8.5"}
+ALPINE_MINORS=${ALPINE_MINORS:-"7.2 7.3 7.4 8.0 8.1 8.2 8.3 8.4 8.5"}
 
 case "$VERSION" in
   *[!0-9.]*|'') echo "matrix.sh: '$VERSION' is not a release version (pre-releases get no images)" >&2; exit 2 ;;

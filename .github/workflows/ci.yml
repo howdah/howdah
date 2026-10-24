@@ -106,23 +106,44 @@ jobs:
             php -d extension="$(ls /tmp/*/howdah.so)" --ri howdah | grep "^Version"
           ' < "$(ls packaging/out/*-linux-x86_64-musl.tar.gz)"
 
-  # Runtime image (docker/Dockerfile) from a fixed published release, smoke
-  # tested the way docker.yml gates a push. Pinned to 1.4.0 so the result does
-  # not change under the PR; FPM_BLOCK=bailout pins that release's php-fpm
-  # refusal behaviour (see docker/smoke.sh).
-  docker-image:
-    name: docker image (1.4.0, PHP 8.3)
+  # The docker/ and musl-floor scripts' own tests (docker + network; the
+  # fetch and floor tests use real published release files).
+  docker-scripts:
+    name: docker and musl-floor script tests
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - run: sh docker/matrix.test.sh
       - run: sh docker/fetch.test.sh 1.4.0
-      - name: Build and smoke-test the PHP 8.3 image
+      - run: sh packaging/musl-floor.test.sh
+
+  # Runtime images (docker/Dockerfile) from fixed published releases, smoke
+  # tested the way docker.yml gates a push. Pinned versions, so the result
+  # does not change under the PR. docker/smoke.sh picks the php-fpm refusal
+  # expectation from the Howdah version in the image: 1.4.0 bails out
+  # (worker exit 70), 1.5.0 refuses cleanly (#44). 7.2 is the oldest
+  # -alpine image (musl 1.1.24).
+  docker-image:
+    name: docker image (${{ matrix.version }}, PHP ${{ matrix.minor }} ${{ matrix.variant }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { version: '1.4.0', minor: '8.3', variant: fpm, libc: glibc }
+          - { version: '1.5.0', minor: '8.3', variant: fpm, libc: glibc }
+          - { version: '1.5.0', minor: '7.2', variant: fpm-alpine, libc: musl }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and smoke-test the image
         run: |
           docker buildx build --load -f docker/Dockerfile \
-            --build-arg HOWDAH_VERSION=1.4.0 --build-arg PHP_MINOR=8.3 -t howdah-ci:php8.3 .
-          FPM_BLOCK=bailout sh docker/smoke.sh howdah-ci:php8.3
+            --build-arg HOWDAH_VERSION="${{ matrix.version }}" --build-arg PHP_MINOR="${{ matrix.minor }}" \
+            --build-arg PHP_VARIANT="${{ matrix.variant }}" --build-arg HOWDAH_LIBC="${{ matrix.libc }}" \
+            -t howdah-ci:image .
+          sh docker/smoke.sh howdah-ci:image
 
   wasm:
     name: wasm build

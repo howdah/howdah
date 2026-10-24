@@ -14,14 +14,33 @@
 #      reached). Asserts: marker flagged with HTTP 200 and its self_test event
 #      in the php-fpm container's log (Howdah logs to stderr when howdah.log is
 #      empty), the over-limit request refused 403/413 with a max_parts block
-#      event, a normal form answered 200 with no self_test event. FPM_BLOCK
-#      (default bailout) pins how the refusal behaves today: a worker exit
-#      with code 70 and a 403 whose body may be lost (see the comment at that
-#      check and docs/install-docker.md, "Known limitations").
+#      event, a normal form answered 200 with no self_test event. How the
+#      refusal reaches the client depends on the Howdah version in the image
+#      (FPM_BLOCK, below): before 1.5.0 the php-fpm worker exits with code 70
+#      and the 403 body may be lost; from 1.5.0 (#44) the 403 carries the
+#      Howdah body and no worker exits.
 # [platform] (e.g. linux/arm64) runs every container under that platform.
 # Exit 0 only if every step passed. Needs docker and network access for the
 # nginx image (NGINX_IMAGE, default nginx:1.27-alpine).
+#
+# FPM_BLOCK=bailout|clean forces the php-fpm refusal expectation; unset, it
+# follows the Howdah version loaded in the image (bailout below 1.5.0, clean
+# from 1.5.0). `docker/smoke.sh --fpm-block-for <version>` prints that choice
+# and exits (no docker; docker/matrix.test.sh tests it).
 set -eu
+
+# bailout | clean: the php-fpm refusal behaviour of a Howdah version
+fpm_block_for() {
+  case "$1" in
+    [0-9]*.[0-9]*) ;;
+    *) echo "smoke.sh: '$1' is not a Howdah version" >&2; return 2 ;;
+  esac
+  if [ "$(printf '%s\n%s\n' 1.5.0 "$1" | sort -V | head -n 1)" = 1.5.0 ]; then echo clean; else echo bailout; fi
+}
+if [ "${1:-}" = --fpm-block-for ]; then
+  fpm_block_for "${2:-}"
+  exit $?
+fi
 
 IMAGE=${1:?usage: docker/smoke.sh <image> [platform]}
 PLATFORM=${2:-}
@@ -53,6 +72,15 @@ docker run --rm $P "$IMAGE" sh -ec '
   php --ri howdah | grep -q "^Mode => detect"
   echo "PHP $(php -r "echo PHP_VERSION;") $(php -r "echo PHP_ZTS ? \"ZTS\" : \"NTS\";"), howdah $(php -r "echo phpversion(\"howdah\");"): php -m, php-fpm -m list howdah; Mode => detect"
 ' || fail "howdah is not loaded in $IMAGE"
+# shellcheck disable=SC2086
+HV=$(docker run --rm $P "$IMAGE" php -r 'echo phpversion("howdah");')
+if [ -z "${FPM_BLOCK:-}" ]; then
+  FPM_BLOCK=$(fpm_block_for "$HV") || fail "cannot read the Howdah version in $IMAGE ('$HV')"
+  echo "expecting FPM_BLOCK=$FPM_BLOCK (howdah $HV)"
+else
+  echo "expecting FPM_BLOCK=$FPM_BLOCK (forced; howdah $HV)"
+fi
+case "$FPM_BLOCK" in bailout|clean) ;; *) fail "FPM_BLOCK must be bailout or clean, not '$FPM_BLOCK'" ;; esac
 
 echo "== 2. lab self-test scenario on the CLI server (PREINSTALLED=1) =="
 # shellcheck disable=SC2086
@@ -110,29 +138,29 @@ grep "$mid" "$W/fpm.log" | grep '"rule":"self_test"' | grep -q '"action":"log"' 
   || fail "no self_test action=log event for $mid in the php-fpm log"
 grep '"rule":"max_parts"' "$W/fpm.log" | grep -q '"action":"block"' \
   || fail "no max_parts block event in the php-fpm log"
-# CURRENT BEHAVIOUR, asserted on purpose (FPM_BLOCK=bailout, the default).
-# The Layer-1 refusal calls zend_bailout from the multipart callback, so
-# php_request_startup fails and php-fpm ends the worker ("child N exited with
-# code 70") before the request body is read. The unread body resets the
-# FastCGI socket; nginx logs "readv() failed (104: Connection reset by peer)
-# while reading upstream" and, depending on whether it read the response
-# before the reset, sends the 403 with an empty body (no request id) or with
-# the Howdah body. Both happened in the 1.4.0 runs, so only the 403 and the
-# worker exit are asserted here; which body arrived is printed. The fix is
-# PR #44 (fix/refusal-path-fpm). When it lands in a release, run with
-# FPM_BLOCK=clean (and make that the default): the 403 must then carry the
-# Howdah body every time and no worker may exit.
-case "${FPM_BLOCK:-bailout}" in
+# FPM_BLOCK=bailout (Howdah before 1.5.0): the Layer-1 refusal calls
+# zend_bailout from the multipart callback, so php_request_startup fails and
+# php-fpm ends the worker ("child N exited with code 70") before the request
+# body is read. The unread body resets the FastCGI socket; nginx logs
+# "readv() failed (104: Connection reset by peer) while reading upstream"
+# and, depending on whether it read the response before the reset, sends the
+# 403 with an empty body (no request id) or with the Howdah body. Both
+# happened in the 1.4.0 runs, so only the 403 and the worker exit are
+# asserted; which body arrived is printed.
+# FPM_BLOCK=clean (1.5.0 and later, #44): the 403 must carry the Howdah body
+# every time and no worker may exit.
+case "$FPM_BLOCK" in
   bailout)
     grep -q 'exited with code 70' "$W/fpm.log" \
-      || fail "FPM_BLOCK=bailout: expected a php-fpm worker exit with code 70; if the refusal path was fixed, run with FPM_BLOCK=clean"
+      || fail "FPM_BLOCK=bailout: expected a php-fpm worker exit with code 70 (howdah $HV; from 1.5.0 the refusal no longer bails out)"
     if grep -q '^over-limit parts: *BLOCKED' "$W/web.out"; then body="the Howdah body arrived this time"
     else body="the 403 body was empty (connection reset)"; fi
     echo "[fpm] current behaviour: $(grep -c 'exited with code 70' "$W/fpm.log") worker exit(s) with code 70; $body" ;;
   clean)
     grep -q '^over-limit parts: *BLOCKED *(HTTP \(403\|413\), request id ' "$W/web.out" \
-      || fail "FPM_BLOCK=clean: the 403 did not carry the Howdah body"
-    ! grep -q 'exited with code 70' "$W/fpm.log" || fail "FPM_BLOCK=clean: a php-fpm worker exited with code 70" ;;
+      || fail "FPM_BLOCK=clean: the 403 did not carry the Howdah body (howdah $HV)"
+    ! grep -q 'exited with code 70' "$W/fpm.log" || fail "FPM_BLOCK=clean: a php-fpm worker exited with code 70 (howdah $HV)"
+    echo "[fpm] refusal: 403 with the Howdah body, no worker exit" ;;
   *) fail "FPM_BLOCK must be bailout or clean" ;;
 esac
 

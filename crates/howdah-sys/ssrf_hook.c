@@ -55,8 +55,10 @@ extern int howdah_ssrf_prepare(const unsigned char *input, size_t input_len,
                                size_t out_host_cap, size_t *out_host_len,
                                uint16_t *out_port);
 
-/* Returns the action for an oversize (>cap) host: 0 allow / 1 log / 2 block. */
-extern int howdah_sink_ssrf_oversize(void *ctx);
+/* Returns the action for an oversize (>cap) host: 0 allow / 1 log / 2 block.
+ * Provided by the ext glue (ssrf_filter.rs): it calls howdah_sink_ssrf_oversize
+ * AND writes the stashed log line. */
+extern int howdah_ssrf_oversize_glue(void *ctx);
 
 static howdah_ssrf_decide_t g_decide = NULL;
 static howdah_ssrf_armed_t g_armed = NULL;
@@ -159,7 +161,7 @@ static int ssrf_should_block(const char *arg, size_t arglen, int scheme_required
                                hostbuf, HOWDAH_HOST_MAX, &hlen, &port);
     if (prep == 0) return 0; /* not a network target */
     /* Oversize host (could hide a zero-padded numeric IP): Rust decides. */
-    if (prep == 2) return howdah_sink_ssrf_oversize(g_ctx) == HOWDAH_ACTION_BLOCK;
+    if (prep == 2) return howdah_ssrf_oversize_glue(g_ctx) ==HOWDAH_ACTION_BLOCK;
     if (hlen > HOWDAH_HOST_MAX) return 0;
     hostbuf[hlen] = '\0';
 

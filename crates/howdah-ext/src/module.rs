@@ -7,6 +7,7 @@ use std::ffi::{c_char, c_int, c_uint, c_void, CStr, CString};
 use std::mem::size_of;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use howdah_core::ffi as core;
 use howdah_sys as sys;
@@ -105,7 +106,7 @@ pub unsafe extern "C" fn get_module() -> *mut sys::zend_module_entry {
         name: NAME.as_ptr() as *const c_char,
         module_startup_func: Some(minit),
         module_shutdown_func: Some(mshutdown),
-        request_startup_func: None,
+        request_startup_func: Some(rinit),
         request_shutdown_func: Some(rshutdown),
         info_func: Some(minfo),
         version: VERSION.as_ptr() as *const c_char,
@@ -209,6 +210,35 @@ unsafe extern "C" fn rshutdown(_type: c_int, _module_number: c_int) -> c_int {
         }
     }
     clear_request_state();
+    // FPM workers persist: drop the C-owned curl handle map + resolution cache.
+    // Harmless (empty clear) when the ssrf hooks were never installed.
+    sys::howdah_ssrf_request_reset();
+    SUCCESS
+}
+
+/// First-RINIT, process-once install of the phar + ssrf hooks. Deferred past
+/// MINIT because on distro builds curl/phar are shared extensions that load
+/// AFTER howdah; by first RINIT every module has registered. Config is
+/// process-static, so a sink whose effective mode is Off installs nothing (true
+/// zero overhead; both default Off).
+///
+/// # Safety
+/// Called by PHP at request startup (NTS: single-threaded).
+unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
+    if !INSTALLED.swap(true, Ordering::Relaxed) && !CTX.is_null() {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            if core::howdah_sink_armed(CTX, core::HOWDAH_SINK_PHAR) != 0 {
+                sys::howdah_install_phar_hook(crate::sink_filter::decide);
+            }
+            if core::howdah_sink_armed(CTX, core::HOWDAH_SINK_SSRF) != 0 {
+                sys::howdah_install_ssrf_hooks(
+                    crate::ssrf_filter::decide,
+                    crate::ssrf_filter::armed,
+                );
+            }
+        }));
+    }
     SUCCESS
 }
 

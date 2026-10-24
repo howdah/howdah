@@ -857,6 +857,33 @@ pub unsafe extern "C" fn howdah_sink_ssrf_armed(ctx: *mut howdah_ctx) -> i32 {
     .unwrap_or(0)
 }
 
+/// 1 iff the given sink (`HOWDAH_SINK_*`) is armed (effective mode != off);
+/// NULL ctx, unknown sink or panic is 0. Never stashes a log line. Used by the
+/// glue to decide, once per process, whether to install the phar/ssrf hooks.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_sink_armed(ctx: *mut howdah_ctx, sink: i32) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    let id = match sink {
+        HOWDAH_SINK_COMMAND_EXEC => SinkId::CommandExec,
+        HOWDAH_SINK_INCLUDE => SinkId::Include,
+        HOWDAH_SINK_EVAL => SinkId::Eval,
+        HOWDAH_SINK_UNSERIALIZE => SinkId::Unserialize,
+        HOWDAH_SINK_PHAR => SinkId::Phar,
+        HOWDAH_SINK_SSRF => SinkId::Ssrf,
+        _ => return 0,
+    };
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = &*ctx;
+        i32::from(c.config.sinks.effective_mode(id, c.config.mode) != Mode::Off)
+    }))
+    .unwrap_or(0)
+}
+
 /// SSRF decision for one intercepted outbound call. `ips` points to
 /// `ips_count` fixed 17-byte records `[family (4|6)][16 address bytes]` (a v4
 /// uses the first 4). Returns 0 Allow / 1 Log / 2 Block; NULL ctx, malformed
@@ -1620,6 +1647,24 @@ mod tests {
         let c = init("mode=\"off\"\n[sinks.ssrf]\nmode=\"block\"");
         assert_eq!(ssrf_armed(c), 0);
         unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn sink_armed_per_sink() {
+        let c = init("");
+        unsafe {
+            assert_eq!(howdah_sink_armed(c, HOWDAH_SINK_PHAR), 0);
+            assert_eq!(howdah_sink_armed(c, HOWDAH_SINK_SSRF), 0);
+            howdah_free(c);
+        }
+        let c = init("[sinks.phar]\nmode=\"detect\"");
+        unsafe {
+            assert_eq!(howdah_sink_armed(c, HOWDAH_SINK_PHAR), 1);
+            assert_eq!(howdah_sink_armed(c, HOWDAH_SINK_SSRF), 0);
+            assert_eq!(howdah_sink_armed(c, 99), 0);
+            howdah_free(c);
+            assert_eq!(howdah_sink_armed(std::ptr::null_mut(), HOWDAH_SINK_PHAR), 0);
+        }
     }
 
     #[test]

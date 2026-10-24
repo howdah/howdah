@@ -38,6 +38,9 @@ https://howdah.org/install/ for how this layout loads the module.
 %install
 install -D -m 0755 %{SOURCE0} %{buildroot}%{moddir}/howdah.so
 @INSTALL_INIS@
+# Reproducible payload: every file carries SOURCE_DATE_EPOCH (EL7's rpm 4.11
+# has no %%clamp_mtime_to_source_date_epoch; build-layouts.sh passes it anyway).
+if [ -n "${SOURCE_DATE_EPOCH:-}" ]; then find %{buildroot} -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +; fi
 
 # Enabling is the ini drop-in, so there is no %post/%postun: nothing that can
 # wedge PHP or the transaction. Each ini is %config(noreplace): local edits

@@ -36,6 +36,8 @@ OUT="$REPO_ROOT/packaging/out"
 TABLE="$REPO_ROOT/packaging/layouts.tsv"
 SPEC_IN="$REPO_ROOT/packaging/rpm/layout.spec.in"
 CONTROL_IN="$REPO_ROOT/packaging/deb/layout-control.in"
+# shellcheck source=packaging/reproducible.sh
+. "$REPO_ROOT/packaging/reproducible.sh"
 
 MINOR="${1:?usage: build-layouts.sh <minor> <x86_64|aarch64> [tarball]}"
 ARCH="${2:?usage: build-layouts.sh <minor> <x86_64|aarch64> [tarball]}"
@@ -159,7 +161,7 @@ License: MIT or Apache-2.0
 EOF2
     chmod 0644 "$stage/usr/share/doc/$pkg/copyright"
     depends="$(printf '%s' "$reqs" | sed 's/,/, /g')"
-    size="$(du -sk --exclude=DEBIAN "$stage" | cut -f1)"
+    size="$(howdah_installed_size_kib "$stage")"
     req_lines=(); install_lines=(); files_lines=()
     fill "$CONTROL_IN" > "$stage/DEBIAN/control"
     echo "$repo/$kind" > "$WORK/deb/$layout-$pkg/dest"
@@ -186,6 +188,11 @@ if [ -n "$RENDER" ]; then
 fi
 
 # ---- 3. build -----------------------------------------------------------------
+# Reproducible like build-deb.sh / build-rpm.sh (docs/verify.md): normalised
+# modes and mtimes, SOURCE_DATE_EPOCH for dpkg-deb and the spec's %install,
+# and a fixed rpm build host (EL7's rpm still stamps its header build time).
+SOURCE_DATE_EPOCH="$(howdah_source_date_epoch "$REPO_ROOT")"
+export SOURCE_DATE_EPOCH
 mkdir -p "$OUT/layouts"
 if ls -d "$WORK"/rpm/*/ >/dev/null 2>&1; then
   # Same EL7 rpmbuild image as packaging/rpm/build-rpm.sh (oldest rpm we
@@ -193,10 +200,13 @@ if ls -d "$WORK"/rpm/*/ >/dev/null 2>&1; then
   IMG=howdah-rpmbuild-el7
   docker image inspect "$IMG" >/dev/null 2>&1 \
     || docker build -q -t "$IMG" -f "$REPO_ROOT/packaging/rpm/builder.Dockerfile" "$REPO_ROOT/packaging/rpm"
-  docker run --rm -e HU="$(id -u)" -e HG="$(id -g)" -e ARCH="$ARCH" -v "$WORK/rpm":/w "$IMG" bash -ec '
+  docker run --rm --hostname reproducible -e SOURCE_DATE_EPOCH \
+    -e HU="$(id -u)" -e HG="$(id -g)" -e ARCH="$ARCH" -v "$WORK/rpm":/w "$IMG" bash -ec '
     for t in /w/*/; do
       rpmbuild -bb --target "$ARCH" --define "_topdir $t" --define "_rpmdir ${t}RPMS" \
-        --define "_sourcedir ${t}SOURCES" "${t}howdah.spec" > "${t}log" 2>&1 || { cat "${t}log"; exit 1; }
+        --define "_sourcedir ${t}SOURCES" --define "_buildhost reproducible" \
+        --define "use_source_date_epoch_as_buildtime 1" --define "clamp_mtime_to_source_date_epoch 1" \
+        "${t}howdah.spec" > "${t}log" 2>&1 || { cat "${t}log"; exit 1; }
     done
     chown -R "$HU:$HG" /w'
   for t in "$WORK"/rpm/*/; do
@@ -212,6 +222,7 @@ for d in "$WORK"/deb/*/; do
   v="$(sed -n 's/^Version: //p' "$d/stage/DEBIAN/control")"
   deb="$dest/${p}_${v}_${DEBARCH}.deb"
   # --root-owner-group: root:root regardless of builder uid; gzip members for old dpkg.
+  howdah_normalize_tree "$d/stage" "$SOURCE_DATE_EPOCH"
   dpkg-deb --root-owner-group -Zgzip --build "$d/stage" "$deb" >/dev/null
   echo "== built $(basename "$deb") -> layouts/$(cat "$d/dest")/"
 done

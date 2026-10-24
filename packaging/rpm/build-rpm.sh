@@ -21,6 +21,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HERE="$REPO_ROOT/packaging/rpm"
 OUT="$REPO_ROOT/packaging/out"
+# shellcheck source=packaging/reproducible.sh
+. "$REPO_ROOT/packaging/reproducible.sh"
 
 MINOR="${1:?usage: build-rpm.sh <minor> <x86_64|aarch64> [tarball]}"
 ARCH="${2:?usage: build-rpm.sh <minor> <x86_64|aarch64> [tarball]}"
@@ -64,8 +66,18 @@ sed -e "s/@XY@/$XY/g" -e "s/@SCL@/$SCL/g" -e "s/@MINOR@/$MINOR/g" -e "s/@API@/$A
 IMG=howdah-rpmbuild-el7
 docker image inspect "$IMG" >/dev/null 2>&1 || docker build -q -t "$IMG" -f "$HERE/builder.Dockerfile" "$HERE"
 mkdir -p "$OUT"
-docker run --rm -e HU=$(id -u) -e HG=$(id -g) -v "$WORK/top":/top -v "$OUT":/out "$IMG" bash -ec "
-  rpmbuild -bb --target $ARCH --define '_topdir /top' --define '_rpmdir /top/RPMS' --define '_sourcedir /top/SOURCES' /top/howdah.spec >/top/log 2>&1 || { cat /top/log; exit 1; }
+# Reproducibility (docs/verify.md): a fixed build host name, and file mtimes
+# set to SOURCE_DATE_EPOCH by the spec's %install. The _buildhost and
+# SOURCE_DATE_EPOCH macros need rpm >= 4.14; EL7's rpm 4.11 ignores them and
+# still stamps the header with the build time, so two builds share the same
+# payload (rpm2cpio) but not the same header. Published rpms are rpmsign'ed,
+# which adds a timestamped signature in any case.
+SOURCE_DATE_EPOCH="$(howdah_source_date_epoch "$REPO_ROOT")"
+docker run --rm --hostname reproducible -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
+  -e HU=$(id -u) -e HG=$(id -g) -v "$WORK/top":/top -v "$OUT":/out "$IMG" bash -ec "
+  rpmbuild -bb --target $ARCH --define '_topdir /top' --define '_rpmdir /top/RPMS' --define '_sourcedir /top/SOURCES' \
+    --define '_buildhost reproducible' --define 'use_source_date_epoch_as_buildtime 1' \
+    --define 'clamp_mtime_to_source_date_epoch 1' /top/howdah.spec >/top/log 2>&1 || { cat /top/log; exit 1; }
   tail -3 /top/log
   cp /top/RPMS/$ARCH/*.rpm /out/; chown -R \$HU:\$HG /top; chown \$HU:\$HG /out/*.rpm
   cd /top/RPMS/$ARCH

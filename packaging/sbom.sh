@@ -43,6 +43,7 @@ if [ -z "$CDX" ]; then
   CDX="$(find "$WORK" -type f -name cargo-cyclonedx | head -1)"
 fi
 [ -x "$CDX" ] || { echo "FATAL: no cargo-cyclonedx binary at '$CDX'" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "FATAL: needs jq" >&2; exit 1; }
 
 # cargo-cyclonedx writes <name>.json next to every workspace member's
 # Cargo.toml; use a name nothing else uses, keep howdah-ext's, drop the rest.
@@ -50,14 +51,27 @@ name="howdah-sbom-$$"
 "$CDX" cyclonedx --manifest-path "$REPO_ROOT/crates/howdah-ext/Cargo.toml" \
   --all-features --target "$TARGET" --spec-version 1.5 --format json \
   --override-filename "$name" -q
-mkdir -p "$(dirname "$OUT")"
-mv "$REPO_ROOT/crates/howdah-ext/$name.json" "$OUT"
+raw="$WORK/raw.json"
+mv "$REPO_ROOT/crates/howdah-ext/$name.json" "$raw"
 find "$REPO_ROOT/crates" -maxdepth 2 -name "$name.json" -delete
+
+# With SOURCE_DATE_EPOCH set, cargo-cyclonedx leaves out the random
+# serialNumber, but actions/attest only accepts a CycloneDX document that has
+# one. Derive it from the content instead (a UUID-shaped sha256 prefix,
+# version 5 and RFC 4122 variant bits), so the SBOM stays reproducible.
+h="$(sha256sum "$raw" | cut -c1-32)"
+uuid="${h:0:8}-${h:8:4}-5${h:13:3}-$(printf '%x' $(( (0x${h:16:1} & 3) | 8 )))${h:17:3}-${h:20:12}"
+mkdir -p "$(dirname "$OUT")"
+jq --arg s "urn:uuid:$uuid" '{bomFormat, specVersion, serialNumber: $s} + .' "$raw" > "$OUT"
 
 # Sanity: a CycloneDX document whose subject is howdah-ext and which lists
 # the crates we know are linked in.
-grep -q '"bomFormat": *"CycloneDX"' "$OUT" || { echo "FATAL: $OUT is not CycloneDX" >&2; exit 1; }
+# The same fields actions/attest requires (bomFormat, specVersion, serialNumber).
+jq -e '.bomFormat == "CycloneDX" and (.specVersion | length > 0) and (.serialNumber | startswith("urn:uuid:"))
+       and .metadata.component.name == "howdah-ext"' "$OUT" >/dev/null \
+  || { echo "FATAL: $OUT is not a CycloneDX SBOM for howdah-ext" >&2; exit 1; }
 for c in howdah-core serde_json toml; do
-  grep -q "\"name\": *\"$c\"" "$OUT" || { echo "FATAL: $OUT does not list $c" >&2; exit 1; }
+  jq -e --arg c "$c" 'any(.components[]; .name == $c)' "$OUT" >/dev/null \
+    || { echo "FATAL: $OUT does not list $c" >&2; exit 1; }
 done
-echo "== SBOM for howdah-ext ($TARGET): $OUT ($(grep -c '"bom-ref"' "$OUT") bom-refs)"
+echo "== SBOM for howdah-ext ($TARGET): $OUT ($(jq '.components | length' "$OUT") components, $(jq -r .serialNumber "$OUT"))"

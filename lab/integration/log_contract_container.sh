@@ -149,26 +149,27 @@ echo "  ok   - destination = stderr: 'howdah-event {json}' lines on stderr"
 # ---- 4. exec hook ------------------------------------------------------------
 cat > "$WORK/hook.sh" <<EOF
 #!/bin/sh
-f=\$(mktemp $WORK/hook.XXXXXX)
+f=\$(mktemp $WORK/hooks/run.XXXXXX)
 env > "\$f.env"
 { echo "rule=\$HOWDAH_RULE action=\$HOWDAH_ACTION argc=\$#"; cat; } > "\$f.tmp"
 mv "\$f.tmp" "\$f.out"
 EOF
 chmod 0755 "$WORK/hook.sh"
+mkdir -p "$WORK/hooks"
 printf 'mode = "detect"\n[log]\npath = "%s"\nexec = "%s"\n' "$WORK/exec.log" "$WORK/hook.sh" > "$WORK/exec.toml"
 ri "$WORK/exec.toml" > "$WORK/ri4.txt"
 grep -q "^Log hook (\[log\] exec) => $WORK/hook.sh (at most 10 per second)\$" "$WORK/ri4.txt" || fail "4: --ri hook row"
 serve 8105 "$WORK/exec.toml"
 events 8105
 _j=0
-while [ "$(ls "$WORK"/hook.*.out 2>/dev/null | wc -l)" -lt 3 ]; do
+while [ "$(ls "$WORK"/hooks/*.out 2>/dev/null | wc -l)" -lt 3 ]; do
   _j=$((_j+1)); [ "$_j" -gt 100 ] && fail "4: the hook did not run three times"; sleep 0.05
 done
 stop
 [ "$(wc -l < "$WORK/exec.log")" -eq 3 ] || fail "4: expected 3 events"
 while IFS= read -r line; do
   _hit=""
-  for f in "$WORK"/hook.*.out; do
+  for f in "$WORK"/hooks/*.out; do
     if [ "$(sed -n 2p "$f")" = "$line" ]; then _hit=$f; fi
   done
   [ -n "$_hit" ] || fail "4: no hook received: $line"
@@ -181,20 +182,94 @@ while IFS= read -r line; do
   [ -z "$_extra" ] || fail "4: hook environment has more than HOWDAH_RULE/HOWDAH_ACTION/PATH: $_extra"
 done < "$WORK/exec.log"
 echo "  ok   - [log] exec: each hook got its exact line on stdin, HOWDAH_RULE/HOWDAH_ACTION set, argc 0, no other env:"
-for f in "$WORK"/hook.*.out; do sed -n 1p "$f" | sed 's/^/           /'; done
+for f in "$WORK"/hooks/*.out; do sed -n 1p "$f" | sed 's/^/           /'; done
 grep '^Log hook' "$WORK/ri4.txt" | sed 's/^/           /'
 
-rm -f "$WORK"/hook.*
+rm -f "$WORK"/hooks/*
 printf 'mode = "detect"\n[log]\npath = "%s"\nexec = "%s"\nexec_rate_limit = 2\n' "$WORK/rate.log" "$WORK/hook.sh" > "$WORK/rate.toml"
 serve 8106 "$WORK/rate.toml"
 for i in 1 2 3 4 5 6; do sqli 8106; done
 sleep 1
 stop
-_n=$(ls "$WORK"/hook.*.out 2>/dev/null | wc -l)
+_n=$(ls "$WORK"/hooks/*.out 2>/dev/null | wc -l)
 [ "$(wc -l < "$WORK/rate.log")" -eq 6 ] || fail "4b: expected 6 events in the log"
 [ "$_n" -ge 2 ] && [ "$_n" -lt 6 ] || fail "4b: exec_rate_limit = 2 let $_n of 6 hooks run"
 grep -q 'exec rate limit reached (2 per second)' "$WORK/server.8106.txt" || fail "4b: no rate-limit note on stderr"
 echo "  ok   - exec_rate_limit = 2: 6 events logged, $_n hooks ran, rate-limit note on stderr"
+
+# ---- 5. php-fpm: syslog + exec from forked workers ---------------------------
+# The extension starts in the FPM master and the workers fork from it, so the
+# syslog socket and the hook must work from a worker (frames carry the
+# worker's pid, not the master's). cgi-fcgi sets REMOTE_ADDR, so client_ip is
+# filled in, unlike under php -S.
+if command -v php-fpm >/dev/null 2>&1 && command -v cgi-fcgi >/dev/null 2>&1; then
+  rm -f "$WORK"/hooks/* "$WORK/syslog.txt"
+  php -n "$LC/log_listener.php" /dev/log "$WORK/syslog.txt" > "$WORK/listener.txt" 2>&1 &
+  LSN=$!
+  _j=0
+  while [ ! -S /dev/log ]; do _j=$((_j+1)); [ "$_j" -gt 50 ] && fail "5: listener never bound /dev/log"; sleep 0.1; done
+  printf 'mode = "detect"\n[log]\ndestination = "syslog"\nexec = "%s"\n' "$WORK/hook.sh" > "$WORK/fpm.toml"
+  cat > "$WORK/fpm.conf" <<EOF
+[global]
+error_log = $WORK/fpm.err.txt
+daemonize = no
+[www]
+listen = 127.0.0.1:9000
+pm = static
+pm.max_children = 2
+catch_workers_output = yes
+EOF
+  # Stock max_input_vars (1000) would stop PHP's own parser before Howdah's
+  # max_parts (2000) is reached; raise it as the other lab scripts do.
+  php-fpm -R -F -y "$WORK/fpm.conf" -d max_input_vars=100000 -d post_max_size=16M \
+    -d extension="$WORK/howdah.so" -d howdah.config="$WORK/fpm.toml" > "$WORK/fpm.out.txt" 2>&1 &
+  FPM=$!
+  fcgi() { # <method> <query> <content-type> <bodyfile>
+    _cl=$(wc -c < "$4")
+    env -i SCRIPT_FILENAME="$WORK/index.php" SCRIPT_NAME=/index.php REQUEST_URI="/index.php${2:+?$2}" \
+      QUERY_STRING="$2" REQUEST_METHOD="$1" CONTENT_TYPE="$3" CONTENT_LENGTH="$_cl" \
+      REMOTE_ADDR=203.0.113.7 SERVER_PROTOCOL=HTTP/1.1 GATEWAY_INTERFACE=CGI/1.1 \
+      cgi-fcgi -bind -connect 127.0.0.1:9000 < "$4" > "$WORK/fcgi.raw" 2>/dev/null
+  }
+  : > "$WORK/empty.bin"
+  _j=0
+  while ! fcgi GET "" "" "$WORK/empty.bin"; do
+    _j=$((_j+1)); [ "$_j" -gt 60 ] && fail "5: php-fpm never came up"; sleep 0.1
+  done
+  # a field flood over max_parts (2000): Critical, so it blocks even in detect
+  php -r '$f=fopen($argv[1],"w"); for($i=0;$i<2001;$i++){fwrite($f,"--FlB0\r\nContent-Disposition: form-data; name=\"f$i\"\r\n\r\n\r\n");} fwrite($f,"--FlB0--\r\n");' "$WORK/flood.bin"
+  fcgi POST "" "multipart/form-data; boundary=FlB0" "$WORK/flood.bin"
+  grep -q '^Status: 403' "$WORK/fcgi.raw" || fail "5: the max_parts flood was not refused with 403"
+  fcgi GET "q=%27%20OR%201%3D1%20--" "" "$WORK/empty.bin"
+  fcgi GET "exec=1" "" "$WORK/empty.bin"
+  wait_lines "$WORK/syslog.txt" 3
+  _j=0
+  while [ "$(ls "$WORK"/hooks/*.out 2>/dev/null | wc -l)" -lt 3 ]; do
+    _j=$((_j+1)); [ "$_j" -gt 100 ] && fail "5: the hook did not run three times under fpm"; sleep 0.05
+  done
+  kill "$FPM" 2>/dev/null || true; wait "$FPM" 2>/dev/null || true
+  kill "$LSN" 2>/dev/null || true; LSN=""
+  HOWDAH_IDENT=howdah HOWDAH_FAC=16 php -n "$LC/log_check.php" "$WORK/syslog.txt" syslog > "$WORK/check5.txt" \
+    || fail "5: frame/schema check"
+  grep -qx 'max_parts 1 block' "$WORK/check5.txt" || fail "5: no layer-1 max_parts block"
+  grep -qx 'sql_injection 2 log' "$WORK/check5.txt" || fail "5: no layer-2 sql_injection line"
+  grep -qx 'command_exec 3 log' "$WORK/check5.txt" || fail "5: no layer-3 command_exec line"
+  grep -q '"client_ip":"203.0.113.7"' "$WORK/syslog.txt" || fail "5: client_ip not filled in under fpm"
+  if grep -q "howdah\[$FPM\]" "$WORK/syslog.txt"; then fail "5: a frame carries the master's pid"; fi
+  # Workers fork from the master: their request ids must still differ.
+  [ "$(sed 's/.*"request_id":"\([0-9a-f]*\)".*/\1/' "$WORK/syslog.txt" | sort -u | wc -l)" -eq 3 ] \
+    || fail "5: request ids repeat across fpm workers"
+  for f in "$WORK"/hooks/*.out; do
+    grep -qF "$(sed -n 2p "$f")" "$WORK/syslog.txt" || fail "5: hook line not among the events: $f"
+  done
+  echo "  ok   - php-fpm (master pid $FPM): syslog frames from the workers, hook ran per event, client_ip set:"
+  sed 's/^/           /' "$WORK/syslog.txt"
+  for f in "$WORK"/hooks/*.out; do sed -n 1p "$f" | sed 's/^/           /'; done
+  echo "         fpm master log (child exits):"
+  grep -i 'child\|exited\|signal' "$WORK/fpm.err.txt" | sed 's/^/           /' || true
+else
+  echo "  skip - php-fpm or cgi-fcgi not in this image"
+fi
 
 cleanup
 echo "PASS"

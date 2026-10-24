@@ -1,0 +1,32 @@
+<!--
+  Wazuh rules for Howdah events. Install as
+  /var/ossec/etc/rules/howdah_rules.xml on the manager. 100700 matches lines
+  from the event file (log_format json), 100701 lines sent through syslog
+  (needs howdah_decoders.xml). Change the IDs if they clash with your own
+  rules (local rules use 100000-120000). Tested with
+  wazuh/wazuh-manager:4.12.0 (lab/integration/siem_snippets.sh).
+-->
+<group name="howdah,web,">
+  <rule id="100700" level="0">
+    <decoded_as>json</decoded_as>
+    <field name="schema">^2$</field>
+    <description>Howdah event (event file)</description>
+  </rule>
+
+  <rule id="100701" level="0">
+    <decoded_as>howdah</decoded_as>
+    <description>Howdah event (syslog)</description>
+  </rule>
+
+  <rule id="100702" level="5">
+    <if_sid>100700, 100701</if_sid>
+    <action>log</action>
+    <description>Howdah logged $(rule) (layer $(layer)) on $(uri)</description>
+  </rule>
+
+  <rule id="100703" level="10">
+    <if_sid>100700, 100701</if_sid>
+    <action>block</action>
+    <description>Howdah blocked $(rule) (layer $(layer)) on $(uri)</description>
+  </rule>
+</group>

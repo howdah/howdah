@@ -117,11 +117,11 @@
       note: 'Off by default (object unserialize is high-volume). detect logs classes not in allow_classes; block refuses them. Fill allow_classes from the detect log first.' },
     { key: 'unserialize.allow_classes', type: 'list', default: [], note: 'Class names that may be unserialized, one per line.' },
     { key: 'include.mode', type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
-      note: 'include/require. PHP 7.0+ only (accepted on 5.x, nothing hooked). Inert until allow_paths is set.' },
+      note: 'include/require. Active on PHP 5.x and 7.0+; on 5.x an include served from a warm opcache is not re-inspected. Inert until allow_paths is set.' },
     { key: 'include.allow_paths', type: 'list', default: [],
       note: 'Directories include/require may load from, one per line. Lexical prefixes: a symlink under an allowed directory is not resolved.' },
     { key: 'eval.mode', type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
-      note: 'eval. PHP 7.0+ only. There is no allowlist: in detect every eval() logs; in block every eval() is skipped.' },
+      note: 'eval. Active on PHP 5.x and 7.0+ (fully covered on both). There is no allowlist: in detect every eval() logs; in block every eval() is skipped.' },
     // 1.3: both opt-in (off); only an explicit mode here arms them.
     { key: 'phar.mode', type: 'enum', values: MODES, default: 'off',
       note: 'phar:// stream access (1.3). Off by default; a global or [sinks] block does not arm it. detect logs phar access outside allow_paths; block refuses it.' },
@@ -141,7 +141,7 @@
       { id: 'rules', title: 'Per-rule mode', keys: [], rulesKeys: rulesKeys,
         groups: { multipart: 'Multipart', input: 'Input shape', headers: 'Request headers', inspect: 'Layer 2 names (no effect here)', sinks: 'Layer 3 names (no effect here)', other: 'Other' } },
       { id: 'inspect', title: 'Layer 2: input inspection', keys: INSPECT },
-      { id: 'sinks', title: 'Layer 3: sink hardening', keys: SINKS, php7Only: ['include', 'eval'] }
+      { id: 'sinks', title: 'Layer 3: sink hardening', keys: SINKS, php7Only: ['include'] }
     ],
     presets: {
       defaults: { 'howdah.mode': 'detect' },

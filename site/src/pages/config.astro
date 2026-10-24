@@ -141,10 +141,10 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
             <legend>[{sec.id}]: {sec.title.replace(/^Layer \d: /, '')}</legend>
             <p class="small">{sec.id === 'inspect'
               ? 'Layer 2 only logs by default and is independent of the global mode: a global block does not arm it. Signature inspection is best-effort and can be bypassed; use the log to find application bugs rather than relying on it. In block mode the request is refused after the script has run (see Enforcement timing in the configuration reference).'
-              : 'Layer 3 only logs by default and is independent of the global mode: a global block does not arm any sink. Set a sink’s allowlist first, then arm block. include/require and eval are PHP 7.0+ only. The sink argument is never logged.'}</p>
+              : 'Layer 3 only logs by default and is independent of the global mode: a global block does not arm any sink. Set a sink’s allowlist first, then arm block. include/require and eval are active on PHP 5.x as well as 7.0+; on 5.x an include served from a warm opcache is not re-inspected (eval is fully covered). The sink argument is never logged.'}</p>
             {sec.keys.map((k) => (
               <div class={'ctl' + (sec.php7Only && sec.php7Only.some((p) => k.key.startsWith(p + '.')) ? ' php7' : '')}>
-                <label for={sec.id + '-' + k.key}><code>{k.key}</code> <span class="def">default: {fmtDefault(k)}</span>{sec.php7Only && sec.php7Only.some((p) => k.key.startsWith(p + '.')) ? <span class="tag php">PHP 7.0+</span> : null}</label>
+                <label for={sec.id + '-' + k.key}><code>{k.key}</code> <span class="def">default: {fmtDefault(k)}</span>{sec.php7Only && sec.php7Only.some((p) => k.key.startsWith(p + '.')) ? <span class="tag php">5.x: opcache caveat</span> : null}</label>
                 {k.type === 'bool'
                   ? <input id={sec.id + '-' + k.key} name={sec.id + '.' + k.key} data-type="bool" type="checkbox" checked={k.default} />
                   : k.type === 'int'

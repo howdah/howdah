@@ -5,11 +5,10 @@ Howdah is published as signed apt and yum repositories at `https://pkg.howdah.or
 (for example `php7.4-howdah`) and `php<XY>-howdah` on RPM systems using the Remi
 layout (for example `php74-howdah`).
 
-> **Status: not live yet.** The repositories, signing and CI are built and were
-> validated against a throwaway key and local containers. These commands start
-> working once the project owner runs the publish workflow (see
-> `packaging/repo/GO-LIVE.md`). Until then, use the tarballs from the GitHub
-> release.
+> **Status: live.** The repositories are published and signed with the
+> project key (see [Key](#key) below), and the commands in this document work
+> today. The tarballs on the GitHub release remain available as an alternative.
+> How publishing is set up is described in `packaging/repo/GO-LIVE.md`.
 >
 > **Validation honesty.** Install, `php -m`, remove and purge were exercised in
 > containers on Debian bookworm (PHP 7.4, 8.1), CentOS 7 (7.4, 8.1) and

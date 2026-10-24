@@ -1,7 +1,9 @@
 # Go-live: publishing the apt + yum repos to pkg.howdah.org
 
-Everything is built and validated, but nothing real has been published. These are
-the owner-only steps. Do them in order.
+The repositories at pkg.howdah.org are live. This document records the
+owner-only steps used to set up and operate publishing; follow them in order
+if you stand the pipeline up again (a new bucket, account or key). Routine
+releases only need the publish workflow.
 
 ## 1. Create the `pkg-publish` Environment and put the secrets in it
 

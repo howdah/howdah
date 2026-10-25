@@ -99,3 +99,15 @@ int64_t howdah_post_max_size(void) {
 const char *howdah_request_content_type(void) {
     return SG(request_info).content_type;
 }
+
+/* 1 iff PHP resolved this request's body with its multipart/form-data reader,
+ * i.e. SG(request_info).post_entry is the multipart entry: non-NULL with a NULL
+ * post_reader (rfc1867 pulls read_post from its post_handler). urlencoded has a
+ * non-NULL post_reader; php://input / PUT / enable_post_data_reading=0 have no
+ * post_entry. Lets the glue arm the byte scanner ONLY for bodies PHP actually
+ * parses as multipart — not every read_post consumer — matching where gaps A/B
+ * exist. Stable across 5.x-8.x. */
+int howdah_is_multipart_post(void) {
+    const sapi_post_entry *pe = SG(request_info).post_entry;
+    return (pe != NULL && pe->post_reader == NULL) ? 1 : 0;
+}

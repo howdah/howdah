@@ -214,11 +214,19 @@ impl MultipartState {
         self.total_fed
     }
 
-    /// Summed bytes of all non-file (field) part bodies seen in byte-feed mode.
-    /// PHP buffers these whole in memory, so they drive the §4.5 estimate; file
-    /// data (which goes to a temp file) is excluded.
+    /// Summed bytes of all non-file (field) part bodies seen in byte-feed mode,
+    /// INCLUDING the field currently being buffered. PHP holds a whole non-file
+    /// value in memory, so the §4.5 estimate must see the single-giant-field
+    /// shape while PHP is reading it — not only once the closing delimiter lands
+    /// (by which point PHP has already buffered it). File data (which goes to a
+    /// temp file) is excluded.
     pub fn total_nonfile_bytes(&self) -> u64 {
-        self.nonfile_bytes
+        let in_flight = if !self.current_is_file && matches!(self.phase, Phase::Scan { preamble: false }) {
+            self.data_len
+        } else {
+            0
+        };
+        self.nonfile_bytes.saturating_add(in_flight)
     }
 
     /// Signal end of input. Errors if the closing boundary was never seen.
@@ -529,6 +537,23 @@ mod tests {
         let mut st = MultipartState::new(b"B");
         st.feed(body.as_bytes()).expect("body must parse");
         assert_eq!(st.total_nonfile_bytes(), 8); // 5 + 3; the file's 10 excluded
+    }
+
+    #[test]
+    fn nonfile_bytes_includes_the_in_flight_field() {
+        // A field being buffered (no closing delimiter yet) must already count,
+        // so §4.5 sees the single-giant-field shape mid-read.
+        let mut st = MultipartState::new(b"B");
+        st.feed(b"--B\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n")
+            .expect("headers parse");
+        st.feed(&vec![b'x'; 1000]).expect("partial body feeds");
+        assert_eq!(st.total_nonfile_bytes(), 1000); // counted before the delimiter
+        // A file part's in-flight data is NOT counted (goes to a temp file).
+        let mut sf = MultipartState::new(b"B");
+        sf.feed(b"--B\r\nContent-Disposition: form-data; name=\"f\"; filename=\"x\"\r\n\r\n")
+            .expect("headers parse");
+        sf.feed(&vec![b'y'; 1000]).expect("partial file feeds");
+        assert_eq!(sf.total_nonfile_bytes(), 0);
     }
 
     #[test]

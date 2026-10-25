@@ -160,6 +160,12 @@ extern "C" {
     /// NUL-terminated, or NULL). Engine-owned; never freed.
     pub fn howdah_request_content_type() -> *const ::std::ffi::c_char;
 
+    /// 1 iff PHP resolved this request's body as `multipart/form-data` (its
+    /// `post_entry` is the multipart reader). The glue arms the byte scanner only
+    /// then, so PUT / `php://input` / urlencoded bodies — which PHP does not
+    /// parse as multipart and where gaps A/B do not exist — are never scanned.
+    pub fn howdah_is_multipart_post() -> ::std::ffi::c_int;
+
     /// Build `$_SERVER` now if `auto_globals_jit` deferred it, so its variables
     /// pass through the chained `input_filter` before the script. No-op when it
     /// already exists.

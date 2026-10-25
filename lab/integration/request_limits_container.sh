@@ -47,6 +47,11 @@ php -r '$b="BND"; $o=fopen($argv[1],"w"); for($i=0;$i<15;$i++){fwrite($o,"--$b\r
 php -r '$b="BND"; $o=fopen($argv[1],"w"); for($i=0;$i<5;$i++){fwrite($o,"--$b\r\nContent-Disposition: form-data; name=\"f$i\"\r\nContent-Type: text/plain\r\nContent-Transfer-Encoding: binary\r\n\r\nvalue$i\r\n");} fwrite($o,"--$b--\r\n"); fclose($o);' "$WORK/extrahdr.bin"
 # Benign: framework-style nested arrays (depth 4), 100 fields -> 500 levels < 10000.
 php -r '$b="BND"; $o=fopen($argv[1],"w"); for($i=0;$i<100;$i++){fwrite($o,"--$b\r\nContent-Disposition: form-data; name=\"a[b][c][d$i]\"\r\n\r\nv\r\n");} fwrite($o,"--$b--\r\n"); fclose($o);' "$WORK/nested.bin"
+# Benign: shapes PHP's rfc1867 accepts but a strict parser would reject — the
+# strict byte scanner must NOT block these (M1). LF-only line endings:
+php -r 'file_put_contents($argv[1], "--BND\nContent-Disposition: form-data; name=\"a\"\n\nvalue\n--BND--\n");' "$WORK/lfonly.bin"
+# an "attachment" disposition word (PHP ignores the type word):
+php -r 'file_put_contents($argv[1], "--BND\r\nContent-Disposition: attachment; name=\"a\"\r\n\r\nvalue\r\n--BND--\r\n");' "$WORK/attach.bin"
 # Shaped (gap A): one part with 50 header lines (byte scanner sees them all).
 php -r '$b="BND"; $o=fopen($argv[1],"w"); fwrite($o,"--$b\r\nContent-Disposition: form-data; name=\"a\"\r\n"); for($i=0;$i<50;$i++){fwrite($o,"X-$i: v\r\n");} fwrite($o,"\r\nv\r\n--$b--\r\n"); fclose($o);' "$WORK/hdrflood.bin"
 # Shaped (gap C): summed nesting past max_nesting_levels (10000) with names each
@@ -116,6 +121,8 @@ fpm_start || { record $S fpm_start FAIL down; exit 1; }
 assert_benign benign_gallery       "$WORK/gallery.bin"
 assert_benign benign_extra_headers "$WORK/extrahdr.bin"
 assert_benign benign_nested_arrays "$WORK/nested.bin"
+assert_benign benign_lf_only       "$WORK/lfonly.bin"
+assert_benign benign_attachment    "$WORK/attach.bin"
 # Chunked upload (no Content-Length): a real benign streaming upload.
 reset; c=$(curl -s -m 30 -o "$B" -w '%{http_code}' -X POST -H "Content-Type: multipart/form-data; boundary=BND" -H "Transfer-Encoding: chunked" --data-binary @"$WORK/gallery.bin" "$URL/" 2>/dev/null || echo 000)
 if [ "$c" = 200 ] && ! grep -q '"action":"block"' "$LOG"; then record $S benign_chunked PASS "http=200, no block line"; else record $S benign_chunked FAIL "http=$c"; fi

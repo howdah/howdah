@@ -134,6 +134,7 @@ pub unsafe extern "C" fn get_module() -> *mut sys::zend_module_entry {
         module_shutdown_func: Some(mshutdown),
         request_startup_func: Some(rinit),
         request_shutdown_func: Some(rshutdown),
+        post_deactivate_func: Some(post_deactivate),
         info_func: Some(minfo),
         version: VERSION.as_ptr() as *const c_char,
         type_: 1, // MODULE_PERSISTENT
@@ -488,6 +489,23 @@ unsafe fn exec_dir_decision() -> Option<(c_int, String)> {
     };
     // rule + line drop here, before the tuple (carrying only request_id) returns.
     Some((status, request_id))
+}
+
+/// `post_deactivate_func`: `zend_post_deactivate_modules()` runs this
+/// UNCONDITIONALLY at request shutdown, even when RSHUTDOWN was skipped — a
+/// startup failure before `modules_activated` (a `max_input_time` fatal on a
+/// slow upload, PHP's own OOM) skips every RSHUTDOWN. php-fpm then exits the
+/// worker, but mod_php and the CLI server survive; without this, the next
+/// request on that worker would inherit a stale scanner arm / stop latch /
+/// `BEGUN`, since the body is read before RINIT could reset them. Clearing here
+/// makes a skipped RSHUTDOWN harmless (and closes the long-standing `BEGUN`
+/// staleness too). Idempotent with the RSHUTDOWN reset.
+///
+/// # Safety
+/// Called by PHP once per request at shutdown (NTS).
+unsafe extern "C" fn post_deactivate() -> c_int {
+    let _ = catch_unwind(AssertUnwindSafe(|| clear_request_state()));
+    SUCCESS
 }
 
 /// Reset the per-request lifecycle flags for the next request. Runs at the end

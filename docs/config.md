@@ -155,7 +155,14 @@ zero-block at every value below. See `docs/coverage.md` /
 §4.5 parse-memory estimate ceiling: `0` means automatic — the request's live
 `memory_limit / 4`, or a fixed fallback when `memory_limit = -1`; a byte value
 pins it. It is the one `[limits]` key whose `0` is valid (it selects the
-automatic ceiling).
+automatic ceiling). On a host with a **small `memory_limit` and a large
+`post_max_size`** (`post_max_size > memory_limit / 4`), the automatic ceiling can
+sit below `post_max_size`, so a single very large non-file field could trip
+`parse_memory_estimate` before PHP's own `post_max_size` would reject it; raise
+`memory_ceiling_bytes` or lower `post_max_size` there. `nesting_budget`
+(`max_nesting_levels`) fires before `max_parts` only once the summed, file-weighted
+levels pass 10000, so a form needs either very many fields or deep nesting to
+reach it — a benign 1500-field form at shallow depth stays well under.
 
 ## `[rules]` — per-rule mode and severity
 

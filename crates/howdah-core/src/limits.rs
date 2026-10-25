@@ -67,6 +67,12 @@ pub struct Limits {
 /// the Task-8 RSS calibration pins it.
 pub const COST_PER_LEVEL_BYTES: u64 = 384;
 
+/// §4.5 cost multiplier per buffered non-file byte. 2, not 1: while PHP reads a
+/// field it holds the growing read buffer AND, once complete, the registered
+/// copy, so the peak is roughly twice the value's size. Conservative (blocks a
+/// touch earlier, nearer the real peak). Provisional; Task-8 RSS calibrated.
+pub const COST_PER_NONFILE_BYTE: u64 = 2;
+
 /// §4.5 fallback ceiling (bytes) when `memory_limit = -1` (no limit). The
 /// advisory names `-1` as a partial mitigation; Howdah keeps working there with
 /// a fixed, measured ceiling. Provisional; Task-8 calibrated.
@@ -337,7 +343,7 @@ impl Limits {
     pub fn memory_estimate(total_levels: u64, nonfile_bytes: u64) -> u64 {
         total_levels
             .saturating_mul(COST_PER_LEVEL_BYTES)
-            .saturating_add(nonfile_bytes)
+            .saturating_add(nonfile_bytes.saturating_mul(COST_PER_NONFILE_BYTE))
     }
 
     /// §4.5: block (Critical) when the estimate passes the ceiling.
@@ -654,15 +660,16 @@ mod tests {
     fn memory_estimate_ceiling_scales_with_memory_limit() {
         let l = Limits::defaults(); // memory_ceiling_bytes = 0 (auto)
         let mb = 1024 * 1024;
-        // An estimate of ~40 MiB of non-file bytes: over the 32 MiB ceiling at
-        // memory_limit = 128M, but under the 128 MiB ceiling at 512M.
-        let nonfile = 40 * mb;
+        // 20 MiB of non-file bytes -> estimate 40 MiB (x2): over the 32 MiB
+        // ceiling at memory_limit = 128M, but under the 128 MiB ceiling at 512M.
+        let nonfile = 20 * mb;
         let h = l.check_memory_estimate(0, nonfile, 128 * mb as i64).unwrap();
         assert_eq!((h.rule, h.severity), (RuleId::ParseMemoryEstimate, Severity::Critical));
         assert!(l.check_memory_estimate(0, nonfile, 512 * mb as i64).is_none());
-        // memory_limit = -1 (no limit) uses the fixed fallback ceiling.
-        assert!(l.check_memory_estimate(0, FALLBACK_CEILING_BYTES + 1, -1).is_some());
-        assert!(l.check_memory_estimate(0, FALLBACK_CEILING_BYTES, -1).is_none());
+        // memory_limit = -1 (no limit) uses the fixed fallback ceiling; non-file
+        // bytes count x2, so half the ceiling of bytes is the edge.
+        assert!(l.check_memory_estimate(0, FALLBACK_CEILING_BYTES / 2 + 1, -1).is_some());
+        assert!(l.check_memory_estimate(0, FALLBACK_CEILING_BYTES / 2, -1).is_none());
         // Nesting levels contribute COST_PER_LEVEL_BYTES each.
         let levels_over = (32 * mb / COST_PER_LEVEL_BYTES) + 1;
         assert!(l.check_memory_estimate(levels_over, 0, 128 * mb as i64).is_some());

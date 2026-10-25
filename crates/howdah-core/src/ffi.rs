@@ -838,10 +838,14 @@ impl howdah_ctx {
         for h in hits {
             self.apply(h.as_ref());
         }
-        if res.is_err() {
-            self.malformed();
-        }
-        // §4.5: the buffered non-file bytes just grew; re-check the estimate.
+        // A scanner parse error is NOT a block: PHP's rfc1867 accepts shapes this
+        // strict scanner rejects (LF-only line endings, header folding, a
+        // non-`form-data` disposition, a part with no Content-Disposition), and
+        // blocking them would refuse bodies PHP serves. On an error the scanner
+        // just stops advancing — its high-water counts so far still hold and the
+        // independent parsed-event counter remains the floor (over-count, never
+        // under-count; §4.2). `MalformedMultipart` is deliberately not raised.
+        // §4.5: the buffered non-file bytes may have grown; re-check the estimate.
         self.apply_memory_estimate();
         self.worst
     }
@@ -3785,6 +3789,37 @@ mod tests {
         unsafe {
             howdah_scan_post_begin(ctx, ct.as_ptr() as *const c_char, ct.len(), 0, 134217728);
             assert_eq!(howdah_scan_post(ctx, body.as_ptr() as *const c_char, body.len()), HOWDAH_ALLOW);
+            howdah_free(ctx);
+        }
+    }
+
+    #[test]
+    fn scan_post_block_is_sticky_never_cleared() {
+        // §4.2: once blocked, the scanner never lowers the verdict on later bytes.
+        let ctx = init("");
+        let ct = b"multipart/form-data; boundary=B";
+        let flood = header_flood_body();
+        let benign = "--B\r\nContent-Disposition: form-data; name=\"ok\"\r\n\r\nv\r\n--B--\r\n";
+        unsafe {
+            howdah_scan_post_begin(ctx, ct.as_ptr() as *const c_char, ct.len(), 0, -1);
+            assert_eq!(howdah_scan_post(ctx, flood.as_ptr() as *const c_char, flood.len()), HOWDAH_BLOCK);
+            // More (benign) bytes cannot clear the block.
+            assert_eq!(howdah_scan_post(ctx, benign.as_ptr() as *const c_char, benign.len()), HOWDAH_BLOCK);
+            howdah_free(ctx);
+        }
+    }
+
+    #[test]
+    fn scan_post_does_not_block_lf_only_body_php_accepts() {
+        // M1: PHP's rfc1867 accepts LF-only line endings; the strict scanner
+        // errors internally but must NOT escalate to a block (no false positive).
+        let ctx = init("");
+        let ct = b"multipart/form-data; boundary=B";
+        let lf = "--B\nContent-Disposition: form-data; name=\"a\"\n\nv\n--B--\n";
+        unsafe {
+            howdah_scan_post_begin(ctx, ct.as_ptr() as *const c_char, ct.len(), 0, -1);
+            assert_eq!(howdah_scan_post(ctx, lf.as_ptr() as *const c_char, lf.len()), HOWDAH_ALLOW);
+            assert!(scan_line(ctx).is_empty(), "no block/malformed line for an LF-only body");
             howdah_free(ctx);
         }
     }

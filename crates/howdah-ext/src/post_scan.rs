@@ -46,20 +46,34 @@ pub(crate) unsafe extern "C" fn decide(buf: *const c_char, len: usize) -> c_int 
         }
         if !ARMED {
             ARMED = true;
-            // The body is being read: open the core request (idempotent) and arm
-            // the scanner from the Content-Type + PHP's parsed limits.
-            module::maybe_begin();
-            let ct = sys::howdah_request_content_type();
-            let ct_len = if ct.is_null() { 0 } else { CStr::from_ptr(ct).to_bytes().len() };
-            core::howdah_scan_post_begin(
-                module::CTX,
-                ct,
-                ct_len,
-                sys::howdah_post_max_size(),
-                sys::howdah_memory_limit(),
-            );
+            // Arm ONLY for a body PHP itself resolved as multipart/form-data.
+            // read_post also serves php://input (PUT/PATCH, enable_post_data_reading=0)
+            // and urlencoded; those are not multipart, have no gap-A/B exposure,
+            // and must not be scanned or truncated. Leaving the scanner off here
+            // means howdah_scan_post returns Allow (post_scan stays None).
+            if sys::howdah_is_multipart_post() != 0 {
+                // The body is being read: open the core request (idempotent) and
+                // arm the scanner from the Content-Type + PHP's parsed limits.
+                module::maybe_begin();
+                let ct = sys::howdah_request_content_type();
+                let ct_len = if ct.is_null() { 0 } else { CStr::from_ptr(ct).to_bytes().len() };
+                core::howdah_scan_post_begin(
+                    module::CTX,
+                    ct,
+                    ct_len,
+                    sys::howdah_post_max_size(),
+                    sys::howdah_memory_limit(),
+                );
+            }
         }
         i32::from(core::howdah_scan_post(module::CTX, buf, len) == core::HOWDAH_BLOCK)
     }))
-    .unwrap_or(0)
+    .unwrap_or_else(|_| {
+        // Fail open, and leave a one-line note like the core FFI does on panic.
+        use std::io::Write;
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _ = writeln!(std::io::stderr(), "howdah: panic caught in read_post scanner; continuing");
+        }));
+        0
+    })
 }

@@ -209,6 +209,7 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::StartupFatal => "fatal error during request startup",
         RuleId::PostTooLarge => "request body exceeds post_max_size",
         RuleId::NestingBudget => "too many array-nesting levels across request inputs",
+        RuleId::ParseMemoryEstimate => "estimated parse memory exceeds the memory_limit-based ceiling",
     }
 }
 
@@ -840,7 +841,19 @@ impl howdah_ctx {
         if res.is_err() {
             self.malformed();
         }
+        // §4.5: the buffered non-file bytes just grew; re-check the estimate.
+        self.apply_memory_estimate();
         self.worst
+    }
+
+    /// §4.5: fold the parse-memory estimate (summed nesting levels from the input
+    /// paths + buffered non-file field bytes from the byte scanner) against the
+    /// live-`memory_limit` ceiling. Called whenever either input grows.
+    fn apply_memory_estimate(&mut self) {
+        let levels = self.input.total_levels();
+        let nonfile = self.post_scan.as_ref().map(|s| s.total_nonfile_bytes()).unwrap_or(0);
+        let hit = self.config.limits.check_memory_estimate(levels, nonfile, self.memory_limit);
+        self.apply(hit.as_ref());
     }
 
     /// One already-parsed multipart part (the PHP glue's `FORMDATA` /
@@ -890,6 +903,7 @@ impl howdah_ctx {
         self.input.note_var(name);
         let hit = self.config.limits.check_input(&self.input);
         self.apply(hit.as_ref());
+        self.apply_memory_estimate(); // §4.5: nesting levels just grew
         self.worst
     }
 
@@ -904,6 +918,7 @@ impl howdah_ctx {
         self.input.note_name(name, is_file);
         let hit = self.config.limits.check_input(&self.input);
         self.apply(hit.as_ref());
+        self.apply_memory_estimate(); // §4.5: nesting levels just grew
         self.worst
     }
 

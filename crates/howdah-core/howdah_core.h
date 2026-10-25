@@ -26,6 +26,16 @@
 #define MAX_PATH 4096
 
 /**
+ * §4.5 cost of one array-nesting level in the parse-memory estimate (bytes).
+ */
+#define COST_PER_LEVEL_BYTES 384
+
+/**
+ * §4.5 fallback ceiling (bytes) when `memory_limit = -1` (no limit).
+ */
+#define FALLBACK_CEILING_BYTES (64 * 1024 * 1024)
+
+/**
  * Action codes returned over the ABI. Pinned: Allow=0, Log=1, Block=2.
  */
 #define HOWDAH_ALLOW 0

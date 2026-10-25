@@ -53,7 +53,24 @@ pub struct Limits {
     /// metadata arrays). Bounds the total array-building cost, which a flood of
     /// deeply- or widely-nested names drives up regardless of any one depth.
     pub max_nesting_levels: usize,
+    /// Override (bytes) for the §4.5 parse-memory ceiling. `0` (the default)
+    /// means AUTOMATIC: the ceiling is the request's live `memory_limit / 4`, or
+    /// [`FALLBACK_CEILING_BYTES`] when `memory_limit = -1`. A non-zero value
+    /// pins the ceiling regardless of `memory_limit`. Unlike the other limits,
+    /// `0` is a valid value (it selects the automatic ceiling), so `validate`
+    /// does not reject it.
+    pub memory_ceiling_bytes: usize,
 }
+
+/// §4.5 cost of one array-nesting level in the parse-memory estimate (bytes).
+/// A Zend array (HashTable + initial buckets) is on this order. Provisional;
+/// the Task-8 RSS calibration pins it.
+pub const COST_PER_LEVEL_BYTES: u64 = 384;
+
+/// §4.5 fallback ceiling (bytes) when `memory_limit = -1` (no limit). The
+/// advisory names `-1` as a partial mitigation; Howdah keeps working there with
+/// a fixed, measured ceiling. Provisional; Task-8 calibrated.
+pub const FALLBACK_CEILING_BYTES: u64 = 64 * 1024 * 1024;
 
 impl Limits {
     /// Default limits, VALIDATED by the Task-12 cross-version gate (not merely
@@ -127,6 +144,9 @@ impl Limits {
             // the counts a trigger-(3)/gap-C flood needs to stress array
             // building. Provisional; the Task-8 corpus + RSS calibration pins it.
             max_nesting_levels: 10000,
+            // 0 = automatic: the §4.5 ceiling is memory_limit / 4 (or the
+            // FALLBACK when memory_limit = -1). Operators rarely override this.
+            memory_ceiling_bytes: 0,
         }
     }
 
@@ -294,6 +314,42 @@ impl Limits {
             detail: format!("{total_read} body bytes exceeds post_max_size {post_max_size}"),
         })
     }
+
+    /// §4.5: the ceiling for the parse-memory estimate, in bytes. The
+    /// `memory_ceiling_bytes` override wins; otherwise the request's live
+    /// `memory_limit / 4` (leaving the rest for the application); otherwise
+    /// (`memory_limit <= 0`, i.e. unlimited) [`FALLBACK_CEILING_BYTES`].
+    pub fn memory_ceiling(&self, memory_limit: i64) -> u64 {
+        if self.memory_ceiling_bytes > 0 {
+            self.memory_ceiling_bytes as u64
+        } else if memory_limit > 0 {
+            (memory_limit as u64) / 4
+        } else {
+            FALLBACK_CEILING_BYTES
+        }
+    }
+
+    /// §4.5: the estimate of parser-held memory for this request — summed
+    /// nesting levels (gap C, file-weighted) times the per-level cost, plus the
+    /// buffered non-file field bytes (gap B). Per-part header floods are bounded
+    /// exactly by gap A, so no header term is added here (it would only add
+    /// false-positive risk on benign multi-part forms).
+    pub fn memory_estimate(total_levels: u64, nonfile_bytes: u64) -> u64 {
+        total_levels
+            .saturating_mul(COST_PER_LEVEL_BYTES)
+            .saturating_add(nonfile_bytes)
+    }
+
+    /// §4.5: block (Critical) when the estimate passes the ceiling.
+    pub fn check_memory_estimate(&self, total_levels: u64, nonfile_bytes: u64, memory_limit: i64) -> Option<LimitHit> {
+        let estimate = Self::memory_estimate(total_levels, nonfile_bytes);
+        let ceiling = self.memory_ceiling(memory_limit);
+        (estimate > ceiling).then(|| LimitHit {
+            rule: RuleId::ParseMemoryEstimate,
+            severity: Severity::Critical,
+            detail: format!("parse-memory estimate {estimate} bytes exceeds ceiling {ceiling}"),
+        })
+    }
 }
 
 impl Default for Limits {
@@ -383,6 +439,10 @@ pub enum RuleId {
     /// `max_nesting_levels` (gap C, §4.4): memory grows with the total number of
     /// array levels, not any one depth. Critical, Layer 1.
     NestingBudget,
+    /// The per-request estimate of the memory PHP's parser will hold (summed
+    /// nesting levels + buffered non-file field bytes) passed the ceiling derived
+    /// from the request's live `memory_limit` (§4.5). Critical, Layer 1.
+    ParseMemoryEstimate,
 }
 
 impl RuleId {
@@ -427,7 +487,7 @@ impl RuleId {
 /// or miss one it accepts. `rule_catalog_covers_every_variant` fails to
 /// compile when a variant is added here but not to the list.
 pub fn rule_catalog() -> &'static [RuleId] {
-    const ALL: [RuleId; 39] = [
+    const ALL: [RuleId; 40] = [
         RuleId::MaxParts,
         RuleId::MaxFiles,
         RuleId::MaxPartHeaders,
@@ -467,6 +527,7 @@ pub fn rule_catalog() -> &'static [RuleId] {
         RuleId::StartupFatal,
         RuleId::PostTooLarge,
         RuleId::NestingBudget,
+        RuleId::ParseMemoryEstimate,
     ];
     &ALL
 }
@@ -590,6 +651,27 @@ mod tests {
     }
 
     #[test]
+    fn memory_estimate_ceiling_scales_with_memory_limit() {
+        let l = Limits::defaults(); // memory_ceiling_bytes = 0 (auto)
+        let mb = 1024 * 1024;
+        // An estimate of ~40 MiB of non-file bytes: over the 32 MiB ceiling at
+        // memory_limit = 128M, but under the 128 MiB ceiling at 512M.
+        let nonfile = 40 * mb;
+        let h = l.check_memory_estimate(0, nonfile, 128 * mb as i64).unwrap();
+        assert_eq!((h.rule, h.severity), (RuleId::ParseMemoryEstimate, Severity::Critical));
+        assert!(l.check_memory_estimate(0, nonfile, 512 * mb as i64).is_none());
+        // memory_limit = -1 (no limit) uses the fixed fallback ceiling.
+        assert!(l.check_memory_estimate(0, FALLBACK_CEILING_BYTES + 1, -1).is_some());
+        assert!(l.check_memory_estimate(0, FALLBACK_CEILING_BYTES, -1).is_none());
+        // Nesting levels contribute COST_PER_LEVEL_BYTES each.
+        let levels_over = (32 * mb / COST_PER_LEVEL_BYTES) + 1;
+        assert!(l.check_memory_estimate(levels_over, 0, 128 * mb as i64).is_some());
+        // An explicit override pins the ceiling regardless of memory_limit.
+        let l2 = Limits { memory_ceiling_bytes: 10 * mb as usize, ..Limits::defaults() };
+        assert!(l2.check_memory_estimate(0, 11 * mb, 512 * mb as i64).is_some());
+    }
+
+    #[test]
     fn nesting_budget_sums_levels_across_names() {
         use crate::input::{InputState, FILE_NAME_WEIGHT};
         let l = Limits { max_nesting_levels: 10, ..Limits::defaults() };
@@ -704,10 +786,11 @@ mod tests {
                 | RuleId::OutOfMemory
                 | RuleId::StartupFatal
                 | RuleId::PostTooLarge
-                | RuleId::NestingBudget => {}
+                | RuleId::NestingBudget
+                | RuleId::ParseMemoryEstimate => {}
             }
         }
-        assert_eq!(rule_catalog().len(), 39);
+        assert_eq!(rule_catalog().len(), 40);
         let mut sorted = all.to_vec();
         sorted.sort();
         sorted.dedup();

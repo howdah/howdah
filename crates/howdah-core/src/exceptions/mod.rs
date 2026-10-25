@@ -48,7 +48,8 @@ impl Layer {
             | RuleId::OutOfMemory
             | RuleId::StartupFatal
             | RuleId::PostTooLarge
-            | RuleId::NestingBudget => Layer::Limits,
+            | RuleId::NestingBudget
+            | RuleId::ParseMemoryEstimate => Layer::Limits,
             RuleId::SqlInjection | RuleId::PathTraversal | RuleId::CommandInjection => Layer::Inspect,
             RuleId::CommandExec
             | RuleId::Include

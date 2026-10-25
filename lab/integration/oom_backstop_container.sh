@@ -58,6 +58,15 @@ cat > "$APP/ex.php" <<'PHP'
 <?php @file_put_contents('/work/marker/ran', (string) getmypid());
 throw new RuntimeException('uncaught for the lab');
 PHP
+# A script-controlled E_USER_ERROR whose message mimics the OOM prefix. On 8.x
+# PHP hands zend_error_cb the rendered message; this must NOT be treated as a
+# real out-of-memory (only E_ERROR is), so the worker survives and no backstop
+# line is written.
+cat > "$APP/usererr.php" <<'PHP'
+<?php @file_put_contents('/work/marker/ran', (string) getmypid());
+@trigger_error('Allowed memory size of 999999 bytes exhausted (faked by the script)', E_USER_ERROR);
+echo "OK pid=", getmypid(), "\n";
+PHP
 cat > "$APP/info.php" <<'PHP'
 <?php ob_start(); phpinfo(INFO_MODULES); $h = ob_get_clean();
 if (preg_match('/OOM backstop[^<]*<\/td>\s*<td[^>]*>([^<]*)/', $h, $m)) echo "OOMROW:", trim($m[1]);
@@ -66,6 +75,8 @@ PHP
 
 # oom_exit = false: the backstop is not installed.
 printf 'oom_exit = false\n' > "$WORK/oomoff.toml"
+# mode = off disables every layer, the backstop included (oom_exit stays true).
+printf 'mode = "off"\n' > "$WORK/modeoff.toml"
 
 # Is this engine patched? (SAPI-independent: the ini directive upstream's fix
 # adds.) 0 = patched (directive exists), 1 = unpatched.
@@ -128,6 +139,13 @@ if [ "$PATCHED" = no ]; then
     record $S exception_survives PASS "uncaught exception http=$c (PHP's own 500), no backstop line, worker pid $P0 unchanged"
   else record $S exception_survives FAIL "http=$c pid=$P0->$P1 log=$(tr -d '\n' < "$LOG" | head -c 120)"; fi
 
+  # --- a script-controlled E_USER_ERROR with an OOM-looking message does NOT
+  #     exit (only a real E_ERROR out-of-memory does) --------------------------
+  reset; c=$(get /usererr.php); P1=$(pid_now)
+  if ! grep -q '"rule":"out_of_memory"' "$LOG" && [ "$P1" = "$P0" ]; then
+    record $S user_error_oom_prefix_survives PASS "trigger_error(...,E_USER_ERROR) http=$c, no backstop line, worker pid $P0 unchanged"
+  else record $S user_error_oom_prefix_survives FAIL "http=$c pid=$P0->$P1 log=$(tr -d '\n' < "$LOG" | head -c 120)"; fi
+
   # --- out-of-memory ends the worker (the backstop) ---------------------------
   reset; P0=$(pid_now); reset
   c=$(oom_req)
@@ -137,6 +155,8 @@ if [ "$PATCHED" = no ]; then
     record $S oom_exits FAIL "http=$c but no out_of_memory line in log ($(tr -d '\n' < "$LOG" | head -c 160))"
   elif ! grep -q '"action":"block"' "$LOG"; then
     record $S oom_exits FAIL "out_of_memory line is not action=block"
+  elif ! grep -q '/oom.php' "$LOG"; then
+    record $S oom_exits FAIL "out_of_memory reason does not name the script:line: $(tr -d '\n' < "$LOG" | head -c 200)"
   else
     P1=$(pid_now)
     if [ "$P1" = "$P0" ]; then
@@ -161,6 +181,19 @@ if [ "$PATCHED" = no ]; then
   case "$(oom_row)" in
     "off (oom_exit = false)") record $S phpinfo_oom_off PASS "row: off (oom_exit = false)" ;;
     *) record $S phpinfo_oom_off FAIL "row: $(oom_row)" ;;
+  esac
+  fpm_stop
+
+  # --- mode = off disables the backstop (oom_exit stays true) -----------------
+  fpm_start -d howdah.config="$WORK/modeoff.toml" || { record $S modeoff_start FAIL down; exit 1; }
+  P0=$(pid_now); reset
+  c=$(oom_req); P1=$(pid_now)
+  if ! grep -q '"rule":"out_of_memory"' "$LOG" && [ "$P1" = "$P0" ]; then
+    record $S mode_off_survives PASS "mode=off: PHP's own fatal (http=$c), worker pid $P0 unchanged, no backstop line"
+  else record $S mode_off_survives FAIL "http=$c pid=$P0->$P1 log=$(tr -d '\n' < "$LOG" | head -c 120)"; fi
+  case "$(oom_row)" in
+    "off (mode = off)") record $S phpinfo_mode_off PASS "row: off (mode = off)" ;;
+    *) record $S phpinfo_mode_off FAIL "row: $(oom_row)" ;;
   esac
   fpm_stop
 

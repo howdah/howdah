@@ -44,7 +44,15 @@ fn is_fatal(error_type: i32) -> bool {
 /// * Anything else (warnings, notices, catchable errors, ordinary script-phase
 ///   fatals) → `None`.
 pub fn classify_fatal(error_type: i32, message: &[u8], during_startup: bool) -> Option<RuleId> {
-    if is_fatal(error_type) && OOM_PREFIXES.iter().any(|p| message.starts_with(p)) {
+    // Only a true engine out-of-memory counts, and PHP always raises that as
+    // `E_ERROR` (zend_mm_safe_error -> zend_error_noreturn(E_ERROR, ...)). A
+    // script-controlled `E_USER_ERROR` (or any other fatal type) whose message
+    // merely starts with an out-of-memory prefix must NOT end the worker — on
+    // PHP 8.x `trigger_error($attacker_msg, E_USER_ERROR)` hands us the rendered
+    // message, which would otherwise be a remote worker-recycle and a false
+    // `out_of_memory` event. The `& E_ERROR` test ignores any flag bits (e.g.
+    // `E_DONT_BAIL`) the engine ORs onto the type.
+    if (error_type & E_ERROR) != 0 && OOM_PREFIXES.iter().any(|p| message.starts_with(p)) {
         return Some(RuleId::OutOfMemory);
     }
     if during_startup && is_fatal(error_type) {
@@ -89,6 +97,15 @@ mod tests {
     #[test]
     fn script_phase_non_oom_fatal_does_not_match() {
         assert_eq!(classify_fatal(E_ERROR, b"Uncaught Error: boom", false), None);
+    }
+    #[test]
+    fn script_controlled_user_error_with_oom_prefix_does_not_match() {
+        // trigger_error("Allowed memory size of ...", E_USER_ERROR) on PHP 8.x
+        // must NOT be treated as a real out-of-memory: only E_ERROR counts.
+        assert_eq!(classify_fatal(E_USER_ERROR, b"Allowed memory size of 999 bytes exhausted", false), None);
+        assert_eq!(classify_fatal(E_USER_ERROR, b"Out of memory, ha", false), None);
+        // E_ERROR with a flag bit (e.g. E_DONT_BAIL) still classifies as OOM.
+        assert_eq!(classify_fatal(E_ERROR | 0x8000, b"Out of memory", false), Some(RuleId::OutOfMemory));
     }
     #[test]
     fn warning_never_matches_even_during_startup() {

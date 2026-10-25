@@ -174,13 +174,18 @@ pub type HowdahSsrfArmed = unsafe extern "C" fn(ctx: *mut ::std::ffi::c_void) ->
 
 /// The out-of-memory backstop's decide callback (see `oom_hook.c`). `error_type`
 /// is PHP's `E_*` code, `msg` the rendered message (8.x) or `format` string
-/// (5.x/7.x) for `msg_len` bytes, `during_startup` 1 inside `php_request_startup`.
-/// Returns 1 to end the worker (after logging), 0 to chain to the prior handler.
+/// (5.x/7.x) for `msg_len` bytes, `during_startup` 1 inside `php_request_startup`,
+/// and `file`/`file_len`/`line` the error's location (script path + line, for
+/// the logged reason; `file` may be NULL). Returns 1 to end the worker (after
+/// logging), 0 to chain to the prior handler.
 pub type HowdahOomDecide = unsafe extern "C" fn(
     error_type: ::std::ffi::c_int,
     msg: *const ::std::ffi::c_char,
     msg_len: usize,
     during_startup: ::std::ffi::c_int,
+    file: *const ::std::ffi::c_char,
+    file_len: usize,
+    line: u32,
 ) -> ::std::ffi::c_int;
 
 /// `howdah_sink_check_ssrf`-shaped callback. `ips` is `ips_count` x 17-byte

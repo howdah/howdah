@@ -854,13 +854,18 @@ unsafe fn install_oom_backstop() {
         let p = (*ptr::addr_of!(sys::sapi_module)).name;
         if p.is_null() { String::new() } else { CStr::from_ptr(p).to_string_lossy().into_owned() }
     };
-    let oom_on = !CTX.is_null() && core::howdah_oom_exit(CTX) != 0;
+    let ctx_null = CTX.is_null();
+    // `exit_on` is the raw config bit; `armed_cfg` also requires mode != off, so
+    // a global `mode = off` (or the `on_invalid_config = "off"` fallback)
+    // disables the backstop like every other layer. `detect` keeps it armed.
+    let exit_on = !ctx_null && core::howdah_oom_exit(CTX) != 0;
+    let armed_cfg = !ctx_null && core::howdah_oom_armed(CTX) != 0;
     let patched = sys::howdah_memory_hard_limit_percent_exists() != 0;
     let web = is_backstop_sapi(&sapi);
-    if oom_on && web && !patched {
+    if armed_cfg && web && !patched {
         sys::howdah_install_oom_hook(crate::oom_filter::decide);
     }
-    DISP_OOM = Some(cstring(&oom_backstop_label(oom_on, &sapi, web, patched)));
+    DISP_OOM = Some(cstring(&oom_backstop_label(ctx_null, exit_on, armed_cfg, &sapi, web, patched)));
 }
 
 /// Web SAPIs the out-of-memory backstop runs on. Off on cli / cli-server.
@@ -868,10 +873,17 @@ fn is_backstop_sapi(name: &str) -> bool {
     matches!(name, "apache2handler" | "fpm-fcgi" | "cgi-fcgi" | "litespeed")
 }
 
-/// The `OOM backstop (oom_exit)` phpinfo row: armed, or why not.
-fn oom_backstop_label(oom_on: bool, sapi: &str, web: bool, patched: bool) -> String {
-    if !oom_on {
+/// The `OOM backstop (oom_exit)` phpinfo row: armed, or the specific reason not.
+fn oom_backstop_label(ctx_null: bool, exit_on: bool, armed_cfg: bool, sapi: &str, web: bool, patched: bool) -> String {
+    if ctx_null {
+        return "off (core unavailable)".to_string();
+    }
+    if !exit_on {
         return "off (oom_exit = false)".to_string();
+    }
+    if !armed_cfg {
+        // oom_exit is on, so the only remaining config reason is a global off.
+        return "off (mode = off)".to_string();
     }
     if !web {
         return format!("off (non-web SAPI: {sapi})");

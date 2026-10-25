@@ -1649,6 +1649,27 @@ pub unsafe extern "C" fn howdah_oom_exit(ctx: *mut howdah_ctx) -> i32 {
     catch_unwind(AssertUnwindSafe(|| i32::from((*ctx).config.oom_exit))).unwrap_or(0)
 }
 
+/// 1 iff the config ARMS the out-of-memory backstop: `oom_exit` is on AND the
+/// global mode is not `off`. A global `off` disables every layer (the backstop
+/// included), matching `[rules] decide` and the sink/inspect/behavior layers;
+/// `detect` keeps it armed, since it is a Critical fail-stop that cannot be
+/// "detected only". 0 for NULL and on panic. The glue applies the SAPI and
+/// patched-engine gates on top of this.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_oom_armed(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = &*ctx;
+        i32::from(c.config.oom_exit && c.config.mode != Mode::Off)
+    }))
+    .unwrap_or(0)
+}
+
 /// 1 iff some exception has a `script_sha256` facet that could apply to
 /// `script` (so the glue should hash the file); else 0. NULL / panic is 0.
 ///
@@ -3455,6 +3476,30 @@ mod tests {
         unsafe {
             howdah_free(on);
             howdah_free(off);
+        }
+    }
+
+    #[test]
+    fn oom_armed_honors_oom_exit_and_mode() {
+        // Default (mode block, oom_exit true) -> armed.
+        let a = init("");
+        assert_eq!(unsafe { howdah_oom_armed(a) }, 1);
+        // detect keeps it armed (Critical fail-stop).
+        let d = init("mode = \"detect\"\n");
+        assert_eq!(unsafe { howdah_oom_armed(d) }, 1);
+        // A global off disables it, even with oom_exit on (the default).
+        let off = init("mode = \"off\"\n");
+        assert_eq!(unsafe { howdah_oom_armed(off) }, 0);
+        assert_eq!(unsafe { howdah_oom_exit(off) }, 1, "oom_exit itself is still on");
+        // oom_exit = false disables it regardless of mode.
+        let no = init("mode = \"block\"\noom_exit = false\n");
+        assert_eq!(unsafe { howdah_oom_armed(no) }, 0);
+        assert_eq!(unsafe { howdah_oom_armed(std::ptr::null_mut()) }, 0);
+        unsafe {
+            howdah_free(a);
+            howdah_free(d);
+            howdah_free(off);
+            howdah_free(no);
         }
     }
 }

@@ -59,8 +59,17 @@ logged with rule `out_of_memory` (or `startup_fatal`) and action `block`.
 The backstop runs only on web SAPIs (`apache2handler`, `fpm-fcgi`, `cgi-fcgi`,
 `litespeed`), never on the command line, and turns itself off on PHP versions
 that ship the upstream fix (8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 and later),
-detected at runtime so distro backports count too. `php --ri howdah` shows the
-decision in the `OOM backstop (oom_exit)` row.
+detected at runtime so distro backports count too. It is also off whenever the
+global `mode` is `off` (including the `on_invalid_config = "off"` fallback) —
+`off` disables every layer, this one included; `detect` keeps it armed, since a
+worker running out of memory cannot be "detected only". The
+`OOM backstop (oom_exit)` row in `phpinfo()` served by the **web SAPI** shows
+the decision (`php --ri howdah` runs under the CLI SAPI, where it always reads
+off).
+
+The event names the script and line in its `reason` (the worker exits before
+PHP writes its own "exhausted in … on line …" message, so this is the operator's
+locus); it carries no URI.
 
 Set `oom_exit = false` to keep PHP's default behaviour (a fatal error page, the
 worker surviving) — on an unpatched engine that reopens the PHP2Shell window.

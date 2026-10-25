@@ -67,7 +67,11 @@ boundary is also logged as `self_test`, with the reason
 out of memory, or hit a fatal during request startup, on an unpatched engine.
 Both are `action: "block"`. The line is the only record of that request — the
 worker is gone before it could respond — so it carries no `client_ip`, `method`
-or `uri`.
+or `uri`; the `reason` names the script and line where the error struck (the
+operator's locus, since PHP never gets to write its own message). In the rare
+genuine host out-of-memory (an `mmap` failure, not `memory_limit`), the system
+allocator the log writer uses may itself fail, so the line can be lost — the
+worker still exits (fail-stop).
 
 Layer 4 in observe mode (`[behavior] observe = true`) writes its proposals
 as ordinary `action: "log"` lines whose `reason` starts with `proposed: `.

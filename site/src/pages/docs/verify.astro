@@ -11,7 +11,7 @@ const SCRIPT = `${REPO}/blob/main/packaging/verify-reproducible.sh`;
 
 const key = String.raw`curl -fsSL https://howdah.org/key.asc | gpg --show-keys --with-fingerprint`;
 
-const gpg = String.raw`V=1.5.0
+const gpg = String.raw`V=1.6.1
 B=https://github.com/howdah/howdah/releases/download/v$V
 T=howdah-$V-php7.4-20190902-linux-x86_64.tar.gz
 curl -fLO $B/$T -O $B/SHA256SUMS -O $B/SHA256SUMS.asc -O $B/howdah-release-signing.asc
@@ -36,8 +36,8 @@ const sbom = String.raw`gh attestation verify "$T" -R howdah/howdah \
   --jq '.[0].verificationResult.statement.predicate.components[] | "\(.name) \(.version)"'`;
 
 const rebuild = String.raw`git clone https://github.com/howdah/howdah && cd howdah
-packaging/verify-reproducible.sh v1.5.0 7.4                 # x86_64
-packaging/verify-reproducible.sh v1.5.0 8.3 x86_64-musl     # or aarch64`;
+packaging/verify-reproducible.sh v1.6.1 7.4                 # x86_64
+packaging/verify-reproducible.sh v1.6.1 8.3 x86_64-musl     # or aarch64`;
 ---
 <Layout
   title="Verify a Howdah release"

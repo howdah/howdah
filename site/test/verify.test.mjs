@@ -36,7 +36,7 @@ const commands = [
   '--certificate-identity "https://github.com/howdah/howdah/.github/workflows/release.yml@refs/tags/v$V"',
   '--type slsaprovenance1',
   '--predicate-type https://cyclonedx.org/bom',
-  'packaging/verify-reproducible.sh v1.5.0 7.4',
+  'packaging/verify-reproducible.sh v1.6.1 7.4',
 ];
 
 test('the verify page is built', () => {

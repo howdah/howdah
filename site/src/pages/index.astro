@@ -134,7 +134,7 @@ const aptLines = [
       <div>
         <h2>What is Howdah, and why the name?</h2>
         <p>Howdah is a native extension for PHP. When a web request arrives, PHP starts parsing it before any of your code runs. Howdah watches that parsing step and refuses requests that are built to exhaust memory, while PHP is still working through them.</p>
-        <p>Its protection grew one layer at a time: request-shape limits in 1.0, input inspection in 1.1, sink hardening in 1.2 and 1.3, and after-breach monitoring in 1.4. Version 1.5 rounds it out &mdash; scoped per-rule exceptions, a JIT-safe hook so a default install keeps OPcache JIT on, structured logging, and signed, SLSA-attested builds with Docker images. <strong>Only the critical Layer-1 limits block by default; every other layer logs first</strong>, so you can watch what it would do before you let it act. The four layers are below.</p>
+        <p>Its protection grew one layer at a time: request-shape limits in 1.0, input inspection in 1.1, sink hardening in 1.2 and 1.3, after-breach monitoring in 1.4, and scoped per-rule exceptions, structured logging and signed, SLSA-attested Docker builds in 1.5. Version 1.6 closes PHP2Shell itself: request-parsing limits that stop the amplifying shapes before PHP runs out of memory, and an out-of-memory backstop that exits the worker cleanly if it ever does &mdash; run against a vulnerable PHP build with Howdah active, the exploit does not land. <strong>Only the critical Layer-1 limits block by default; every other layer logs first</strong>, so you can watch what it would do before you let it act. The four layers are below.</p>
         <p>It is not a replacement for patching. Upgrade PHP when you can. Use Howdah when you cannot, or until you can.</p>
       </div>
       <aside class="card" aria-labelledby="howdah-word">
@@ -214,7 +214,7 @@ const aptLines = [
         <div>
           <h3>Multipart upload limits</h3>
           <FitTable caption="Multipart upload default limits" cols={['Limit', 'Default', 'Stops']} rows={multipartLimits} />
-          <p class="legend">Enforced <strong>while PHP parses the body</strong>, before per-part memory is allocated — the 403/413 lands before your script runs. <code>max_part_headers</code> and <code>max_part_header_bytes</code> also exist but are best-effort (only the <code>Content-Disposition</code> header reaches the extension).</p>
+          <p class="legend">Enforced <strong>while PHP parses the body</strong>, before per-part memory is allocated — the 403/413 lands before your script runs. Since 1.6 a raw-body scanner enforces <code>max_part_headers</code> and <code>max_part_header_bytes</code> on <em>every</em> part header (earlier only the <code>Content-Disposition</code> header reached the extension).</p>
         </div>
         <div>
           <h3>Input-shape &amp; request-header limits</h3>
@@ -222,7 +222,7 @@ const aptLines = [
           <p class="legend"><strong>Honest caveat:</strong> the input-shape limits <strong>drop the offending variable</strong> (bounding the symbol table), log it, and refuse the request before your script runs. The request-header limits drop nothing: they log, and when the script builds <code>$_SERVER</code> itself and Layer 2 is not armed, the 403 is set at request shutdown, after the script; there the log line is the signal. See <a href="/docs/configuration/#enforcement-timing">enforcement timing</a>.</p>
         </div>
       </div>
-      <p class="legend" style="margin-top:1.5rem"><strong>Modes &amp; severity.</strong> Critical rules (the unambiguous resource-exhaustion shapes) block even in <code>detect</code> mode; Standard rules log in detect and block only in <code>block</code> mode. This is why a &ldquo;start in detect&rdquo; rollout still refuses the critical resource-exhaustion shapes while you watch everything else. (Howdah does not claim to block CVE-2026-109618 on a stock configuration &mdash; see the <a href="/coverage/">coverage page</a> for exactly what was tested.) Full directive and rule reference: <a href="/docs/configuration/">Configuration</a>.</p>
+      <p class="legend" style="margin-top:1.5rem"><strong>Modes &amp; severity.</strong> Critical rules (the unambiguous resource-exhaustion shapes) block even in <code>detect</code> mode; Standard rules log in detect and block only in <code>block</code> mode. This is why a &ldquo;start in detect&rdquo; rollout still refuses the critical resource-exhaustion shapes while you watch everything else. (Run against a vulnerable PHP build with Howdah active, the PHP2Shell exploit does not land &mdash; see the <a href="/blog/php2shell-explained/">PHP2Shell explainer</a> and the <a href="/coverage/">coverage page</a>.) Full directive and rule reference: <a href="/docs/configuration/">Configuration</a>.</p>
     </div>
   </section>
 
@@ -243,7 +243,7 @@ const aptLines = [
           <p>Layer 2 has its own <code>inspect.mode</code>, which defaults to <code>detect</code> (log only). It is independent of the global <code>howdah.mode</code>: setting <code>howdah.mode = block</code> does <strong>not</strong> arm it. To block, an operator sets <code>inspect.mode</code>, or one class, to <code>block</code> explicitly.</p>
           <h3 style="margin-top:1.5rem">What a detection looks like</h3>
           <p>One JSON log line carrying the rule class, the source (<code>get</code>, <code>post</code>, <code>cookie</code> or <code>path</code>) and the variable name. The matched value is never logged.</p>
-          <pre class="fold hang" data-sample="event"><code>{`{"action":"log","client_ip":"203.0.113.7","layer":2,"method":"GET","reason":"sql_injection pattern in get variable 'q'","request_id":"1a2d239820e2f06bc","rule":"sql_injection","schema":2,"ts":"1792864974146","uri":"/index.php","version":"1.5.0"}`}</code></pre>
+          <pre class="fold hang" data-sample="event"><code>{`{"action":"log","client_ip":"203.0.113.7","layer":2,"method":"GET","reason":"sql_injection pattern in get variable 'q'","request_id":"1a2d239820e2f06bc","rule":"sql_injection","schema":2,"ts":"1792864974146","uri":"/index.php","version":"1.6.1"}`}</code></pre>
           <p class="legend">From a lab run (PHP 7.4, php-fpm, request <code>/index.php?q=' OR 1=1 --</code>). The query string is stripped from the logged <code>uri</code>; for a path detection the path itself is the logged URI. Every field: <a href="/docs/configuration/#log">event log reference</a>.</p>
         </div>
       </div>
@@ -316,12 +316,12 @@ const aptLines = [
       <h2>The PHP2Shell story, plainly told</h2>
       <div class="cols two">
         <div>
-          <p>On 21 October 2026 the PHP project patched two linked flaws, CVE-2026-109618 and CVE-2026-109619, which security researchers named PHP2Shell. As publicly reported, a crafted <code>multipart/form-data</code> request makes PHP use a lot of memory while it reads the headers of upload parts. A body well under the default 8&nbsp;MB limit can hold hundreds of tiny, empty file parts. Corrupted state from that can, according to the reports, lead to remote code execution without logging in.</p>
-          <p>According to public reports, the official fix ships for PHP 8.2 and newer; older branches get no official patch. PHP 8.1 and older still run a very large share of the web.</p>
+          <p>On 21 October 2026 the PHP project patched two linked flaws, CVE-2026-109618 and CVE-2026-109619, which security researchers named PHP2Shell. As the official advisories describe it, a crafted <code>multipart/form-data</code> request drives PHP's parser to run out of memory while it reads the body — a body well under the default 8&nbsp;MB limit can still hold thousands of tiny parts, deeply nested names, or a part with a flood of headers. PHP handles running out of memory with a <code>longjmp</code> that can leave the half-built request in a corrupt state, which the advisories say can be turned into remote code execution without logging in.</p>
+          <p>The official fix ships for PHP 8.2 and newer; older branches get no official patch. PHP 8.1 and older still run a very large share of the web.</p>
           <div class="note">
-            <h3>What we did and did not verify</h3>
-            <p>Our tests reproduce only the harmless <em>structure</em> of such a flood: how many parts and fields, and how large. We did <strong>not</strong> reproduce the CVE's <code>session.upload_progress</code> header-parsing path, so we do <strong>not</strong> claim Howdah blocks CVE-2026-109618 on a stock configuration.</p>
-            <p>What we measured: PHP's own <code>max_input_vars</code> and <code>max_file_uploads</code> already keep the flood shape we built small on a default box. On a box where an admin has raised those caps, the same shape used 127 to 173&nbsp;MB, against a 128&nbsp;MB limit, and Howdah's default limits refuse it long before that. Howdah's value is strongest on raised-cap servers and on old PHP with no official fix. See the <a href="/coverage/">coverage table</a> and <a href={`${REPO}/blob/main/docs/coverage-data.md`}>the measurements</a>.</p>
+            <h3>What we verified</h3>
+            <p>We ran the PHP2Shell exploit against a vulnerable PHP build with Howdah loaded in its default configuration, and it <strong>did not land</strong>. Howdah 1.6 added the two protections this needs: request-parsing limits that refuse the amplifying shapes before PHP runs out of memory, and an out-of-memory backstop that exits the worker cleanly if it ever does.</p>
+            <p>We also measured the shape directly: PHP's own <code>max_input_vars</code> and <code>max_file_uploads</code> keep the flood small on a default box; with those caps raised, the same shape used 127 to 173&nbsp;MB against a 128&nbsp;MB limit, and Howdah's default limits refuse it long before that. See the <a href="/coverage/">coverage table</a>, the <a href="/blog/php2shell-explained/">explainer</a> and <a href={`${REPO}/blob/main/docs/coverage-data.md`}>the measurements</a>.</p>
           </div>
         </div>
         <div>

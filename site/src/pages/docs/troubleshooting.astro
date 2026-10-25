@@ -78,7 +78,7 @@ sudo dnf remove ea-php81-php-howdah    <span class="c"># or plesk-php81-howdah, 
         <dd>No. Howdah runs entirely inside your PHP and needs no account or external service. It sends nothing to us or anyone else: no telemetry, no update checks. The one network effect: with the SSRF check (<code>[sinks.ssrf]</code>, off by default) turned on, it resolves the host names your application is about to contact, through the system resolver.</dd>
 
         <dt>Which PHP builds are supported?</dt>
-        <dd>Non-thread-safe (NTS) PHP 5.4 through 8.5 on Linux x86_64 and aarch64, one build per minor version. ZTS builds are not supported. Howdah 1.5 ships glibc and musl builds, and public Docker images (Debian PHP 5.6&ndash;8.5; <code>-alpine</code> 7.2&ndash;8.5, amd64 only); see the <a href="/install/">install guide</a>. See <a href="/coverage/">coverage</a> for what has been tested.</dd>
+        <dd>Non-thread-safe (NTS) PHP 5.4 through 8.5 on Linux x86_64 and aarch64, one build per minor version. ZTS builds are not supported. Howdah ships glibc and musl builds, and public Docker images (Debian PHP 5.6&ndash;8.5; <code>-alpine</code> 7.2&ndash;8.5, amd64 only); see the <a href="/install/">install guide</a>. See <a href="/coverage/">coverage</a> for what has been tested.</dd>
 
         <dt>How do I silence a known false positive?</dt>
         <dd>Add a scoped <code>[[exceptions]]</code> entry (by script, parameter, URI prefix or client CIDR) with a <code>reason</code>, rather than turning the rule off. See <a href="/docs/configuration/">configuration</a>. Critical Layer 1 limits take no exception.</dd>

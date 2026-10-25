@@ -1,0 +1,76 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { REPO } from '../../lib/site';
+---
+<Layout
+  title="Howdah 1.6: stopping PHP2Shell"
+  description="Howdah 1.6 adds the two protections the PHP2Shell out-of-memory flaw needs: preventive request-parsing limits that stop the amplifying shapes before PHP runs out of memory, and a last-resort out-of-memory backstop that exits the worker cleanly if it ever does. Run against a vulnerable PHP build with Howdah active, the exploit does not land."
+  path="/blog/howdah-1-6/"
+>
+  <article class="post">
+    <div class="pagehead">
+      <div class="wrap">
+        <p class="crumbs"><a href="/">Home</a> / <a href="/blog/">Blog</a> / <span aria-current="page">Howdah 1.6</span></p>
+        <h1>Howdah 1.6: stopping PHP2Shell</h1>
+        <p class="lede"><time datetime="2026-10-25">25 October 2026</time></p>
+      </div>
+    </div>
+
+    <div class="wrap prose">
+      <p>PHP2Shell is the flaw that started this project. Howdah 1.6 closes it: two complementary protections that stop the attack during PHP's own request parsing, where it happens, before any application code runs. Run against a vulnerable PHP build with Howdah active, the exploit does not land. The current release is <strong>1.6.1</strong>, which fixes how a refused request is delivered under php-fpm (below).</p>
+
+      <h2>The root cause, briefly</h2>
+      <p>The official advisories (GHSA-w8hw-w9fx-j79w, GHSA-6wmf-4rv5-p3rp) frame PHP2Shell (CVE-2026-109618 / CVE-2026-109619) as an <strong>out-of-memory</strong> problem. A crafted <code>multipart/form-data</code> request — a body that can sit well under <code>post_max_size</code> yet hold thousands of tiny parts, deeply nested names, or a part with a flood of headers — drives PHP's parser to exhaust the memory limit. PHP handles running out of memory with a <code>longjmp</code> out of whatever it was doing, and that can leave the half-built request in a corrupt state an attacker can turn into code execution, without logging in. The official fix ships for PHP 8.2 and newer; older branches, which still run a large share of the web, get no patch. Upgrade when you can; use Howdah when you can't.</p>
+
+      <h2>The two protections</h2>
+      <div class="tablewrap" tabindex="0" role="region" aria-label="Howdah 1.6 PHP2Shell protections (scrolls sideways on narrow screens)">
+        <table>
+          <caption class="sr-only">What Howdah 1.6 adds against PHP2Shell</caption>
+          <thead><tr><th scope="col">Protection</th><th scope="col">What it does</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Request-parsing limits</th><td>Stop the amplifying shapes while PHP reads the body, before memory runs out (preventive)</td></tr>
+            <tr><th scope="row">Out-of-memory backstop</th><td>If PHP still hits the memory limit, exit the worker cleanly before the <code>longjmp</code> can leave corrupt state (last resort)</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2>Request-parsing limits</h2>
+      <p>Howdah's existing Layer 1 counts parts and files as PHP hands them over. But PHP only hands a part over <em>after</em> it has parsed it, so three shapes slip past a counter that watches parsed parts: a header flood <em>within</em> one part, a body with no usable declared length, and field and file names nested deeply or widely. Memory grows with the <em>total</em> number of array levels, not any single depth.</p>
+      <p>So 1.6 wraps the reader PHP pulls the raw body through and runs a second, independent scanner over the bytes as they arrive — framed on the request's real multipart boundary, and armed only for a body PHP itself resolved as <code>multipart/form-data</code>. It refuses:</p>
+      <ul class="facts">
+        <li><strong>A header flood in one part</strong> (<code>max_part_headers</code>) — the counter of parsed parts never sees these.</li>
+        <li><strong>A body past <code>post_max_size</code></strong> (<code>post_too_large</code>), measured from the bytes actually read.</li>
+        <li><strong>Summed, widely-nested names</strong> (<code>nesting_budget</code>) — the total array levels across every field and file name.</li>
+        <li><strong>A parse-memory estimate</strong> (<code>parse_memory_estimate</code>) sized against the request's <em>live</em> <code>memory_limit / 4</code>, so the limit holds on upload-heavy servers that raise their limits, not just at stock settings.</li>
+      </ul>
+      <p>These are critical Layer 1 rules: they block by default, even in detect mode. The scanner can only ever <em>add</em> a block — the parsed-part counter stays the floor, so a scanner that falls out of step fails closed — and it is deliberately lenient about shapes PHP itself accepts (LF-only line endings, header folding, non-<code>form-data</code> dispositions), so a benign upload is never refused for being unusual.</p>
+
+      <h2>The out-of-memory backstop</h2>
+      <p>Limits are preventive, but memory pressure has many sources. So 1.6 also backstops the fatal itself. Howdah installs its own error handler; on PHP's out-of-memory fatal — or any fatal during request startup, before the half-built request could be used — it writes a log line without allocating and calls <code>_exit()</code> <strong>before</strong> PHP's <code>longjmp</code> unwinds anything, so the worker leaves cleanly instead of continuing on corrupt state. It runs on web SAPIs only, never under the CLI, and a runtime check keeps it off on an already-patched engine. It is on by default (<code>oom_exit</code>) and reports two critical Layer 1 rules, <code>out_of_memory</code> and <code>startup_fatal</code>. <code>php --ri howdah</code> shows whether it is armed.</p>
+
+      <h2>What we verified</h2>
+      <p>We ran the PHP2Shell exploit against a vulnerable PHP build with Howdah loaded in its default configuration, and it did not land. Separately, a benign corpus — multi-file galleries, parts carrying ordinary extra headers, framework-style nested arrays, a real chunked upload, LF-only bodies and <code>attachment</code> dispositions — is refused by <strong>nothing</strong> with the new scanner active, on PHP 5.6, 7.4 and 8.3, and the limits fire on over-threshold shapes. A fuzz target checks that splitting the body into arbitrary chunks never changes the verdict.</p>
+      <p>Two honest limits. The parse-memory estimate's cost constants are tuned, not derived from a formal RSS model — pinned by the zero-block benign result and refined over time. And the per-PHP-version coverage table below records the limits and benign testing, not a version-by-version exploit matrix.</p>
+
+      <h2>1.6.1: clean refusals under php-fpm</h2>
+      <p>1.6.0 shipped the above. 1.6.1 fixes a delivery detail the Docker smoke test caught: under php-fpm, an over-limit request that tripped a bounded count limit (<code>max_parts</code> / <code>max_files</code>) was blocked and logged and the worker survived, but the raw-body scanner stopped reading the body on those bounded limits too, which left the request undrained and <em>reset the client connection</em> instead of delivering the clean 403. The scanner now stops the body only for the unbounded shapes where it must (an oversized body, the memory estimate, a per-part header flood); a bounded count limit lets the body drain and answers with a clean 403. The request was blocked either way — only the client-facing delivery changed.</p>
+
+      <h2>What is still limited</h2>
+      <ul class="facts">
+        <li><strong>Howdah does not patch PHP.</strong> It stops this attack from the outside; the right fix, where you can apply it, is to upgrade to a patched PHP.</li>
+        <li><strong>The backstop is a last resort.</strong> It turns a potential code-execution into a clean worker exit and a log line; a request that trips it still fails.</li>
+        <li><strong>No third-party audit yet.</strong> The core, the tests and the lab are open; we published an audit brief for one.</li>
+      </ul>
+
+      <h2>Get it</h2>
+      <p>Debian and Ubuntu: <code>apt-get update &amp;&amp; apt-get upgrade</code>. RHEL family: the yum equivalent. Signed tarballs cover every PHP minor from 5.4 to 8.5, for x86_64, aarch64 and x86_64 musl, with build provenance and SBOM attestations; see <a href="/docs/verify/">verifying a release</a>. The 1.6.1 Docker images are on GHCR as <code>ghcr.io/howdah/howdah:1.6.1-php&lt;minor&gt;</code> (and <code>-alpine</code> for PHP 7.2 to 8.5).</p>
+      <p>Start at the <a href="/install/">install picker</a>, try the <a href="/demo/">browser demo</a> on a defanged, shape-only flood, and check the <a href="/coverage/">coverage page</a> for what has been tested on your PHP version. The source and this site are on <a href={REPO}>GitHub</a>.</p>
+    </div>
+  </article>
+</Layout>
+
+<style>
+  .prose { max-width: 46rem; padding-bottom: 1rem; }
+  .prose h2 { margin-top: 2rem; }
+  .prose h3 { margin-top: 1.5rem; }
+</style>

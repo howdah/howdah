@@ -178,7 +178,7 @@ sudo cscli decisions list`;
       <p><code>[log] exec</code> runs a program for each event as the PHP worker user. That user must not be able to change the firewall. Use the hook for notifications, such as a webhook or a chat message, and let a log reader with its own privileges do the banning.</p>
 
       <h2 id="tested">How it was tested</h2>
-      <p><a href={LAB}>lab/integration/log_consumers.sh</a> runs Howdah 1.5.0 on PHP 8.3 under php-fpm behind nginx, and under Apache mod_php. It sends a known mix of requests from documentation addresses:</p>
+      <p><a href={LAB}>lab/integration/log_consumers.sh</a> runs Howdah on PHP 8.3 under php-fpm behind nginx, and under Apache mod_php. It sends a known mix of requests from documentation addresses:</p>
       <ul class="facts">
         <li>4 refused requests from one address,</li>
         <li>5 detect-mode findings from another,</li>

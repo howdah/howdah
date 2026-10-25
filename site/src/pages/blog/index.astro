@@ -2,13 +2,14 @@
 import Layout from '../../layouts/Layout.astro';
 
 const posts = [
+  { href: '/blog/howdah-1-6/', title: 'Howdah 1.6: stopping PHP2Shell', date: '2026-10-25', summary: 'The two protections the PHP2Shell out-of-memory flaw needs: request-parsing limits that stop the amplifying shapes before PHP runs out of memory, and an out-of-memory backstop that exits the worker cleanly if it ever does. Run against a vulnerable PHP build with Howdah active, the exploit does not land. 1.6.1 fixes how a refusal is delivered under php-fpm.' },
   { href: '/blog/howdah-1-5/', title: 'Howdah 1.5: exceptions, log integration, and Docker', date: '2026-10-24', summary: 'Scoped exceptions, a versioned event log with syslog and a per-event hook, seven legacy-era sinks, OPcache JIT on by default, and Docker images. Layers 2 to 4 still log first.' },
   { href: '/blog/howdah-1-4/', title: 'Howdah 1.4: Layer 4, watching what happens after a breach', date: '2026-10-24', summary: 'Layer 4 logs PHP run from upload directories, unexpected programs and hosts, and PHP files written to denied directories. It blocks nothing by default, and the post lists what it cannot see.' },
   { href: '/blog/howdah-1-3/', title: 'Howdah 1.3: phar, SSRF, and closing the PHP 5.x gap', date: '2026-10-24', summary: 'Opt-in phar:// and SSRF guards, and include/eval now active on PHP 5.x. Both new guards are off by default and log first; the post lists what they do not catch.' },
   { href: '/blog/howdah-1-2/', title: 'Howdah 1.2: guarding what PHP is about to do', date: '2026-10-24', summary: 'Layer 3 arrives — sink hardening. It guards command execution and unserialize on every supported PHP, and include/eval on PHP 7.0+. It detects and logs, and does not block by default.' },
   { href: '/blog/howdah-1-1/', title: 'Howdah 1.1: watching what comes in', date: '2026-10-23', summary: 'Layer 2 arrives — input inspection that detects and logs SQL injection, path traversal and command-injection patterns in request values. It does not block by default.' },
   { href: '/blog/howdah-1-0/', title: 'Howdah 1.0: a defensive firewall inside PHP', date: '2026-10-23', summary: 'The first full release — apt/yum repositories, an install picker, a browser demo, and Layer-1 protection complete, on PHP 5.4 through 8.5.' },
-  { href: '/blog/php2shell-explained/', title: 'PHP2Shell, explained plainly', date: '2026-10-23', summary: 'What the PHP2Shell upload-flood class is, why only a PHP extension can stop it, and exactly what Howdah does and does not verify.' },
+  { href: '/blog/php2shell-explained/', title: 'PHP2Shell, explained plainly', date: '2026-10-23', summary: 'What the PHP2Shell out-of-memory flaw is, why only a PHP extension can stop it, and how Howdah does.' },
 ];
 const fmt = (d: string) => new Date(d + 'T00:00:00Z').toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });
 ---

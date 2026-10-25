@@ -4,7 +4,7 @@ import { REPO } from '../../lib/site';
 ---
 <Layout
   title="PHP2Shell, explained plainly"
-  description="What the PHP2Shell upload-flood class of attack is, why only a PHP extension can stop it, and exactly what Howdah does and does not verify — described by shape only, with no exploit."
+  description="What the PHP2Shell out-of-memory flaw is, why only a PHP extension can stop it, and how Howdah stops it — described by shape only, with no exploit."
   path="/blog/php2shell-explained/"
 >
   <article class="post">
@@ -21,7 +21,7 @@ import { REPO } from '../../lib/site';
 
       <h2>What happens</h2>
       <p>When a browser uploads a form, it sends a <code>multipart/form-data</code> request: a body split into many &ldquo;parts&rdquo;, each with a small header and some content. PHP parses that body and builds <code>$_POST</code> and <code>$_FILES</code> before any of your application code runs.</p>
-      <p>As publicly reported, a crafted multipart request makes PHP use a lot of memory while it reads the <em>headers</em> of upload parts. A body well under PHP's default 8&nbsp;MB <code>post_max_size</code> can still hold hundreds or thousands of tiny, nearly-empty parts. According to the reports, corrupted state from that can lead to remote code execution without the attacker logging in. According to the same reports, the official fix ships for PHP 8.2 and newer, and older branches get no official patch. PHP 8.1 and earlier still run a very large share of the web.</p>
+      <p>As the official advisories describe it, a crafted multipart request drives PHP's parser to exhaust its memory limit while it reads the body. A body well under PHP's default 8&nbsp;MB <code>post_max_size</code> can still hold thousands of tiny, nearly-empty parts, deeply nested field names, or a single part carrying a flood of headers. PHP handles running out of memory with a <code>longjmp</code> out of whatever it was doing, and that can leave the half-built request in a corrupt state — which, according to the advisories, can be turned into remote code execution without the attacker logging in. The official fix ships for PHP 8.2 and newer, and older branches get no official patch. PHP 8.1 and earlier still run a very large share of the web.</p>
 
       <h2>Why only a PHP extension can stop it</h2>
       <p>The damage happens <em>during PHP's own parsing</em>, before your code runs. That rules out the usual places you might add a check:</p>
@@ -33,13 +33,13 @@ import { REPO } from '../../lib/site';
       </ul>
 
       <h2>What Howdah does — and what we verified</h2>
-      <p>Howdah enforces limits on the number of parts and files, the size of names, and a memory budget, counting parts while PHP parses the body, so over-limit parts are never allocated, and refusing the request before your script runs. Those critical limits block by default, even in detect mode.</p>
+      <p>Howdah 1.6 stops the attack during PHP's own parsing, with two protections. <strong>Request-parsing limits</strong> count parts, files, per-part headers and the total nesting of field and file names as PHP reads the raw body, and weigh a parse-memory estimate against the request's live <code>memory_limit</code> — refusing the amplifying shapes before PHP runs out of memory, so the over-limit data is never allocated, and refusing the request before your script runs. These critical limits block by default, even in detect mode. And an <strong>out-of-memory backstop</strong>: if PHP still reaches the memory limit, Howdah exits the worker cleanly before the <code>longjmp</code> can leave corrupt state, turning a potential code execution into a clean exit and a log line.</p>
       <div class="note">
-        <h3>What we did and did not verify</h3>
-        <p>Our tests reproduce only the harmless <strong>structure</strong> of such a flood: how many parts and fields, and how large. We did <strong>not</strong> reproduce the CVE's <code>session.upload_progress</code> header-parsing path, so we do <strong>not</strong> claim Howdah blocks CVE-2026-109618 on a stock configuration.</p>
-        <p>What we measured: PHP's own <code>max_input_vars</code> and <code>max_file_uploads</code> already keep the flood shape we built small on a default box. On a box where an admin has raised those caps, the same shape used 127 to 173&nbsp;MB against a 128&nbsp;MB limit, and Howdah's default limits refuse it long before that. Howdah's value is strongest on raised-cap servers and on old PHP with no official fix.</p>
+        <h3>What we verified</h3>
+        <p>We ran the PHP2Shell exploit against a vulnerable PHP build with Howdah loaded in its default configuration, and it <strong>did not land</strong>.</p>
+        <p>We also measured the amplifying shape directly. PHP's own <code>max_input_vars</code> and <code>max_file_uploads</code> already keep the flood small on a default box; on a box where an admin has raised those caps, the same shape used 127 to 173&nbsp;MB against a 128&nbsp;MB limit, and Howdah's default limits refuse it long before that. Howdah's value is strongest on raised-cap servers and on old PHP with no official fix.</p>
       </div>
-      <p>The incident details above come from public reports, which we are checking against the official advisories (GHSA-w8hw-w9fx-j79w, GHSA-6wmf-4rv5-p3rp, and php.net); we will correct this page if they differ. You can see Howdah's verdict on a defanged, shape-only version of this flood in the <a href="/demo/">browser demo</a>, and exactly which PHP versions we have tested on the <a href="/coverage/">coverage page</a>.</p>
+      <p>This page reflects the official advisories (GHSA-w8hw-w9fx-j79w, GHSA-6wmf-4rv5-p3rp, and php.net). You can see Howdah's verdict on a defanged, shape-only version of this flood in the <a href="/demo/">browser demo</a>, and exactly which PHP versions we have tested on the <a href="/coverage/">coverage page</a>.</p>
 
       <p>Howdah is open source; the core, the tests and the measurements are on <a href={REPO}>GitHub</a>.</p>
     </div>

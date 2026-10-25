@@ -223,9 +223,9 @@ reason      = "The internal SSO proxy adds ~40 headers."</code></pre>
 
       <h2 id="log">Event log (<code>[log]</code>)</h2>
       <p>Howdah writes one JSON line per event: to a file (the default), to syslog, or to stderr. Each line carries the schema version, the Howdah version, a timestamp (<code>ts</code>, UTC epoch milliseconds), the request ID, the layer, the rule, the action, the client IP, the method, the path and the reason. The request ID also appears in the block response, so a user report maps to a log line. These three lines are from a lab run (PHP 7.4, php-fpm): a field flood refused by <code>max_parts</code>, a Layer 2 SQL-injection shape, and a Layer 3 <code>system()</code> call that is not on the allowlist.</p>
-      <pre tabindex="0" data-sample="event"><code>{`{"action":"block","client_ip":"203.0.113.7","layer":1,"method":"POST","reason":"multipart part count exceeds limit","request_id":"11eccf6d90ad2987d","rule":"max_parts","schema":2,"ts":"1792864974141","uri":"/index.php","version":"1.5.0"}
-{"action":"log","client_ip":"203.0.113.7","layer":2,"method":"GET","reason":"sql_injection pattern in get variable 'q'","request_id":"1a2d239820e2f06bc","rule":"sql_injection","schema":2,"ts":"1792864974146","uri":"/index.php","version":"1.5.0"}
-{"action":"log","client_ip":"203.0.113.7","layer":3,"method":"GET","reason":"non-allowlisted command via system","request_id":"1fa7c36ea3c170856","rule":"command_exec","schema":2,"ts":"1792864974151","uri":"/index.php","version":"1.5.0"}`}</code></pre>
+      <pre tabindex="0" data-sample="event"><code>{`{"action":"block","client_ip":"203.0.113.7","layer":1,"method":"POST","reason":"multipart part count exceeds limit","request_id":"11eccf6d90ad2987d","rule":"max_parts","schema":2,"ts":"1792864974141","uri":"/index.php","version":"1.6.1"}
+{"action":"log","client_ip":"203.0.113.7","layer":2,"method":"GET","reason":"sql_injection pattern in get variable 'q'","request_id":"1a2d239820e2f06bc","rule":"sql_injection","schema":2,"ts":"1792864974146","uri":"/index.php","version":"1.6.1"}
+{"action":"log","client_ip":"203.0.113.7","layer":3,"method":"GET","reason":"non-allowlisted command via system","request_id":"1fa7c36ea3c170856","rule":"command_exec","schema":2,"ts":"1792864974151","uri":"/index.php","version":"1.6.1"}`}</code></pre>
       <div class="tablewrap" tabindex="0" role="region" aria-label="Event log fields (scrolls sideways on narrow screens)">
         <table>
           <caption class="sr-only">Fields of an event line, schema 2</caption>

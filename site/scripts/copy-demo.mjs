@@ -29,7 +29,9 @@ if (!existsSync(resolve(src, 'howdah_wasm.wasm'))) {
 }
 mkdirSync(dst, { recursive: true });
 
-const files = ['howdah_wasm.wasm', 'howdah-wasm.js', 'samples.js'];
+// The demo page is gone; `samples.js` is no longer published. The wasm binary
+// and its JS glue stay — the config editor loads them to validate howdah.toml.
+const files = ['howdah_wasm.wasm', 'howdah-wasm.js'];
 for (const f of files) {
   copyFileSync(resolve(src, f), resolve(dst, f));
 }

@@ -1,0 +1,159 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { REPO, RELEASES, VERSION } from '../lib/site';
+
+// Everything here is pinned to the current release and rebuilt when VERSION is
+// bumped. The asset names (including the Zend module API number per minor) match
+// the signed tarballs on the release page one-for-one; the download links point
+// straight at `releases/download/v<VERSION>/<asset>`.
+const TAG = `v${VERSION}`;
+const DL = `${REPO}/releases/download/${TAG}`;
+
+// Zend module API number per PHP minor — part of every tarball's file name, so a
+// user can match the download to `php -i | grep 'Zend Extension Build'` (or
+// `howdah-check detect`). These are the numbers on the v1.6.1 release assets.
+const API: Record<string, string> = {
+  '5.4': '20100525', '5.5': '20121212', '5.6': '20131226', '7.0': '20151012',
+  '7.1': '20160303', '7.2': '20170718', '7.3': '20180731', '7.4': '20190902',
+  '8.0': '20200930', '8.1': '20210902', '8.2': '20220829', '8.3': '20230831',
+  '8.4': '20240924', '8.5': '20250925',
+};
+const MINORS = Object.keys(API);
+
+// A signed tarball exists for every minor on each of these three targets.
+const tarball = (minor: string, suffix: string) =>
+  `howdah-${VERSION}-php${minor}-${API[minor]}-linux-${suffix}.tar.gz`;
+
+// Docker image coverage (see docs/install-docker.md): no official php:5.4/5.5
+// image can be pulled, so there is no image for those; -alpine starts at 7.2.
+const dockerDebian = new Set(['5.6','7.0','7.1','7.2','7.3','7.4','8.0','8.1','8.2','8.3','8.4','8.5']);
+const dockerAlpine = new Set(['7.2','7.3','7.4','8.0','8.1','8.2','8.3','8.4','8.5']);
+
+// Top-level release files that are not a per-minor tarball.
+const extras = [
+  { name: 'SHA256SUMS', what: 'Checksums for every tarball (and howdah-check).' },
+  { name: 'SHA256SUMS.asc', what: 'Detached GPG signature over SHA256SUMS.' },
+  { name: 'howdah-release-signing.asc', what: 'The public signing key (also at howdah.org/key.asc).' },
+  { name: 'howdah-check', what: 'Standalone install/verify helper — detect, web, ini.' },
+  { name: 'howdah-1.6.1.provenance.sigstore.json', what: 'SLSA build provenance (Sigstore bundle).' },
+];
+---
+<Layout
+  title="Howdah downloads — signed tarballs and Docker images"
+  description={`Direct downloads for Howdah ${VERSION}: signed tarballs for PHP 5.4 to 8.5 on x86_64, aarch64 and musl, and the public Docker images on GHCR. Checksums, signatures and provenance for every file.`}
+  path="/downloads/"
+>
+  <div class="pagehead">
+    <div class="wrap">
+      <p class="crumbs"><a href="/">Home</a> / <span aria-current="page">Downloads</span></p>
+      <h1>Downloads</h1>
+      <p class="lede">Every build for Howdah <strong>{VERSION}</strong>: signed tarballs for PHP 5.4 through 8.5 and the public Docker images. If you want the exact install commands for your system instead, use the <a href="/install/">install picker</a>.</p>
+    </div>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <div class="note">
+        <p>These are the raw release assets, pinned to <code>{TAG}</code>. Every tarball is covered by a signed <code>SHA256SUMS</code>; verify before you install. The <a href="/install/">install picker</a> gives copy-paste apt/yum/Docker/tarball steps, and <a href="/docs/verify/">verify a release</a> walks through checking the signature and rebuilding from source. The complete set, with release notes, is on the <a href={RELEASES}>GitHub releases page</a>.</p>
+      </div>
+
+      <h2 id="docker">Docker images</h2>
+      <p>Public on GitHub Container Registry at <code>ghcr.io/howdah/howdah</code>. Each image is an official <code>php:&lt;minor&gt;-fpm</code> base with the signed <code>howdah.so</code> installed and enabled in <code>detect</code> mode — nothing is compiled at build time. Pull a versioned tag:</p>
+      <pre tabindex="0"><code>docker pull ghcr.io/howdah/howdah:{VERSION}-php8.3
+docker pull ghcr.io/howdah/howdah:{VERSION}-php7.4-alpine   <span class="c"># Alpine variant</span></code></pre>
+      <p>Or copy Howdah onto your own image of the same PHP minor and C library in one line:</p>
+      <pre tabindex="0"><code>FROM php:8.3-fpm
+COPY --from=ghcr.io/howdah/howdah:{VERSION}-php8.3 /howdah/ /</code></pre>
+
+      <div class="tablewrap" tabindex="0" role="region" aria-label="Docker image tags (scrolls sideways on narrow screens)">
+        <table>
+          <caption>Image tags for Howdah {VERSION}. Debian images are built for amd64 and arm64; Alpine images for amd64 only.</caption>
+          <thead>
+            <tr>
+              <th scope="col">PHP</th>
+              <th scope="col">Debian <small>amd64 + arm64</small></th>
+              <th scope="col">Alpine <small>amd64</small></th>
+            </tr>
+          </thead>
+          <tbody>
+            {MINORS.map((m) => (
+              <tr>
+                <th scope="row">{m}</th>
+                <td>{dockerDebian.has(m)
+                  ? <code>{VERSION}-php{m}</code>
+                  : <span class="na">no image<small>no pullable <code>php:{m}</code> base — use the tarball</small></span>}</td>
+                <td>{dockerAlpine.has(m)
+                  ? <code>{VERSION}-php{m}-alpine</code>
+                  : <span class="na">—<small>{dockerDebian.has(m) ? 'Alpine base too old for the musl build' : ''}</small></span>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p class="legend">On an Alpine base for PHP 7.2–8.0, add <code>RUN apk add --no-cache libgcc</code>. Full details, how to verify an image against the signed release, and the <code>-apache</code>/<code>-cli</code> notes: <a href={REPO + '/blob/main/docs/install-docker.md'}>Docker install guide</a>. Browse every published tag on <a href={REPO + '/pkgs/container/howdah'}>GitHub Packages</a>.</p>
+
+      <h2 id="tarballs">Signed tarballs</h2>
+      <p>One build per PHP minor and CPU, on a glibc 2.17 baseline, plus a static-musl build for Alpine and other musl systems. Each unpacks to <code>howdah.so</code>, <code>howdah.ini</code> and <code>howdah-check</code>. Match the file to your PHP minor and its Zend module API number — <code>howdah-check detect</code> prints the exact one to download.</p>
+
+      <div class="tablewrap" tabindex="0" role="region" aria-label="Signed tarball downloads (scrolls sideways on narrow screens)">
+        <table>
+          <caption>Signed tarballs for Howdah {VERSION}. Links download directly from the GitHub release.</caption>
+          <thead>
+            <tr>
+              <th scope="col">PHP</th>
+              <th scope="col">Zend API</th>
+              <th scope="col">x86_64 <small>glibc ≥ 2.17</small></th>
+              <th scope="col">aarch64 <small>glibc ≥ 2.17</small></th>
+              <th scope="col">x86_64 musl <small>Alpine</small></th>
+            </tr>
+          </thead>
+          <tbody>
+            {MINORS.map((m) => (
+              <tr>
+                <th scope="row">{m}</th>
+                <td><code>{API[m]}</code></td>
+                <td><a href={`${DL}/${tarball(m, 'x86_64')}`} download>Download<small>.tar.gz</small></a></td>
+                <td><a href={`${DL}/${tarball(m, 'aarch64')}`} download>Download<small>.tar.gz</small></a></td>
+                <td><a href={`${DL}/${tarball(m, 'x86_64-musl')}`} download>Download<small>.tar.gz</small></a></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p class="legend">The full matrix has been exercised on x86_64; on arm64 the self-test and block-shaped scripts have run. Not every minor is independently verified — the <a href="/coverage/">coverage page</a> is the source of truth for what was tested where. There is no ZTS build (no FrankenPHP or threaded Apache).</p>
+
+      <h2 id="verify">Checksums, signatures and provenance</h2>
+      <p>Verify a tarball against <code>SHA256SUMS</code>, then verify that file's GPG signature with the release key. Check the key's primary fingerprint before trusting it; it is the same key that signs the apt/yum repositories.</p>
+      <div class="tablewrap" tabindex="0" role="region" aria-label="Verification files">
+        <table>
+          <tbody>
+            {extras.map((e) => (
+              <tr>
+                <th scope="row"><a href={`${DL}/${e.name}`} download><code>{e.name}</code></a></th>
+                <td>{e.what}</td>
+              </tr>
+            ))}
+            <tr>
+              <th scope="row">SBOM</th>
+              <td>CycloneDX SBOMs per CPU target: <a href={`${DL}/howdah-${VERSION}-x86_64.sbom.sigstore.json`} download>x86_64</a>, <a href={`${DL}/howdah-${VERSION}-x86_64-musl.sbom.sigstore.json`} download>x86_64-musl</a>, <a href={`${DL}/howdah-${VERSION}-aarch64.sbom.sigstore.json`} download>aarch64</a> (Sigstore bundles).</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="legend">Step-by-step verification, the fingerprint to check, and how to rebuild this release from source: <a href="/docs/verify/">verify a release</a>. The signing key is served at <a href="https://howdah.org/key.asc"><code>howdah.org/key.asc</code></a>.</p>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  /* Download links read as one tap target with a quiet file-type sub-label. */
+  table td a[download] { font-weight: 600; text-decoration: none; display: inline-block; min-height: 24px; }
+  table td a[download]:hover { text-decoration: underline; }
+  table td a[download] small { display: block; color: var(--muted); font-weight: 400; margin-top: 0; }
+  /* "no image / —" cells sit back from the live links beside them. */
+  .na { color: var(--muted); }
+  /* Sub-labels under a column heading (arch / libc), on their own quiet line. */
+  thead th small { display: block; font-weight: 400; color: var(--muted); font-size: .78rem; letter-spacing: 0; margin-top: .15rem; }
+  h2 { margin-top: 2.5rem; }
+  h2:first-of-type { margin-top: 0; }
+</style>

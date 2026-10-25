@@ -4,6 +4,9 @@ export default defineConfig({
   site: 'https://howdah.org',
   output: 'static',
   compressHTML: true,
+  // The in-browser demo was replaced by the downloads index; keep old links
+  // (and any search-engine results) working with a static redirect.
+  redirects: { '/demo': '/downloads/' },
   build: { inlineStylesheets: 'auto' },
   devToolbar: { enabled: false },
   // English only at launch, but routed so translations drop in without moving

@@ -39,7 +39,7 @@ import { REPO } from '../../lib/site';
         <p>We ran the PHP2Shell exploit against a vulnerable PHP build with Howdah loaded in its default configuration, and it <strong>did not land</strong>.</p>
         <p>We also measured the amplifying shape directly. PHP's own <code>max_input_vars</code> and <code>max_file_uploads</code> already keep the flood small on a default box; on a box where an admin has raised those caps, the same shape used 127 to 173&nbsp;MB against a 128&nbsp;MB limit, and Howdah's default limits refuse it long before that. Howdah's value is strongest on raised-cap servers and on old PHP with no official fix.</p>
       </div>
-      <p>This page reflects the official advisories (GHSA-w8hw-w9fx-j79w, GHSA-6wmf-4rv5-p3rp, and php.net). You can see Howdah's verdict on a defanged, shape-only version of this flood in the <a href="/demo/">browser demo</a>, and exactly which PHP versions we have tested on the <a href="/coverage/">coverage page</a>.</p>
+      <p>This page reflects the official advisories (GHSA-w8hw-w9fx-j79w, GHSA-6wmf-4rv5-p3rp, and php.net). You can see exactly which PHP versions we have tested on the <a href="/coverage/">coverage page</a>, and get a build for yours from the <a href="/downloads/">downloads page</a>.</p>
 
       <p>Howdah is open source; the core, the tests and the measurements are on <a href={REPO}>GitHub</a>.</p>
     </div>

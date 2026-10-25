@@ -22,7 +22,7 @@ export const NAV: NavItem[] = [
   { href: '/', label: 'Home' },
   { href: '/install/', label: 'Install' },
   { href: '/coverage/', label: 'Coverage' },
-  { href: '/demo/', label: 'Demo' },
+  { href: '/downloads/', label: 'Downloads' },
   { href: '/config/', label: 'Config' },
   { href: '/docs/', label: 'Docs' },
   { href: '/blog/', label: 'Blog' },

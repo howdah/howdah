@@ -93,6 +93,48 @@ const compare = [
     <div class="wrap">
       <h2>How it works: four layers</h2>
       <p>Howdah's protection is organised in four layers. <strong>Version 1.0 delivered Layer 1; version 1.1 added Layer 2; version 1.2 added Layer 3, extended in 1.3; version 1.4 added Layer 4.</strong> Layer 2 detects and logs SQL injection, path traversal and command/code injection in request values; Layer 3 guards dangerous sinks (command execution, <code>unserialize</code>, <code>include</code>, <code>eval</code>, and in 1.3 <code>phar://</code> and SSRF); Layer 4 watches what PHP does after a breach (PHP run from upload directories, unexpected binaries and outbound hosts, <code>.php</code> writes). None of the three blocks by default.</p>
+
+      <figure class="diagram">
+        <svg viewBox="0 0 760 250" role="img" aria-labelledby="diag-title diag-desc">
+          <title id="diag-title">Where Howdah runs</title>
+          <desc id="diag-desc">A request passes a network WAF, then enters the PHP worker, where PHP parses it and runs your script. Howdah's four layers run inside the worker; a network WAF or a PHP-level prepend only see the request after PHP has parsed it.</desc>
+          <defs>
+            <marker id="diag-arrow" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" class="d-flowfill"/></marker>
+          </defs>
+          <!-- incoming request -->
+          <text x="4" y="126" class="d-tm">Request</text>
+          <line x1="4" y1="136" x2="92" y2="136" class="d-flow" marker-end="url(#diag-arrow)"/>
+          <!-- network WAF: outside PHP -->
+          <rect x="100" y="104" width="150" height="66" rx="9" class="d-ext"/>
+          <text x="175" y="132" text-anchor="middle" class="d-tm d-strong">Network WAF</text>
+          <text x="175" y="150" text-anchor="middle" class="d-tm">raw bytes,</text>
+          <text x="175" y="164" text-anchor="middle" class="d-tm">before PHP</text>
+          <line x1="250" y1="136" x2="290" y2="136" class="d-flow" marker-end="url(#diag-arrow)"/>
+          <!-- PHP worker: Howdah lives here -->
+          <rect x="292" y="48" width="464" height="162" rx="12" class="d-wkr"/>
+          <text x="308" y="74" class="d-th">PHP worker process</text>
+          <text x="748" y="74" text-anchor="end" class="d-tm">Howdah runs in here</text>
+          <text x="308" y="104" class="d-tm">PHP parses the request</text>
+          <text x="492" y="104" class="d-tm">your PHP script runs</text>
+          <line x1="308" y1="120" x2="742" y2="120" class="d-flow" marker-end="url(#diag-arrow)"/>
+          <line x1="474" y1="92" x2="474" y2="196" class="d-div"/>
+          <!-- layer chips -->
+          <g>
+            <rect x="308" y="134" width="150" height="40" rx="8" class="d-chip d-chip-hot"/>
+            <text x="383" y="159" text-anchor="middle" class="d-t d-strong">Layer 1</text>
+            <rect x="490" y="134" width="80" height="40" rx="8" class="d-chip"/>
+            <text x="530" y="159" text-anchor="middle" class="d-t">Layer 2</text>
+            <rect x="578" y="134" width="80" height="40" rx="8" class="d-chip"/>
+            <text x="618" y="159" text-anchor="middle" class="d-t">Layer 3</text>
+            <rect x="666" y="134" width="80" height="40" rx="8" class="d-chip"/>
+            <text x="706" y="159" text-anchor="middle" class="d-t">Layer 4</text>
+          </g>
+          <!-- auto_prepend marker -->
+          <line x1="474" y1="210" x2="474" y2="228" class="d-div"/>
+          <text x="474" y="244" text-anchor="middle" class="d-tm"><tspan class="d-mono">auto_prepend_file</tspan> starts here — after parsing</text>
+        </svg>
+        <figcaption>A network WAF or a PHP-level prepend only sees a request <em>after</em> PHP has parsed it. Howdah runs inside the worker, so <strong>Layer 1 counts upload parts as PHP reads them</strong> and refuses a flood before it exhausts memory — then Layers 2&ndash;4 watch the request and the code as they run.</figcaption>
+      </figure>
       <ol class="layers" aria-label="The four protection layers; a request flows from the top down">
         {layers.map((l) => (
           <li class={l.status}>
@@ -377,6 +419,23 @@ sudo apt-get update &amp;&amp; sudo apt-get install php8.1-howdah</code></pre>
 </Layout>
 
 <style>
+  /* "Where Howdah runs" inline-SVG diagram (theme-aware via the site tokens). */
+  .diagram { margin: 1.75rem 0 0; }
+  .diagram svg { width: 100%; height: auto; max-width: 760px; display: block; }
+  .diagram figcaption { font-size: .92rem; color: var(--muted); max-width: 48rem; margin-top: .85rem; }
+  .d-wkr { fill: var(--surface); stroke: var(--hot); stroke-width: 2; }
+  .d-ext { fill: none; stroke: var(--rule); stroke-width: 1.5; stroke-dasharray: 5 4; }
+  .d-chip { fill: var(--bg-2); stroke: var(--rule); stroke-width: 1; }
+  .d-chip-hot { fill: var(--hot-bg); stroke: var(--hot); stroke-width: 1.5; }
+  .d-flow { stroke: var(--muted); stroke-width: 1.5; fill: none; }
+  .d-flowfill { fill: var(--muted); }
+  .d-div { stroke: var(--rule); stroke-width: 1.5; stroke-dasharray: 3 3; }
+  .d-t { fill: var(--ink); font: 600 14px/1 var(--sans); }
+  .d-th { fill: var(--ink); font: 700 15px/1 var(--display); }
+  .d-tm { fill: var(--muted); font: 500 12.5px/1 var(--sans); }
+  .d-strong { font-weight: 700; }
+  .d-mono { font-family: var(--mono); font-size: 12px; }
+
   /* Four-layer diagram: a top-down stack the request flows through. */
   .layers { list-style: none; margin: 1.5rem 0 0; padding: 0; display: grid; gap: .6rem; counter-reset: none; }
   .layers > li { display: flex; gap: 1rem; align-items: flex-start; background: var(--surface); border: 1px solid var(--rule); border-left: 5px solid var(--rule); border-radius: 10px; padding: 1rem 1.2rem; }

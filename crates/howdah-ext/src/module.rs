@@ -69,6 +69,8 @@ static mut DISP_HOOK: Option<CString> = None;
 static mut DISP_INCLUDE_HOOK: Option<CString> = None;
 /// The legacy sinks actually installed at first RINIT (phpinfo row).
 static mut DISP_LEGACY: Option<CString> = None;
+/// The out-of-memory backstop state decided at MINIT (phpinfo row).
+static mut DISP_OOM: Option<CString> = None;
 /// `[sinks.xml] external_entities = "deny"` in force (decided once).
 static mut XML_DENY: bool = false;
 
@@ -829,7 +831,55 @@ unsafe extern "C" fn minit(type_: c_int, module_number: c_int) -> c_int {
         sys::howdah_sys_log_err(c.as_ptr());
     }
 
+    // Out-of-memory backstop (§4.6): save+chain `zend_error_cb` so an
+    // out-of-memory fatal — or any fatal during request startup — ends the
+    // worker before code runs on the half-built request state (PHP2Shell,
+    // CVE-2026-109618/109619). Armed only on web SAPIs, only on an unpatched
+    // engine (the `memory_hard_limit_percent` ini directive is absent), and only
+    // when `oom_exit` is on (the default). All three gates are process-static,
+    // read once here. Fail-open: a panic leaves `zend_error_cb` untouched.
+    let _ = catch_unwind(AssertUnwindSafe(|| install_oom_backstop()));
+
     SUCCESS
+}
+
+/// Decide the three OOM-backstop gates, install the hook when all pass, and set
+/// the phpinfo row either way. Web SAPIs only; unpatched engine only
+/// (upstream's fix registers `memory_hard_limit_percent`); `oom_exit` on.
+///
+/// # Safety
+/// Called from `minit` once per process; `CTX` is set.
+unsafe fn install_oom_backstop() {
+    let sapi = {
+        let p = (*ptr::addr_of!(sys::sapi_module)).name;
+        if p.is_null() { String::new() } else { CStr::from_ptr(p).to_string_lossy().into_owned() }
+    };
+    let oom_on = !CTX.is_null() && core::howdah_oom_exit(CTX) != 0;
+    let patched = sys::howdah_memory_hard_limit_percent_exists() != 0;
+    let web = is_backstop_sapi(&sapi);
+    if oom_on && web && !patched {
+        sys::howdah_install_oom_hook(crate::oom_filter::decide);
+    }
+    DISP_OOM = Some(cstring(&oom_backstop_label(oom_on, &sapi, web, patched)));
+}
+
+/// Web SAPIs the out-of-memory backstop runs on. Off on cli / cli-server.
+fn is_backstop_sapi(name: &str) -> bool {
+    matches!(name, "apache2handler" | "fpm-fcgi" | "cgi-fcgi" | "litespeed")
+}
+
+/// The `OOM backstop (oom_exit)` phpinfo row: armed, or why not.
+fn oom_backstop_label(oom_on: bool, sapi: &str, web: bool, patched: bool) -> String {
+    if !oom_on {
+        return "off (oom_exit = false)".to_string();
+    }
+    if !web {
+        return format!("off (non-web SAPI: {sapi})");
+    }
+    if patched {
+        return "off (patched PHP: memory_hard_limit_percent present)".to_string();
+    }
+    format!("armed (ends the worker on out-of-memory; SAPI {sapi})")
 }
 
 /// The `Include/eval hook` phpinfo row: what the shim reported installed, and
@@ -883,6 +933,9 @@ unsafe extern "C" fn mshutdown(_type: c_int, _module_number: c_int) -> c_int {
     // Restore the prior input_filter.
     (*ptr::addr_of_mut!(sys::sapi_module)).input_filter = PRIOR_INPUT_FILTER;
     PRIOR_INPUT_FILTER = None;
+    // Restore the prior zend_error_cb if the OOM backstop swapped it (no-op
+    // otherwise). Before freeing the ctx, though the handler needs no ctx.
+    sys::howdah_uninstall_oom_hook();
     core::howdah_free(CTX);
     CTX = ptr::null_mut();
     sys::zend_unregister_ini_entries(MODULE_NUMBER);
@@ -921,6 +974,9 @@ unsafe extern "C" fn minfo(_module: *mut sys::zend_module_entry) {
     }
     if let Some(l) = (*ptr::addr_of!(DISP_LEGACY)).as_ref() {
         row(b"Layer-3 legacy sinks\0", l.as_bytes_with_nul());
+    }
+    if let Some(o) = (*ptr::addr_of!(DISP_OOM)).as_ref() {
+        row(b"OOM backstop (oom_exit)\0", o.as_bytes_with_nul());
     }
     if *ptr::addr_of!(XML_DENY) {
         row(b"XML external entities\0", b"denied ([sinks.xml] external_entities)\0");

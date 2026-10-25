@@ -33,6 +33,8 @@ mod legacy_filter;
 #[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]
 mod module;
 #[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]
+mod oom_filter;
+#[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]
 mod origin;
 #[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]
 mod response;

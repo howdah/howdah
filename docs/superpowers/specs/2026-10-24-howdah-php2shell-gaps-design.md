@@ -76,14 +76,19 @@ That is what "blocks PHP2Shell" means here.
 - Verify against **vulnerable** PHP builds in the lab (§5), and publish a
   per-trigger × version × SAPI evidence table on the coverage page.
 - Also measure trigger (3), so the "probably" row becomes evidence.
+- Add a backstop (§4.6): if PHP still runs out of memory on an unpatched
+  version, end the worker before anything runs on the damaged state.
+  **(owner)**
 - Correct every page that describes the CVE from the early reports.
 
 **Non-goals**
 
 - Fixing or backporting PHP's out-of-memory handling.
-- Application-level out-of-memory (`json_decode`, `unserialize`, `str_repeat`
-  and similar on attacker input). The upstream fix adds dozens of tests for
-  these; a request filter cannot see them.
+- Preventing application-level out-of-memory (`json_decode`, `unserialize`,
+  `str_repeat` and similar on attacker input). The upstream fix adds dozens of
+  tests for these; a request filter cannot see them. The §4.6 backstop
+  contains them instead: the worker ends before the damaged state is used, and
+  that one request is lost.
 - CVE-2026-109619 producers outside request parsing: PHP 8.5
   `fatal_error_backtraces`, execution timeouts, INI-diagnostic consumers.
   The session upload-progress producer runs *inside* request parsing (it is
@@ -208,6 +213,51 @@ limits, so the memory-driven checks are sized per request:
   `max_part_header_bytes`, name lengths) stay as independent hard caps.
 - Zero blocks on the benign corpus at every ini profile in §5.1.
 
+### 4.6 Backstop: end the worker on out-of-memory (owner)
+
+The request limits stop requests that would run PHP out of memory while it
+parses them. They can't see an application that runs itself out of memory, and
+a scanner/parser disagreement could still let one through. The backstop makes
+any out-of-memory that does happen harmless, by never letting code run on the
+damaged state.
+
+- **Why not repair or zero memory.** The danger is pointers that still lead
+  into memory PHP freed or never finished setting up. Zeroing leaves those
+  pointers in place, and PHP reuses the memory on the next allocation. Upstream
+  had to fix each site separately (~300 files); an extension can't.
+- **Mechanism.** At MINIT, save `zend_error_cb` and install Howdah's handler,
+  chained like the input_filter. When the error is PHP's out-of-memory fatal
+  (`E_ERROR` whose message starts "Allowed memory size of", or PHP's "Out of
+  memory"), the handler writes Howdah's log line and ends the process with
+  `_exit()`, before PHP longjmps. Request shutdown never runs, and no later
+  request on that worker inherits stale pointers (CVE-2026-109619). Apache
+  prefork and php-fpm start a fresh worker. Every other error chains to the
+  prior callback unchanged. This matches what upstream's fix does at its hard
+  limit.
+- **Fatal errors during request startup** (before RINIT finishes) take the same
+  exit. They are rare in normal traffic, and they are the CVE-2026-109619
+  producer window. Fatal errors during the script do not: exiting on every
+  uncaught exception would keep restarting workers on some apps.
+  **(Claude's call.)**
+- **The exit path allocates nothing.** It runs when memory is exhausted: a
+  fixed stack buffer for the log line and a raw `write(2)`, no Zend or Rust heap
+  allocation. If the configured log sink can't be written that way, fall back
+  to stderr (the SAPI error log).
+- **Scope.** Web SAPIs only (apache2handler, fpm-fcgi, cgi-fcgi, LSAPI); off on
+  the CLI. Off on patched releases (8.2.35, 8.3.36, 8.4.27, 8.5.12 and later),
+  where upstream's soft limit already handles out-of-memory safely. This check
+  must use the **runtime** PHP version: a module built against 8.4.26 headers
+  can run on 8.4.27.
+- **Config.** On by default on unpatched versions; one boolean key turns it
+  off (name to the builder; needs an editor row, §3). **(Claude's call.)**
+- **Trade-offs to document:** the request that ran out of memory gets a
+  dropped connection instead of an error page (nginx shows 502), and its
+  worker restarts. Other extensions hooking `zend_error_cb` (Sentry, New
+  Relic, Xdebug) won't see that error; Howdah's log line records it.
+- `zend_error_cb`'s signature changes between 5.x, 7.x, 8.0 and 8.1+; use
+  per-generation types as `input_filter.rs` does. The builder must confirm on
+  each generation that the callback runs before the longjmp.
+
 ## 5. Verification
 
 ### 5.1 Lab targets
@@ -291,14 +341,29 @@ patched control. Signals:
   differential harness comparing the scanner's per-part header counts with what
   PHP parsed.
 
+### 5.5 The backstop
+
+Checked on the existing lab images with an ordinary test script that keeps
+allocating past `memory_limit` (no attack request needed), under Apache mod_php
+and php-fpm behind nginx:
+
+- the worker exits, and Howdah's log line for the out-of-memory event is
+  written;
+- the next request is served by a fresh worker;
+- with the key turned off, PHP's normal fatal-error behavior is unchanged;
+- on a patched release (8.4.27) and on the CLI the handler stays off;
+- any other error (a warning, an uncaught exception in the script) reaches the
+  prior callback unchanged.
+
 ## 6. Release and claim
 
 - Ships in the next minor release as Layer 1 work.
 - Site sentence: **"Howdah blocks the PHP2Shell attack requests on unpatched
   PHP."** Qualifier line underneath, to this effect: *Howdah stops the
   request-parsing triggers named in the official advisories before PHP runs out
-  of memory. It does not fix the underlying PHP bug, and it can't stop an
-  application that runs out of memory on its own. Patching remains the fix.*
+  of memory, and if PHP runs out of memory anyway, it ends that worker before
+  the damaged state can be used. It does not fix the underlying PHP bug.
+  Patching remains the fix.*
   **(Qualifier approved by the owner; exact wording to the copy pass.)**
 - The sentence names only versions and SAPIs with PASS (or N/A) rows; the rest
   are listed as NOT-RUN. The coverage page lists the ini profiles tested.
@@ -315,5 +380,8 @@ patched control. Signals:
 - Whether `post_max_size` is read per request or cached.
 - Lab image build details and the version list beyond §5.1.
 - Milestone order. Suggested: vulnerable lab and oracle first, confirming the
-  §5.2 "expected before the fix" result; then 4.1 → 4.3 → 4.2 → 4.4 → 4.5;
+  §5.2 "expected before the fix" result; then 4.6 (independent of the others,
+  and the quickest protection to ship); then 4.1 → 4.3 → 4.2 → 4.4 → 4.5;
   then the full verification run, docs and site.
+- The §4.6 out-of-memory message match per PHP version, the runtime version
+  check, and the backstop config key's name.

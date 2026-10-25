@@ -1,0 +1,68 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { REPO } from '../../lib/site';
+---
+<Layout
+  title="Howdah 1.4: Layer 4, watching what happens after a breach"
+  description="Howdah 1.4 adds Layer 4, which watches what PHP does once something has gone wrong: PHP run from an upload directory, unexpected programs, unexpected outbound hosts and PHP files written to denied directories. It logs by default and has documented limits."
+  path="/blog/howdah-1-4/"
+>
+  <article class="post">
+    <div class="pagehead">
+      <div class="wrap">
+        <p class="crumbs"><a href="/">Home</a> / <a href="/blog/">Blog</a> / <span aria-current="page">Howdah 1.4</span></p>
+        <h1>Howdah 1.4: Layer 4, watching what happens after a breach</h1>
+        <p class="lede"><time datetime="2026-10-24">24 October 2026</time></p>
+      </div>
+    </div>
+
+    <div class="wrap prose">
+      <p>Layers 1 to 3 try to stop an attack from getting in. Howdah 1.4 adds Layer 4 for the case where something got in anyway: it watches what PHP does afterwards, such as running a webshell dropped in an upload directory. Like Layers 2 and 3 it <strong>logs first</strong>, and it does nothing until you give it lists.</p>
+
+      <div class="note" role="note">
+        <p><strong>Update, 24 October 2026.</strong> Howdah 1.5 changed two things this post describes. Under php-fpm, a 1.4 block ended the worker (exit 70) and lost the 403 body; 1.5 fixed that. And 1.4 always installed the include/eval opcode handler, which turns OPcache JIT off on PHP 8; 1.5 installs it only when something needs it. See <a href="/blog/howdah-1-5/">Howdah 1.5</a>.</p>
+      </div>
+
+      <h2>What Layer 4 watches</h2>
+      <p>Layer 4 is a new <code>[behavior]</code> section of the TOML config. It has four facets, each with its own rule id, all Standard severity. Events name the script that made the call.</p>
+      <div class="tablewrap" tabindex="0" role="region" aria-label="Layer 4 facets (scrolls sideways on narrow screens)">
+        <table>
+          <caption class="sr-only">The four Layer 4 facets</caption>
+          <thead><tr><th scope="col">Setting</th><th scope="col">Rule</th><th scope="col">Flags</th></tr></thead>
+          <tbody>
+            <tr><th scope="row"><code>deny_exec_dirs</code></th><td><code>upload_exec</code></td><td>PHP run from a denied directory, as the requested script or <code>require</code>d by another script</td></tr>
+            <tr><th scope="row"><code>allow_exec_binaries</code></th><td><code>unexpected_binary</code></td><td>An exec-family call to a program not on the list</td></tr>
+            <tr><th scope="row"><code>allow_egress_hosts</code></th><td><code>unexpected_egress</code></td><td>An outbound connection to a host not on the list</td></tr>
+            <tr><th scope="row"><code>deny_php_writes</code></th><td><code>php_write</code></td><td>A PHP file written into a denied directory, or from a script under one</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>The write check is scoped by origin, so ordinary template compilation elsewhere is not flagged.</p>
+
+      <h2>Log first, and empty by default</h2>
+      <p><code>behavior.mode</code> defaults to <code>detect</code> and is independent of <code>howdah.mode</code>, so setting <code>howdah.mode = block</code> does <strong>not</strong> arm it. Every list starts empty, so a fresh install blocks nothing. Layer 4 adds no php.ini directives.</p>
+      <p>To build the lists, set <code>behavior.observe = true</code>. Howdah then logs what it would have flagged as <code>proposed</code> lines. It never blocks and never writes your config. If the box is already breached, what observe sees can include the attacker's own behaviour, so read every line before you add it to a list.</p>
+
+      <h2>What Layer 4 does not catch</h2>
+      <ul class="facts">
+        <li><strong>It only sees what PHP itself does.</strong> A detached or forked process, or a dropper that never ran through PHP, is invisible.</li>
+        <li><strong>Allowlists are best-effort and can be bypassed.</strong> Observe mode only proposes entries.</li>
+        <li><strong>The write check goes by file extension.</strong> It can still flag frameworks that write compiled templates into a denied directory, so scope <code>deny_php_writes</code> and read the log before you switch to <code>block</code>.</li>
+        <li><strong>The required-file check is best-effort.</strong> It runs at first compile. The main-script check does not depend on opcache.</li>
+        <li><strong>A <code>require</code> with a relative path</strong> is not checked at include time, on any version.</li>
+      </ul>
+
+      <h2>How far it was verified</h2>
+      <p>A lab script with 27 checks passes on PHP 5.4, 5.6, 7.4, 8.3, 8.4 and 8.5. Other minors build and are expected to work, but we do not claim they pass.</p>
+
+      <h2>Get it</h2>
+      <p>Upgrade with your package manager and nothing changes until you set a list. New here? Start at the <a href="/install/">install picker</a>, read the <a href="/docs/configuration/#layer-4-behavior">Layer 4 configuration reference</a>, and check the <a href="/coverage/">coverage page</a> for the per-version table. The source and this site are on <a href={REPO}>GitHub</a>.</p>
+    </div>
+  </article>
+</Layout>
+
+<style>
+  .prose { max-width: 46rem; padding-bottom: 1rem; }
+  .prose h2 { margin-top: 2rem; }
+  .prose h3 { margin-top: 1.5rem; }
+</style>

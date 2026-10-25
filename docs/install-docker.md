@@ -1,12 +1,12 @@
 # Install Howdah with Docker
 
-> **Status:** the 1.4.0 Debian images are on GHCR (`ghcr.io/howdah/howdah:1.4.0-php<minor>`,
-> published by a manual run of `.github/workflows/docker.yml`). The run for
-> 1.5.0 (run 40140181320) published nothing: the smoke test still expected
-> 1.4.0's php-fpm refusal behaviour, and the 5.6, 7.0 and 7.1 `-alpine`
-> builds could not load the module (see "Alpine"). Both are fixed; the 1.5.0
-> images come from the next run. You can always build the same image
-> yourself (see "Build the image yourself").
+> **Status:** the 1.5.0 images are on GHCR: `-php5.6` to `-php8.5` for
+> amd64 and arm64, and `-php7.2-alpine` to `-php8.5-alpine` for amd64
+> (docker run 40142348967, a manual re-run after the fix for run
+> 40140181320, which published nothing because its smoke test still expected
+> 1.4.0's php-fpm refusal behaviour). The 1.4.0 Debian images are there too.
+> You can always build the same image yourself (see "Build the image
+> yourself").
 
 The image is the official `php:<minor>-fpm` image with the signed `howdah.so`
 from a GitHub release installed and enabled. Nothing is compiled when the

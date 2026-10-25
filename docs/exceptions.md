@@ -14,7 +14,7 @@ The reference for every key is the `[[exceptions]]` section of
 Run with the rule in `detect` and read the events it writes. One line:
 
 ```json
-{"action":"log","client_ip":"203.0.113.7","layer":3,"method":"POST","reason":"non-allowlisted command via shell_exec","request_id":"2c07d4e1a96b3f8c25","rule":"command_exec","schema":2,"ts":"1792834977000","uri":"/cron.php","version":"1.4.0"}
+{"action":"log","client_ip":"203.0.113.7","layer":3,"method":"POST","reason":"non-allowlisted command via shell_exec","request_id":"2c07d4e1a96b3f8c25","rule":"command_exec","schema":2,"ts":"1792834977000","uri":"/cron.php","version":"1.5.0"}
 ```
 
 Three questions decide the entry:

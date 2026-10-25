@@ -148,10 +148,9 @@ A locally edited ini is kept as `40-howdah.ini.rpmsave`.
 ## Panel and distribution PHP
 
 The repositories in this section are separate from the two above, one per
-layout, signed with the same key. They are new: they appear at their URLs
-after the next run of the publish workflow. Until
-`https://pkg.howdah.org/<layout>/...` answers, use the tarball as described
-in [packaging-layouts.md](packaging-layouts.md). Each package installs the
+layout, signed with the same key, and live since the 1.5.0 publish. For a
+panel or layout not listed here, use the tarball as described in
+[packaging-layouts.md](packaging-layouts.md). Each package installs the
 same `howdah.so` and `howdah.ini` as the tarball for that PHP minor, into the
 vendor's paths, and depends on the vendor's PHP package for that minor, so it
 cannot load into a PHP with a different ABI. None has install scripts; the

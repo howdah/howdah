@@ -1,0 +1,99 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { REPO } from '../../lib/site';
+---
+<Layout
+  title="Howdah 1.5: exceptions, log integration, and Docker"
+  description="Howdah 1.5 adds scoped exceptions, a versioned event log with syslog and a per-event hook, seven legacy-era Layer 3 sinks, a JIT-safe hook, a fix for refusals under php-fpm, and Docker images. Layers 2 to 4 still log first."
+  path="/blog/howdah-1-5/"
+>
+  <article class="post">
+    <div class="pagehead">
+      <div class="wrap">
+        <p class="crumbs"><a href="/">Home</a> / <a href="/blog/">Blog</a> / <span aria-current="page">Howdah 1.5</span></p>
+        <h1>Howdah 1.5: exceptions, log integration, and Docker</h1>
+        <p class="lede"><time datetime="2026-10-24">24 October 2026</time></p>
+      </div>
+    </div>
+
+    <div class="wrap prose">
+      <p>Howdah 1.5 is about running Howdah on a real site: turning one rule off for one known script, getting events into the tools you already use, and fixing two things that made 1.4 awkward in production. Layers 2 to 4 still <strong>detect and log by default</strong> and block only when an operator arms them. Only the critical Layer 1 limits block out of the box.</p>
+
+      <h2>The highlights</h2>
+      <div class="tablewrap" tabindex="0" role="region" aria-label="Howdah 1.5 highlights (scrolls sideways on narrow screens)">
+        <table>
+          <caption class="sr-only">What is new in Howdah 1.5</caption>
+          <thead><tr><th scope="col">Area</th><th scope="col">What changed</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Exceptions</th><td>Scoped <code>[[exceptions]]</code> turn one rule off for one script, parameter, URI prefix or client network</td></tr>
+            <tr><th scope="row">Logging</th><td>Event log schema 2, <code>[log] destination</code> (file, syslog, stderr) and a per-event <code>[log] exec</code> hook</td></tr>
+            <tr><th scope="row">Layer 3</th><td>Seven legacy-era sinks, mostly for PHP 5.x and 7.x</td></tr>
+            <tr><th scope="row">JIT</th><td>A default install now keeps OPcache JIT on</td></tr>
+            <tr><th scope="row">Refusals</th><td>A refusal under php-fpm no longer ends the worker or loses the 403 body</td></tr>
+            <tr><th scope="row">Packaging</th><td>Docker images, Alpine (musl) builds, cPanel, Plesk, CloudLinux and distribution EL packages, provenance and SBOM attestations</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2>Scoped exceptions</h2>
+      <p>An <code>[[exceptions]]</code> entry turns one rule off for one executing script (path, glob or SHA-256), request parameter, URI prefix, client CIDR, or an AND of those. Every entry needs a <code>reason</code>, so the config file doubles as the decision record. The method is in <a href={`${REPO}/blob/main/docs/exceptions.md`}>docs/exceptions.md</a>.</p>
+      <ul class="facts">
+        <li><strong>Critical Layer 1 rules can never be excepted.</strong> Layer 1 Standard rules take only <code>uri_prefix</code> and <code>client_cidr</code>, and Layer 2 takes no <code>script</code>.</li>
+        <li><strong>An exception never arms anything and never widens an allowlist.</strong> A facet that matches every request, such as <code>script = "/**"</code> or a <code>/0</code> CIDR, is refused.</li>
+        <li><strong>An invalid entry takes the <code>on_invalid_config</code> path</strong>, and the error names the key.</li>
+      </ul>
+      <p>We also ship application profiles for WordPress, Drupal 7, Magento 1 and 2, Joomla and PrestaShop 1.6: detect-mode configs with a cited reason for every entry. They are starting points and are never applied automatically.</p>
+
+      <h2>Events you can ship</h2>
+      <p>Every event line now carries <code>schema</code> (2), <code>version</code> and <code>layer</code>. The eight fields of 1.0 to 1.4 keep their names and types, and a new <code>excepted</code> action appears when you set <code>exceptions_log = true</code>. The contract is <a href={`${REPO}/blob/main/docs/log-schema.md`}>docs/log-schema.md</a>.</p>
+      <p><code>[log] destination</code> picks <code>file</code> (the default, as before), <code>syslog</code> or <code>stderr</code>. <code>[log] exec</code> runs one program per event with the JSON line on stdin; it is off unless set, the path must be absolute, and it runs as the PHP worker user. Starting points for Wazuh and Loki (Promtail) are in <a href={`${REPO}/blob/main/docs/integrations/README.md`}>docs/integrations</a>. Since the release, the <a href="/docs/integrations/">log integrations page</a> also covers fail2ban and CrowdSec, and logging the real client address behind a proxy.</p>
+
+      <h2>Seven legacy-era Layer 3 sinks</h2>
+      <p>These watch functions that mostly matter on PHP 5.x and 7.x. Each has its own <code>[sinks.&lt;name&gt;]</code> table and inherits <code>sinks.mode</code>, which is log-only by default. Setting <code>howdah.mode = block</code> arms none of them. The function arguments are never logged.</p>
+      <div class="tablewrap" tabindex="0" role="region" aria-label="Legacy sinks (scrolls sideways on narrow screens)">
+        <table>
+          <caption class="sr-only">The seven legacy-era Layer 3 sinks</caption>
+          <thead><tr><th scope="col">Sink</th><th scope="col">Watches</th><th scope="col">PHP versions</th></tr></thead>
+          <tbody>
+            <tr><th scope="row"><code>mail</code></th><td>Sendmail options and header injection in <code>mail()</code></td><td>All</td></tr>
+            <tr><th scope="row"><code>preg_eval</code></th><td>The <code>/e</code> modifier</td><td>5.x only</td></tr>
+            <tr><th scope="row"><code>create_function</code></th><td>Routed through the eval policy</td><td>5.x and 7.x</td></tr>
+            <tr><th scope="row"><code>assert_string</code></th><td>String <code>assert()</code></td><td>5.x and 7.x</td></tr>
+            <tr><th scope="row"><code>dangerous_callback</code></th><td>String callbacks naming <code>system</code>, <code>exec</code> and similar</td><td>All</td></tr>
+            <tr><th scope="row"><code>xxe</code></th><td>Documents declaring external entities</td><td>All</td></tr>
+            <tr><th scope="row"><code>tls_verify</code></th><td>curl TLS verification turned off</td><td>All</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Three limits to know. <code>tls_verify</code> is <strong>detect-only</strong>, with no block mode. For <code>xxe</code>, an external DTD reference alone is only logged, never blocked, and the option that turns libxml's external entity loader off, <code>[sinks.xml] external_entities = "deny"</code>, is <strong>off by default</strong>. For <code>dangerous_callback</code>, on PHP 7.0+ a literal, unqualified <code>call_user_func(...)</code> or <code>call_user_func_array(...)</code> in the global namespace is not seen, because the compiler never calls the function; PHP 5.x sees every form.</p>
+
+      <h2>OPcache JIT stays on by default</h2>
+      <p>Before 1.5, loading Howdah turned the JIT off on PHP 8 whatever the configuration, because the include/eval guard was an opcode handler installed unconditionally. A new key, <code>[sinks] hook = "auto" | "opcode" | "compile"</code>, installs a hook only when something needs it. The default <code>auto</code> uses the compile-step swap when only <code>eval</code> needs a hook, so <strong>a default install keeps the JIT on</strong>.</p>
+      <p>The JIT still goes off if you set <code>[behavior] deny_exec_dirs</code> or <code>[sinks.include] allow_paths</code>, because those need the opcode handler. <code>hook = "compile"</code> keeps it on, at the cost of not re-inspecting an <code>include</code> served from a warm opcache. <code>php --ri howdah</code> shows which hook is active and why.</p>
+
+      <h2>Refusals no longer kill the worker</h2>
+      <p>In 1.4, under php-fpm, a refusal during request startup (the multipart limits and the Layer 4 main-script check) ended the worker with exit code 70 and lost the response body. Behind nginx that showed up as a 403 with an empty body. In 1.5 the refusal is recorded and delivered at the end of Howdah's RINIT with the same body and request id, and the worker survives. A CLI script refused by <code>deny_exec_dirs</code> prints the notice, does not run and exits 0, so cron jobs should watch the log line rather than the exit status.</p>
+      <p>An armed Layer 2 class (<code>[inspect] mode = "block"</code> or a <code>rule_modes</code> entry) now refuses the request <strong>before the script runs</strong> on php-fpm, Apache mod_php, php-cgi and the CLI server, instead of after it. To scan the request path that early, armed Layer 2 builds <code>$_SERVER</code> at RINIT, a cost the log-only default does not pay. What is refused before the script, per SAPI, is listed under &ldquo;Enforcement timing&rdquo; in <a href={`${REPO}/blob/main/docs/config.md`}>docs/config.md</a>.</p>
+      <p>Also fixed: request ids repeated across forked php-fpm and Apache workers, event lines could interleave because they took two writes, and <code>[log] path</code> in the TOML file was ignored.</p>
+
+      <h2>What is still limited</h2>
+      <ul class="facts">
+        <li><strong>The performance numbers are from 1.3.0.</strong> The <a href="/docs/performance/">performance page</a> was measured on Howdah 1.3.0, before the JIT change, and a re-measure is pending. Treat none of them as 1.5 results.</li>
+        <li><strong>Exceptions need your judgement.</strong> A wrongly broad exception removes protection for that scope, and the reason you write is the only record of why.</li>
+        <li><strong>Some packages are untested.</strong> The CloudLinux packages were built but not install-tested, and DirectAdmin stays on the tarball.</li>
+        <li><strong>There is no third-party audit yet.</strong> We published an audit brief for one.</li>
+      </ul>
+
+      <h2>Get it</h2>
+      <p>Debian and Ubuntu: <code>apt-get update &amp;&amp; apt-get upgrade</code>. RHEL family: the yum equivalent. Signed tarballs cover every PHP minor from 5.4 to 8.5, for x86_64, aarch64 and x86_64 musl. 1.5.0 is the first release with build provenance and SBOM attestations; see <a href="/docs/verify/">verifying a release</a>.</p>
+      <p>The 1.5.0 Docker images are on GHCR as <code>ghcr.io/howdah/howdah:1.5.0-php&lt;minor&gt;</code>: PHP 5.6 to 8.5 on the official Debian-based images for amd64 and arm64, and <code>-alpine</code> for PHP 7.2 to 8.5 on amd64 only. Some of those bases are end-of-life PHP; <a href={`${REPO}/blob/main/docs/install-docker.md`}>docs/install-docker.md</a> covers that and how to verify an image.</p>
+      <p>Start at the <a href="/install/">install picker</a>, read the <a href="/docs/configuration/#exceptions">exceptions reference</a>, and check the <a href="/coverage/">coverage page</a>. The source and this site are on <a href={REPO}>GitHub</a>.</p>
+    </div>
+  </article>
+</Layout>
+
+<style>
+  .prose { max-width: 46rem; padding-bottom: 1rem; }
+  .prose h2 { margin-top: 2rem; }
+  .prose h3 { margin-top: 1.5rem; }
+</style>

@@ -1,0 +1,61 @@
+---
+// A table that never scrolls sideways. While its container is wide enough it
+// is an ordinary table that wraps its text; below the threshold (`stack`:
+// "narrow" = 28rem, "wide" = 50rem of container width) each row becomes a
+// small block, and each cell shows its column name beside its value. The
+// explicit ARIA roles keep the table semantics when rows are drawn as blocks.
+// Cell and row-header strings are trusted HTML written in this repository.
+interface Row { head: string; cells: string[]; self?: boolean }
+interface Props { caption: string; cols: string[]; rows: Row[]; stack?: 'narrow' | 'wide' }
+const { caption, cols, rows, stack = 'narrow' } = Astro.props;
+// Let snake_case names (max_request_header_bytes) wrap after an underscore
+// instead of forcing a wide column or breaking mid-word. Text only, not tags.
+const soft = (html: string) => html.replace(/(^|>)([^<]*)/g, (_m, a, t) =>
+  a + t.replace(/\w{13,}/g, (w: string) => w.replace(/_/g, '_<wbr>')));
+---
+<div class={`fitwrap fit-${stack}`}>
+  <table class="fit" role="table">
+    <caption class="sr-only">{caption}</caption>
+    <thead role="rowgroup"><tr role="row">{cols.map((c) => <th scope="col" role="columnheader">{c}</th>)}</tr></thead>
+    <tbody role="rowgroup">
+      {rows.map((r) => (
+        <tr role="row" class={r.self ? 'self' : undefined}>
+          <th scope="row" role="rowheader" set:html={soft(r.head)} />
+          {r.cells.map((c, i) => <td role="cell" data-label={cols[i + 1]} set:html={soft(c)} />)}
+        </tr>
+      ))}
+    </tbody>
+  </table>
+</div>
+
+<style>
+  .fitwrap { border: 1px solid var(--rule); border-radius: 10px; background: var(--surface); overflow-x: auto; max-width: 100%; }
+  .fit-narrow { container: fit-narrow / inline-size; }
+  .fit-wide { container: fit-wide / inline-size; }
+  table.fit { min-width: 0; width: 100%; }
+  table.fit tbody th, table.fit td { white-space: normal; overflow-wrap: break-word; }
+  table.fit td :global(code) { overflow-wrap: break-word; }
+  tr.self { background: var(--hot-bg); }
+
+  /* Stacked: one block per row, "column: value" lines under the row header. */
+  @container fit-narrow (max-width: 28rem) {
+    thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+    table, tbody, tr, th, td { display: block; }
+    tbody tr { padding: .75rem 1rem; border-top: 1px solid var(--rule); }
+    tbody tr:first-child { border-top: 0; }
+    tbody th, tbody td { border: 0; padding: 0; }
+    tbody th { margin-bottom: .3rem; }
+    td { display: grid; grid-template-columns: minmax(5.5rem, 34%) 1fr; gap: .75rem; padding: .15rem 0; font-size: .92rem; }
+    td::before { content: attr(data-label); color: var(--muted); font-size: .85rem; }
+  }
+  @container fit-wide (max-width: 50rem) {
+    thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+    table, tbody, tr, th, td { display: block; }
+    tbody tr { padding: .75rem 1rem; border-top: 1px solid var(--rule); }
+    tbody tr:first-child { border-top: 0; }
+    tbody th, tbody td { border: 0; padding: 0; }
+    tbody th { margin-bottom: .3rem; }
+    td { display: grid; grid-template-columns: minmax(5.5rem, 34%) 1fr; gap: .75rem; padding: .15rem 0; font-size: .92rem; }
+    td::before { content: attr(data-label); color: var(--muted); font-size: .85rem; }
+  }
+</style>

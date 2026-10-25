@@ -22,7 +22,7 @@ const layers = [
 // Sources are cited as plain text (no external requests; see the methodology note).
 const compareAsOf = 'October 2026';
 const compare = [
-  { name: 'Howdah', self: true, where: 'Inside PHP (Rust extension)', license: 'MIT OR Apache-2.0', job: 'Refuses Layer-1 request-shape & resource-exhaustion floods during parsing', eol: 'Yes — 5.4 to 8.5, including EOL branches', ext: 'None' },
+  { name: 'Howdah', self: true, where: 'Inside PHP (Rust extension)', license: 'MIT OR Apache-2.0', job: 'Request-shape limits (Layer 1, blocks) + log-first input inspection, sink hardening & after-breach checks (Layers 2–4)', eol: 'Yes — 5.4 to 8.5, including EOL branches', ext: 'None' },
   { name: 'Snuffleupagus', where: 'Inside PHP (C extension)', license: 'LGPL', job: 'Hardening: kills bug classes + virtual-patching', eol: 'PHP 7.0+ (not 5.x)', ext: 'None' },
   { name: 'OpenRASP (Baidu)', where: 'Inside the app (RASP, hooks sinks)', license: 'Apache-2.0', job: 'Runtime detection of SQL/file/SSRF via sink hooks', eol: 'PHP extension; project quiet since 2022', ext: 'Self-hosted management' },
   { name: 'Aikido Zen', where: 'In-app agent (separate process)', license: 'Open-source agent + commercial cloud', job: 'Hooks runtime sinks (SQLi, SSRF, path/command injection)', eol: 'PHP 7.2+ (not 5.x)', ext: 'Aikido cloud (SaaS)' },
@@ -37,10 +37,10 @@ const compare = [
 >
   <div class="hero">
     <div class="wrap">
-      <p class="eyebrow">Open source &middot; defensive &middot; built for PHP 5.4 to 8.5 (see coverage for what is tested)</p>
-      <h1>Howdah stops abusive request <em>floods</em> inside PHP, before they exhaust memory.</h1>
-      <p class="lede">Upload-part floods are the shape of the PHP2Shell attack. Howdah is a firewall that loads into PHP itself, so it protects even end-of-life PHP (5.4 to 8.1) that will never get the official fix — on the versions tested in the coverage table.</p>
-      <p class="fine">Built for sysadmins who run PHP on their own servers, including servers stuck on old PHP. Howdah is defensive only: it recognizes and refuses abusive requests, nothing else.</p>
+      <p class="eyebrow">Open source &middot; defensive &middot; in-process &middot; PHP 5.4 to 8.5</p>
+      <h1>Hardening that loads <em>inside</em> PHP — even on the end-of-life versions most tools dropped.</h1>
+      <p class="lede">Howdah is a Rust extension that runs in the PHP worker, so it sees a request <em>as PHP parses it</em>, before any of your code runs. That is the only place you can refuse an upload-part flood — the shape of the PHP2Shell attack — before it exhausts memory. It installs with one <code>extension=</code> line and runs on PHP 5.4 through 8.5, including the EOL branches that will never get the official fix.</p>
+      <p class="fine">No agent, no sidecar, no telemetry, no cloud. Four layers, log-first by default: it recognizes and refuses abusive requests on the versions tested in the <a href="/coverage/">coverage table</a> &mdash; and nothing else.</p>
       <div class="cta">
         <a class="btn primary" href="/install/">Install Howdah {shortVersion}</a>
         <a class="btn ghost" href="/coverage/">See exactly what has been tested</a>
@@ -49,12 +49,36 @@ const compare = [
     </div>
   </div>
 
+  <section id="why" class="alt">
+    <div class="wrap">
+      <h2>Why Howdah is different</h2>
+      <ul class="cardgrid">
+        <li><div class="card">
+          <h3>Inside PHP, not in front of it</h3>
+          <p>Howdah runs in the PHP worker and counts upload parts and input variables <em>as PHP reads them</em>, so it can refuse a flood early. A network WAF or a PHP-level prepend only sees the request after PHP has already parsed it &mdash; too late for the PHP2Shell shape.</p>
+        </div></li>
+        <li><div class="card">
+          <h3>Still runs on end-of-life PHP</h3>
+          <p>One of the very few maintained in-process hardening extensions that still loads on PHP&nbsp;5.4&ndash;7.3 &mdash; roughly a third of live PHP sites (<a href="https://w3techs.com/technologies/details/pl-php" rel="nofollow">W3Techs</a>, Oct&nbsp;2026). Most hardening tools require 7.0+ or newer.</p>
+        </div></li>
+        <li><div class="card">
+          <h3>No agent, no telemetry, no cloud</h3>
+          <p>One <code>extension=</code> line in <code>php.ini</code>. Nothing phones home, nothing to host, no SaaS account, no API key. Dual-licensed MIT or Apache-2.0.</p>
+        </div></li>
+        <li><div class="card">
+          <h3>Log-first and honest</h3>
+          <p>Four layers that detect and log by default; you turn on blocking when you are ready. Every &ldquo;blocked&rdquo; claim is backed by the public <a href="/coverage/">coverage table</a>, and releases are signed and SLSA-attested.</p>
+        </div></li>
+      </ul>
+    </div>
+  </section>
+
   <section id="what">
     <div class="wrap cols aside">
       <div>
         <h2>What is Howdah, and why the name?</h2>
         <p>Howdah is a native extension for PHP. When a web request arrives, PHP starts parsing it before any of your code runs. Howdah watches that parsing step and refuses requests that are built to exhaust memory, while PHP is still working through them.</p>
-        <p>Version 1.0 completes Howdah's first layer: limits on <code>multipart/form-data</code> uploads, on the number and shape of input variables, and on request headers. The critical resource-exhaustion limits block by default, even in detect mode; everything else starts in log-only mode so you can watch it before you let it block. Version 1.1 adds Layer 2, which inspects request content for injection patterns and logs them; it does not block by default. Version 1.2 adds Layer 3, which guards four dangerous PHP sinks, and also logs first. Version 1.3 extends it with <code>phar://</code> and SSRF guards (off by default) and brings <code>include</code> and <code>eval</code> to PHP 5.x. Version 1.4 adds Layer 4, which watches what PHP does after a breach (PHP run from upload directories, unexpected binaries and outbound hosts, <code>.php</code> writes). It also logs first and does nothing until you set its lists.</p>
+        <p>Its protection grew one layer at a time: request-shape limits in 1.0, input inspection in 1.1, sink hardening in 1.2 and 1.3, and after-breach monitoring in 1.4. Version 1.5 rounds it out &mdash; scoped per-rule exceptions, a JIT-safe hook so a default install keeps OPcache JIT on, structured logging, and signed, SLSA-attested builds with Docker images. <strong>Only the critical Layer-1 limits block by default; every other layer logs first</strong>, so you can watch what it would do before you let it act. The four layers are below.</p>
         <p>It is not a replacement for patching. Upgrade PHP when you can. Use Howdah when you cannot, or until you can.</p>
       </div>
       <aside class="card" aria-labelledby="howdah-word">
@@ -69,6 +93,48 @@ const compare = [
     <div class="wrap">
       <h2>How it works: four layers</h2>
       <p>Howdah's protection is organised in four layers. <strong>Version 1.0 delivered Layer 1; version 1.1 added Layer 2; version 1.2 added Layer 3, extended in 1.3; version 1.4 added Layer 4.</strong> Layer 2 detects and logs SQL injection, path traversal and command/code injection in request values; Layer 3 guards dangerous sinks (command execution, <code>unserialize</code>, <code>include</code>, <code>eval</code>, and in 1.3 <code>phar://</code> and SSRF); Layer 4 watches what PHP does after a breach (PHP run from upload directories, unexpected binaries and outbound hosts, <code>.php</code> writes). None of the three blocks by default.</p>
+
+      <figure class="diagram">
+        <svg viewBox="0 0 760 250" role="img" aria-labelledby="diag-title diag-desc">
+          <title id="diag-title">Where Howdah runs</title>
+          <desc id="diag-desc">A request passes a network WAF, then enters the PHP worker, where PHP parses it and runs your script. Howdah's four layers run inside the worker; a network WAF or a PHP-level prepend only see the request after PHP has parsed it.</desc>
+          <defs>
+            <marker id="diag-arrow" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" class="d-flowfill"/></marker>
+          </defs>
+          <!-- incoming request -->
+          <text x="4" y="126" class="d-tm">Request</text>
+          <line x1="4" y1="136" x2="92" y2="136" class="d-flow" marker-end="url(#diag-arrow)"/>
+          <!-- network WAF: outside PHP -->
+          <rect x="100" y="104" width="150" height="66" rx="9" class="d-ext"/>
+          <text x="175" y="132" text-anchor="middle" class="d-tm d-strong">Network WAF</text>
+          <text x="175" y="150" text-anchor="middle" class="d-tm">raw bytes,</text>
+          <text x="175" y="164" text-anchor="middle" class="d-tm">before PHP</text>
+          <line x1="250" y1="136" x2="290" y2="136" class="d-flow" marker-end="url(#diag-arrow)"/>
+          <!-- PHP worker: Howdah lives here -->
+          <rect x="292" y="48" width="464" height="162" rx="12" class="d-wkr"/>
+          <text x="308" y="74" class="d-th">PHP worker process</text>
+          <text x="748" y="74" text-anchor="end" class="d-tm">Howdah runs in here</text>
+          <text x="308" y="104" class="d-tm">PHP parses the request</text>
+          <text x="492" y="104" class="d-tm">your PHP script runs</text>
+          <line x1="308" y1="120" x2="742" y2="120" class="d-flow" marker-end="url(#diag-arrow)"/>
+          <line x1="474" y1="92" x2="474" y2="196" class="d-div"/>
+          <!-- layer chips -->
+          <g>
+            <rect x="308" y="134" width="150" height="40" rx="8" class="d-chip d-chip-hot"/>
+            <text x="383" y="159" text-anchor="middle" class="d-t d-strong">Layer 1</text>
+            <rect x="490" y="134" width="80" height="40" rx="8" class="d-chip"/>
+            <text x="530" y="159" text-anchor="middle" class="d-t">Layer 2</text>
+            <rect x="578" y="134" width="80" height="40" rx="8" class="d-chip"/>
+            <text x="618" y="159" text-anchor="middle" class="d-t">Layer 3</text>
+            <rect x="666" y="134" width="80" height="40" rx="8" class="d-chip"/>
+            <text x="706" y="159" text-anchor="middle" class="d-t">Layer 4</text>
+          </g>
+          <!-- auto_prepend marker -->
+          <line x1="474" y1="210" x2="474" y2="228" class="d-div"/>
+          <text x="474" y="244" text-anchor="middle" class="d-tm"><tspan class="d-mono">auto_prepend_file</tspan> starts here — after parsing</text>
+        </svg>
+        <figcaption>A network WAF or a PHP-level prepend only sees a request <em>after</em> PHP has parsed it. Howdah runs inside the worker, so <strong>Layer 1 counts upload parts as PHP reads them</strong> and refuses a flood before it exhausts memory — then Layers 2&ndash;4 watch the request and the code as they run.</figcaption>
+      </figure>
       <ol class="layers" aria-label="The four protection layers; a request flows from the top down">
         {layers.map((l) => (
           <li class={l.status}>
@@ -124,7 +190,7 @@ const compare = [
           <p class="legend"><strong>Honest caveat:</strong> for these, the guaranteed mitigation is that Howdah <strong>drops the offending variable</strong> (bounding the symbol table) and logs it. The 403 is best-effort and may arrive at request shutdown on SAPIs that build superglobals lazily. See the <a href="/docs/configuration/">rule reference</a>.</p>
         </div>
       </div>
-      <p class="legend" style="margin-top:1.5rem"><strong>Modes &amp; severity.</strong> Critical rules (the unambiguous resource-exhaustion shapes) block even in <code>detect</code> mode; Standard rules log in detect and block only in <code>block</code> mode. This is why the recommended &ldquo;start in detect&rdquo; rollout never leaves you open to PHP2Shell during the first hours. Full directive and rule reference: <a href="/docs/configuration/">Configuration</a>.</p>
+      <p class="legend" style="margin-top:1.5rem"><strong>Modes &amp; severity.</strong> Critical rules (the unambiguous resource-exhaustion shapes) block even in <code>detect</code> mode; Standard rules log in detect and block only in <code>block</code> mode. This is why a &ldquo;start in detect&rdquo; rollout still refuses the critical resource-exhaustion shapes while you watch everything else. (Howdah does not claim to block CVE-2026-109618 on a stock configuration &mdash; see the <a href="/coverage/">coverage page</a> for exactly what was tested.) Full directive and rule reference: <a href="/docs/configuration/">Configuration</a>.</p>
     </div>
   </section>
 
@@ -155,7 +221,7 @@ const compare = [
           <p>Layer 2 has its own <code>inspect.mode</code>, which defaults to <code>detect</code> (log only). It is independent of the global <code>howdah.mode</code>: setting <code>howdah.mode = block</code> does <strong>not</strong> arm it. To block, an operator sets <code>inspect.mode</code>, or one class, to <code>block</code> explicitly.</p>
           <h3 style="margin-top:1.5rem">What a detection looks like</h3>
           <p>One JSON log line carrying the rule class, the source (<code>get</code>, <code>post</code>, <code>cookie</code> or <code>path</code>) and the variable name. The matched value is never logged.</p>
-          <pre tabindex="0" data-sample="event"><code>{`{"action":"log","client_ip":"203.0.113.7","layer":2,"method":"GET","reason":"sql_injection pattern in get variable 'q'","request_id":"1a2d239820e2f06bc","rule":"sql_injection","schema":2,"ts":"1792864974146","uri":"/index.php","version":"1.4.0"}`}</code></pre>
+          <pre tabindex="0" data-sample="event"><code>{`{"action":"log","client_ip":"203.0.113.7","layer":2,"method":"GET","reason":"sql_injection pattern in get variable 'q'","request_id":"1a2d239820e2f06bc","rule":"sql_injection","schema":2,"ts":"1792864974146","uri":"/index.php","version":"1.5.0"}`}</code></pre>
           <p class="legend">From a lab run (PHP 7.4, php-fpm, request <code>/index.php?q=' OR 1=1 --</code>). The query string is stripped from the logged <code>uri</code>; for a path detection the path itself is the logged URI. Every field: <a href="/docs/configuration/#log">event log reference</a>.</p>
         </div>
       </div>
@@ -165,14 +231,14 @@ const compare = [
 
   <section id="sinks" class="alt">
     <div class="wrap">
-      <h2>Layer 3 — the sinks Howdah guards <span class="pill ok">1.3 · log-only</span></h2>
-      <p>Layer 2 looks at request values. Layer 3 looks at what the application does with them: it guards dangerous PHP functions, called <em>sinks</em>, with a flat allowlist policy in the style of Snuffleupagus. Version 1.3 <strong>actively guards six sinks. It detects and logs; it does not block by default.</strong> This is sink hardening, not XSS or output inspection.</p>
+      <h2>Layer 3 — the sinks Howdah guards <span class="pill ok">since 1.2 · log-only</span></h2>
+      <p>Layer 2 looks at request values. Layer 3 looks at what the application does with them: it guards dangerous PHP functions, called <em>sinks</em>, with a flat allowlist policy in the style of Snuffleupagus. Howdah <strong>actively guards six core sinks, plus seven legacy sinks added in 1.5. It detects and logs; it does not block by default.</strong> This is sink hardening, not XSS or output inspection.</p>
       <div class="cols two" style="margin-top:1.5rem">
         <div>
-          <h3>Six active sinks</h3>
-          <div class="tablewrap" tabindex="0" role="region" aria-label="Layer 3 active sinks (scrolls sideways on narrow screens)">
+          <h3>The six core sinks</h3>
+          <div class="tablewrap" tabindex="0" role="region" aria-label="Layer 3 core sinks (scrolls sideways on narrow screens)">
             <table>
-              <caption class="sr-only">Layer 3 sinks guarded in 1.3</caption>
+              <caption class="sr-only">Layer 3 core sinks</caption>
               <thead><tr><th scope="col">Sink</th><th scope="col">Functions</th><th scope="col">Default</th></tr></thead>
               <tbody>
                 <tr><th scope="row">Command execution</th><td><code>system</code>, <code>exec</code>, <code>shell_exec</code>, <code>passthru</code>, <code>popen</code>, <code>proc_open</code></td><td>Logs when not allowlisted</td></tr>
@@ -185,6 +251,7 @@ const compare = [
             </table>
           </div>
           <p class="legend">Known limitation: <code>proc_open</code> with an array command (PHP 7.4+) is not inspected.</p>
+          <p class="legend"><strong>Seven legacy sinks (new in 1.5), all log-first:</strong> <code>mail_injection</code>, <code>preg_eval</code> (PHP 5.x), <code>create_function</code> and <code>assert_string</code> (5.x/7.x), <code>dangerous_callback</code>, <code>xxe</code> (with <code>[sinks.xml] external_entities</code>), and <code>tls_verify</code> (detect-only). See the <a href="/docs/configuration/#layer-3-sinks">configuration reference</a> for each one's PHP-version applicability and defaults.</p>
           <h3 style="margin-top:1.5rem">Coverage by PHP version</h3>
           <div class="tablewrap" tabindex="0" role="region" aria-label="Layer 3 coverage by PHP version (scrolls sideways on narrow screens)">
             <table>
@@ -286,14 +353,14 @@ const compare = [
           </li>
         ))}
       </ul>
-      <p class="legend">Linux x86_64 and aarch64, non-thread-safe builds. The exact per-architecture binaries available are whatever the release build produced — see the <a href="/install/">install picker</a> and the release assets.</p>
+      <p class="legend">Linux x86_64 and aarch64, non-thread-safe (NTS) builds &mdash; glibc for the broadest reach and musl for Alpine. Published as signed, SLSA-attested tarballs, apt/yum packages, and Docker images. The exact per-architecture binaries are whatever the release build produced &mdash; see the <a href="/install/">install picker</a> and the release assets.</p>
     </div>
   </section>
 
   <section id="compare" class="alt">
     <div class="wrap">
       <h2>How Howdah compares</h2>
-      <p>Howdah does one narrow thing well: it refuses resource-exhaustion request shapes from inside PHP, on versions nothing else still covers. It is not a general-purpose WAF. Here is where it sits among tools people reach for, as of {compareAsOf}.</p>
+      <p>Howdah does a narrow set of things well: request-shape limits that block, plus log-first input inspection, sink hardening and after-breach checks &mdash; all from inside PHP, on versions most tools no longer cover. It is not a general-purpose WAF. Here is where it sits among tools people reach for, as of {compareAsOf}.</p>
       <div class="tablewrap" tabindex="0" role="region" aria-label="Comparison with other tools (scrolls sideways on narrow screens)">
         <table>
           <caption class="sr-only">How Howdah compares with other PHP protection tools, as of {compareAsOf}</caption>
@@ -343,12 +410,32 @@ echo "deb [signed-by=/etc/apt/keyrings/howdah.asc] {PKG}/apt stable main" \
   | sudo tee /etc/apt/sources.list.d/howdah.list
 sudo apt-get update &amp;&amp; sudo apt-get install php8.1-howdah</code></pre>
       <p>On RHEL/CentOS/Alma (Remi layout) the package is <code>php81-howdah</code> via <code>yum</code>, with both package and metadata signatures enforced. Both package names, the exact <code>.repo</code> file, the signed-tarball path for other setups, and the verify/rollback steps are in the picker. Once it is installed, the config editor writes your <code>howdah.ini</code> and <code>howdah.toml</code> from a form and checks the TOML with the extension's own parser.</p>
-      <p><a class="btn primary" href="/install/">Open the install picker</a> <a class="btn ghost" href="/config/">Build your config file</a> <a class="btn ghost" href="/coverage/">Check your PHP version first</a></p>
+      <p>Prefer containers? Pull a ready-made image &mdash; Howdah is installed and enabled in detect mode:</p>
+      <pre tabindex="0"><code>docker pull ghcr.io/howdah/howdah:{shortVersion}-php8.3</code></pre>
+      <p>Images cover PHP 5.6&ndash;8.5 (Debian, amd64 + arm64); an <code>-alpine</code> variant covers PHP 7.2&ndash;8.5 (amd64). Or use a signed, SLSA-attested tarball for any other setup &mdash; every method is in the <a href="/install/#docker">install picker</a>.</p>
+      <div class="cta"><a class="btn primary" href="/install/">Open the install picker</a> <a class="btn ghost" href="/config/">Build your config file</a> <a class="btn ghost" href="/coverage/">Check your PHP version first</a></div>
     </div>
   </section>
 </Layout>
 
 <style>
+  /* "Where Howdah runs" inline-SVG diagram (theme-aware via the site tokens). */
+  .diagram { margin: 1.75rem 0 0; }
+  .diagram svg { width: 100%; height: auto; max-width: 760px; display: block; }
+  .diagram figcaption { font-size: .92rem; color: var(--muted); max-width: 48rem; margin-top: .85rem; }
+  .d-wkr { fill: var(--surface); stroke: var(--hot); stroke-width: 2; }
+  .d-ext { fill: none; stroke: var(--rule); stroke-width: 1.5; stroke-dasharray: 5 4; }
+  .d-chip { fill: var(--bg-2); stroke: var(--rule); stroke-width: 1; }
+  .d-chip-hot { fill: var(--hot-bg); stroke: var(--hot); stroke-width: 1.5; }
+  .d-flow { stroke: var(--muted); stroke-width: 1.5; fill: none; }
+  .d-flowfill { fill: var(--muted); }
+  .d-div { stroke: var(--rule); stroke-width: 1.5; stroke-dasharray: 3 3; }
+  .d-t { fill: var(--ink); font: 600 14px/1 var(--sans); }
+  .d-th { fill: var(--ink); font: 700 15px/1 var(--display); }
+  .d-tm { fill: var(--muted); font: 500 12.5px/1 var(--sans); }
+  .d-strong { font-weight: 700; }
+  .d-mono { font-family: var(--mono); font-size: 12px; }
+
   /* Four-layer diagram: a top-down stack the request flows through. */
   .layers { list-style: none; margin: 1.5rem 0 0; padding: 0; display: grid; gap: .6rem; counter-reset: none; }
   .layers > li { display: flex; gap: 1rem; align-items: flex-start; background: var(--surface); border: 1px solid var(--rule); border-left: 5px solid var(--rule); border-radius: 10px; padding: 1rem 1.2rem; }

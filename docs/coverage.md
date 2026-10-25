@@ -165,8 +165,9 @@ wrong and is why that runtime is not supported.
 Not covered by any row: LiteSpeed Enterprise, lsphp other than 8.3 and lsphp
 from LiteSpeed's rpm repository, Apache `mod_php` with the event or worker
 MPM, any ZTS build (see [zts.md](zts.md)), and aarch64 musl (there is no
-aarch64 musl build). The Alpine rows ran a musl build of the 1.4.0 source
-made locally; no release carried musl tarballs when they ran.
+aarch64 musl build). The Alpine rows first ran a locally-built musl build;
+from 1.5.0 the release carries signed musl tarballs and public `-alpine`
+Docker images for PHP 7.2-8.5 (x86_64).
 
 ## Honest caveats
 

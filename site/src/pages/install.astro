@@ -6,7 +6,7 @@ const MINORS = ['5.4','5.5','5.6','7.0','7.1','7.2','7.3','7.4','8.0','8.1','8.2
 ---
 <Layout
   title="Install Howdah — pick your OS, PHP and server"
-  description="Get the exact install, verify and rollback commands for Howdah on your OS, PHP version, PHP source and server type (FPM, Apache, CGI) — apt, yum, or a signed tarball."
+  description="Get the exact install, verify and rollback commands for Howdah on your OS, PHP version, PHP source and server type (FPM, Apache, CGI) — apt, yum, a signed tarball, or a public Docker image."
   path="/install/"
 >
   <div class="pagehead">
@@ -28,7 +28,7 @@ const MINORS = ['5.4','5.5','5.6','7.0','7.1','7.2','7.3','7.4','8.0','8.1','8.2
           <label><input type="radio" name="os" value="cpanel" /> cPanel (EasyApache 4) <small>cPanel's <code>ea-php</code> versions — installs with <b>dnf/yum</b> or <b>apt</b>, not the EasyApache 4 screen</small></label>
           <label><input type="radio" name="os" value="plesk" /> Plesk <small>Plesk's PHP versions in <code>/opt/plesk/php</code> — installs with <b>dnf/yum</b> or <b>apt</b></small></label>
           <label><input type="radio" name="os" value="cloudlinux" /> CloudLinux alt-php <small>PHP Selector versions in <code>/opt/alt</code> — installs with <b>yum</b></small></label>
-          <label><input type="radio" name="os" value="docker" /> Docker <small>The official <code>php</code> images — a ready <b>image</b>, or one <code>COPY --from</code> line in your own Dockerfile</small></label>
+          <label id="docker"><input type="radio" name="os" value="docker" /> Docker <small>The official <code>php</code> images — a ready <b>image</b>, or one <code>COPY --from</code> line in your own Dockerfile</small></label>
           <label><input type="radio" name="os" value="other" /> DirectAdmin / other <small>DirectAdmin CustomBuild, LiteSpeed lsphp, self-built PHP, older distros — install from the <b>signed tarball</b></small></label>
         </fieldset>
 
@@ -104,7 +104,7 @@ sudo systemctl reload php8.1-fpm</code></pre>
 
       <p id="layout-note" class="legend" hidden>These panel and distribution repositories are new and are published with the next release of the repositories. If the repository URL does not answer yet, use the signed tarball (<b>DirectAdmin / other</b> above); <code>howdah-check detect</code> names the right one either way. Paths, sources and what was tested: <a href="https://github.com/howdah/howdah/blob/main/docs/packaging-layouts.md">packaging layouts</a>.</p>
 
-      <p id="docker-note" class="legend" hidden>The images are published to <code>ghcr.io/howdah/howdah</code> by the project's Docker workflow, starting with the next release. Until the first publish, build the same image from a checkout of the repository: <code>docker buildx build -f docker/Dockerfile --build-arg HOWDAH_VERSION={VERSION} --build-arg PHP_MINOR=8.3 -t howdah:php8.3 .</code> Tags, Alpine, arm64, how to verify an image against the signed release, and what was tested: <a href="https://github.com/howdah/howdah/blob/main/docs/install-docker.md">Docker install guide</a>.</p>
+      <p id="docker-note" class="legend" hidden>The images are public at <code>ghcr.io/howdah/howdah</code>: pull <code>{VERSION}-php&lt;minor&gt;</code> (Debian, PHP&nbsp;5.6&ndash;8.5, amd64&nbsp;+&nbsp;arm64) or the <code>-alpine</code> variant (PHP&nbsp;7.2&ndash;8.5, amd64). Each image has Howdah installed and enabled in detect mode. Tags, the one-line <code>COPY --from</code> recipe for your own image, how to verify an image against the signed release, and what was tested: <a href="https://github.com/howdah/howdah/blob/main/docs/install-docker.md">Docker install guide</a>.</p>
 
       <div class="note" id="cgi-note" hidden>
         <h3>A note for php-cgi / FastCGI</h3>
@@ -276,7 +276,7 @@ sudo systemctl reload php8.1-fpm</code></pre>
             [`FROM ${img}`, 'COPY . /var/www/html']);
         }
         steps += step(sapi === 'apache' ? 'Add Howdah to your image' : 'Or add Howdah to your own image',
-          `One line copies the extension, its ini and <code>howdah-check</code> onto any official PHP ${minor} image (fpm, apache or cli). Not onto a <code>-zts</code> image; on an <code>-alpine</code> base use the <code>${VERSION}-php${minor}-alpine</code> tag.`,
+          `One line copies the extension, its ini and <code>howdah-check</code> onto any official PHP ${minor} image (fpm, apache or cli). Not onto a <code>-zts</code> image.` + (parseFloat(minor) >= 7.2 ? ` On an <code>-alpine</code> base use the <code>${VERSION}-php${minor}-alpine</code> tag.` : ` (No <code>-alpine</code> image for PHP ${minor} — the musl build needs PHP 7.2+; use the Debian image.)`),
           [`FROM ${base}`, `COPY --from=${img} /howdah/ /`]);
         steps += step('Verify it is loaded, then check it over HTTP', 'The web check sends two harmless requests to your site.',
           [`docker run --rm ${img} php --ri howdah     # Howdah => enabled, Mode => detect`,

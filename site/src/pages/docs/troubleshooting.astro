@@ -72,13 +72,16 @@ sudo dnf remove ea-php81-php-howdah    <span class="c"># or plesk-php81-howdah, 
         <dd>No. Upgrade PHP when you can. Howdah is for when you cannot, or until you can — especially on EOL PHP that will never get the official fix.</dd>
 
         <dt>Will it break my site?</dt>
-        <dd>It is designed to fail open: a bug in Howdah must never crash or wedge PHP. Start in <code>detect</code> mode, watch the logs, then move to <code>block</code>. The false-positive corpus (ordinary galleries, settings forms, nested arrays) passes with zero blocks at the default limits.</dd>
+        <dd>It is designed to fail open: the intent is that a bug in Howdah never crashes or wedges PHP. Start in <code>detect</code> mode, watch the logs, then move to <code>block</code>. The false-positive corpus (ordinary galleries, settings forms, nested arrays) passes with zero blocks at the default limits.</dd>
 
         <dt>Does it phone home or need a cloud service?</dt>
         <dd>No. Howdah runs entirely inside your PHP. It makes no outbound connections and needs no account or external service.</dd>
 
         <dt>Which PHP builds are supported?</dt>
-        <dd>Non-thread-safe (NTS) PHP 5.4 through 8.5 on Linux x86_64 and aarch64, one build per minor version. ZTS builds are not supported. See <a href="/coverage/">coverage</a> for what has been tested.</dd>
+        <dd>Non-thread-safe (NTS) PHP 5.4 through 8.5 on Linux x86_64 and aarch64, one build per minor version. ZTS builds are not supported. Howdah 1.5 ships glibc and musl builds, and public Docker images (Debian PHP 5.6&ndash;8.5; <code>-alpine</code> 7.2&ndash;8.5, amd64 only); see the <a href="/install/">install guide</a>. See <a href="/coverage/">coverage</a> for what has been tested.</dd>
+
+        <dt>How do I silence a known false positive?</dt>
+        <dd>Add a scoped <code>[[exceptions]]</code> entry (by script, parameter, URI prefix or client CIDR) with a <code>reason</code>, rather than turning the rule off. See <a href="/docs/configuration/">configuration</a>. Critical Layer 1 limits take no exception.</dd>
 
         <dt>What is the performance cost?</dt>
         <dd>Howdah counts parts and variables as PHP already parses them; there is no second parse of the body. It adds bounded bookkeeping per request and does not buffer the whole body itself. Measured on one machine, a request with no body took a few microseconds longer with Howdah loaded, and Layer 2 adds time in proportion to the form values it scans (tens of microseconds for a 1&nbsp;KB form). The numbers, the method and the OPcache JIT result are on the <a href="/docs/performance/">performance page</a>.</dd>

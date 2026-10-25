@@ -23,6 +23,7 @@
  * NTS only, like the rest of Howdah. The install is process-global (MINIT);
  * MSHUTDOWN restores the prior callback. */
 #include "main/php.h"
+#include <stdint.h>   /* uint32_t — PHP 5.4's headers do not pull it in transitively */
 #include <string.h>   /* strlen */
 #include <unistd.h>   /* _exit */
 #include <stdarg.h>

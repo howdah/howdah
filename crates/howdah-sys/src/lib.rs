@@ -132,6 +132,34 @@ extern "C" {
     /// already handles out-of-memory safely). Catches distro backports.
     pub fn howdah_memory_hard_limit_percent_exists() -> ::std::ffi::c_int;
 
+    /// Install the §4.1 raw-body hook (see `read_post_hook.c`): wrap
+    /// `sapi_module.read_post` so the raw body passes through `cb` (which feeds
+    /// the byte-stream scanner) before PHP parses it. `cb` returns 1 to stop the
+    /// body (Block) or 0 to continue. Call once at MINIT.
+    pub fn howdah_install_read_post_hook(cb: HowdahReadPostDecide);
+
+    /// Restore the `sapi_module.read_post` saved by `howdah_install_read_post_hook`.
+    /// No-op when not installed. Called from MSHUTDOWN.
+    pub fn howdah_uninstall_read_post_hook();
+
+    /// Clear the per-request "stop reading" latch. Called by the glue at request
+    /// begin so a block in one request does not wedge the next request's reads
+    /// on a persistent fpm/Apache worker.
+    pub fn howdah_read_post_reset();
+
+    /// PHP's effective PARSED `memory_limit` for this request in bytes
+    /// (`PG(memory_limit)`; `-1` = no limit). Not `zend_ini_long`, which would
+    /// misread the `128M` shorthand.
+    pub fn howdah_memory_limit() -> i64;
+
+    /// PHP's effective PARSED `post_max_size` for this request in bytes
+    /// (`SG(post_max_size)`; `0` = unlimited).
+    pub fn howdah_post_max_size() -> i64;
+
+    /// The request's `Content-Type` (`SG(request_info).content_type`;
+    /// NUL-terminated, or NULL). Engine-owned; never freed.
+    pub fn howdah_request_content_type() -> *const ::std::ffi::c_char;
+
     /// Build `$_SERVER` now if `auto_globals_jit` deferred it, so its variables
     /// pass through the chained `input_filter` before the script. No-op when it
     /// already exists.
@@ -171,6 +199,14 @@ pub type HowdahMailDecide = unsafe extern "C" fn(
 
 /// `howdah_sink_ssrf_armed`-shaped callback: 1 iff SSRF guarding is armed.
 pub type HowdahSsrfArmed = unsafe extern "C" fn(ctx: *mut ::std::ffi::c_void) -> ::std::ffi::c_int;
+
+/// The §4.1 read_post decide callback (see `read_post_hook.c`). Given the body
+/// bytes just read (`buf`/`len`), returns 1 to STOP the body (the byte-stream
+/// scanner decided Block) or 0 to continue reading.
+pub type HowdahReadPostDecide = unsafe extern "C" fn(
+    buf: *const ::std::ffi::c_char,
+    len: usize,
+) -> ::std::ffi::c_int;
 
 /// The out-of-memory backstop's decide callback (see `oom_hook.c`). `error_type`
 /// is PHP's `E_*` code, `msg` the rendered message (8.x) or `format` string

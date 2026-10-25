@@ -36,6 +36,7 @@ fn main() {
     println!("cargo:rerun-if-changed=refuse_hook.c");
     println!("cargo:rerun-if-changed=legacy_hook.c");
     println!("cargo:rerun-if-changed=oom_hook.c");
+    println!("cargo:rerun-if-changed=read_post_hook.c");
     println!("cargo:rerun-if-changed=howdah_sink.h");
     let mut shim = cc::Build::new();
     shim.file("shim.c")
@@ -45,6 +46,7 @@ fn main() {
         .file("refuse_hook.c")
         .file("legacy_hook.c")
         .file("oom_hook.c")
+        .file("read_post_hook.c")
         .warnings(false);
     for inc in includes.split_whitespace() {
         if let Some(dir) = inc.strip_prefix("-I") {

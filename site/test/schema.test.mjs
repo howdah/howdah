@@ -63,7 +63,7 @@ test('rules section covers the catalog with matching severities and a layer each
 test('every [limits] key documented in docs/config.md is in the schema with the same default', () => {
   const md = readFileSync(resolve(here, '../../docs/config.md'), 'utf8');
   const rows = [...md.matchAll(/^\| `(max_[a-z_]+)` \| ([^|]+?) \|/gm)];
-  assert.equal(rows.length, 12);
+  assert.equal(rows.length, 13);
   const units = { '256 MiB': 268435456 };
   for (const [, key, def] of rows) {
     const want = units[def.trim()] ?? Number(def.trim());

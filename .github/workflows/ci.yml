@@ -55,6 +55,9 @@ jobs:
       - name: Run the events target briefly (the interface the PHP glue uses)
         working-directory: fuzz
         run: cargo fuzz run events -- -runs=20000 -max_total_time=60
+      - name: Run the post-scan chunk-invariance target briefly (§4.2 scanner)
+        working-directory: fuzz
+        run: cargo fuzz run post_scan_diff -- -runs=20000 -max_total_time=60
 
   # Per-PR arm64 build smoke on the native arm64 runner (ubuntu-24.04-arm; QEMU
   # not used). Spans generations incl. PHP 5.x, the key open question for

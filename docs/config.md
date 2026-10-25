@@ -149,6 +149,13 @@ zero-block at every value below. See `docs/coverage.md` /
 | `max_input_key_bytes` | 1024 | same generous bound as field names: keys are identifiers |
 | `max_request_headers` | 200 | browsers send ~10–30 headers and proxies add a few; 200 is far beyond legitimate use (our 50-header corpus request passes) |
 | `max_request_header_bytes` | 16384 | 16 KiB tolerates large cookies and auth tokens in one header line (servers commonly cap a header line at 8–16 KiB) |
+| `max_nesting_levels` | 10000 | summed array-nesting levels across every variable/field/file name in one request (gap C); file names are weighted (PHP builds several metadata arrays per file). Bounds total array-building cost, which a flood of nested names drives up regardless of any one depth |
+
+`memory_ceiling_bytes` (default `0`) is a related `[limits]` key that overrides the
+§4.5 parse-memory estimate ceiling: `0` means automatic — the request's live
+`memory_limit / 4`, or a fixed fallback when `memory_limit = -1`; a byte value
+pins it. It is the one `[limits]` key whose `0` is valid (it selects the
+automatic ceiling).
 
 ## `[rules]` — per-rule mode and severity
 
@@ -157,7 +164,8 @@ Rule names: `max_parts`, `max_files`, `max_part_headers`, `max_part_header_bytes
 `max_field_name_len`, `max_filename_len`, `parse_memory_budget`,
 `malformed_multipart`, `upload_progress_abuse`, `self_test`, `max_input_vars`,
 `max_input_nesting_depth`, `max_input_key_bytes`, `max_request_headers`,
-`max_request_header_bytes`. (A few byte-limit **rule**
+`max_request_header_bytes`, `post_too_large`, `nesting_budget`,
+`parse_memory_estimate`. (A few byte-limit **rule**
 names end `_len` where the matching `[limits]` **directive** ends `_bytes`.)
 The core also accepts the Layer 2 and 3 names (`sql_injection`,
 `path_traversal`, `command_injection`, `command_exec`, `include`, `eval`,

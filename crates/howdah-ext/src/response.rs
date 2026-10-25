@@ -23,7 +23,9 @@ pub fn status_for_rule(rule: &str) -> c_int {
         "parse_memory_budget"
         | "max_part_header_bytes"
         | "max_field_name_len"
-        | "max_filename_len" => 413,
+        | "max_filename_len"
+        | "post_too_large"
+        | "parse_memory_estimate" => 413,
         _ => 403,
     }
 }

@@ -30,10 +30,7 @@ pub fn extract(content_type: &[u8]) -> Option<Vec<u8>> {
                 return (!val.is_empty()).then_some(val);
             }
         }
-        match tail {
-            Some(t) => rest = t,
-            None => return None,
-        }
+        rest = tail?; // no more parameters: the boundary was not found
     }
 }
 

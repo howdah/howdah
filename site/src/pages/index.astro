@@ -380,7 +380,7 @@ const aptLines = [
       <pre class="fold"><code>{aptLines.map((l) => <span class="l">{l}</span>)}</code></pre>
       <p>On RHEL/CentOS/Alma (Remi layout) the package is <code>php81-howdah</code> via <code>yum</code>, with both package and metadata signatures enforced. Both package names, the exact <code>.repo</code> file, the signed-tarball path for other setups, and the verify/rollback steps are in the picker. Once it is installed, the config editor writes your <code>howdah.ini</code> and <code>howdah.toml</code> from a form and checks the TOML with the extension's own parser.</p>
       <p>Prefer containers? Pull a ready-made image &mdash; Howdah is installed and enabled in detect mode:</p>
-      <pre class="fold hang"><code>docker pull ghcr.io/howdah/howdah:{shortVersion}-php8.3</code></pre>
+      <pre class="fold hang"><code>docker pull ghcr.io/howdah/howdah:{VERSION}-php8.3</code></pre>
       <p>Images cover PHP 5.6&ndash;8.5 (Debian, amd64 + arm64); an <code>-alpine</code> variant covers PHP 7.2&ndash;8.5 (amd64). Or use a signed, SLSA-attested tarball for any other setup &mdash; every method is in the <a href="/install/#docker">install picker</a>.</p>
       <div class="cta"><a class="btn primary" href="/install/">Open the install picker</a> <a class="btn ghost" href="/config/">Build your config file</a> <a class="btn ghost" href="/coverage/">Check your PHP version first</a></div>
     </div>

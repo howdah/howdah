@@ -1,0 +1,41 @@
+# CrowdSec parser for Howdah's event log (docs/log-schema.md, schema 2).
+# Install as /etc/crowdsec/parsers/s01-parse/howdah-logs.yaml.
+#
+# Reads both forms:
+#   - the file (howdah.log or [log] path), acquired with `labels: type: howdah`
+#     (acquis.d/howdah.yaml); the hub's non-syslog parser sets program to that
+#     type;
+#   - the syslog form (`howdah[pid]: {...}`) from your existing syslog
+#     acquisition; the hub's syslog-logs parser sets program to "howdah".
+# Fields are read by name, never by position, as the schema asks.
+#
+# Checked with CrowdSec v1.7.0 by lab/integration/log_consumers.sh.
+onsuccess: next_stage
+filter: "evt.Parsed.program == 'howdah' && evt.Parsed.message startsWith '{'"
+name: howdah/howdah-logs
+description: "Parse Howdah event log lines (JSON, schema 2)"
+statics:
+  # ts is epoch milliseconds; dateparse-enrich reads an epoch as seconds, so
+  # the event time is ts with a decimal point before the last three digits.
+  - parsed: ts_ms
+    expression: JsonExtract(evt.Parsed.message, "ts")
+  - target: evt.StrTime
+    expression: evt.Parsed.ts_ms[0:len(evt.Parsed.ts_ms)-3] + "." + evt.Parsed.ts_ms[len(evt.Parsed.ts_ms)-3:]
+  - meta: log_type
+    value: howdah
+  - meta: service
+    value: http
+  - meta: source_ip
+    expression: JsonExtract(evt.Parsed.message, "client_ip")
+  - meta: howdah_action
+    expression: JsonExtract(evt.Parsed.message, "action")
+  - meta: howdah_rule
+    expression: JsonExtract(evt.Parsed.message, "rule")
+  - meta: howdah_layer
+    expression: JsonExtract(evt.Parsed.message, "layer")
+  - meta: http_verb
+    expression: JsonExtract(evt.Parsed.message, "method")
+  - meta: http_path
+    expression: JsonExtract(evt.Parsed.message, "uri")
+  - parsed: request_id
+    expression: JsonExtract(evt.Parsed.message, "request_id")

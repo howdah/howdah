@@ -1,0 +1,26 @@
+# CrowdSec scenario: one address that Howdah refused three times in a few
+# minutes. Install as /etc/crowdsec/scenarios/howdah-blocked.yaml, with the
+# parser in parsers/s01-parse/. A decision from it is applied by whatever
+# remediation component (bouncer) you run; this file only raises the alert.
+#
+# Only "action":"block" lines count. "log" lines (detect mode, observe's
+# "proposed: " lines) and "excepted" lines never do: a detect-mode rule is
+# not tuned to be a ban signal, so arm the rule in Howdah once it is tuned.
+# Lines without a client address (the command line) never count.
+#
+# Checked with CrowdSec v1.7.0 by lab/integration/log_consumers.sh.
+type: leaky
+name: howdah/howdah-blocked
+description: "Requests that Howdah refused, repeatedly, from one address"
+filter: "evt.Meta.log_type == 'howdah' && evt.Meta.howdah_action == 'block' && evt.Meta.source_ip != ''"
+groupby: evt.Meta.source_ip
+capacity: 2
+leakspeed: 3m
+blackhole: 5m
+labels:
+  service: http
+  remediation: true
+  confidence: 2
+  spoofable: 0
+  behavior: "http:exploit"
+  label: "Requests refused by Howdah"

@@ -1,0 +1,8 @@
+# CrowdSec acquisition for Howdah's event log file. Install as
+# /etc/crowdsec/acquis.d/howdah.yaml; the path must match howdah.log or
+# [log] path. Not needed for [log] destination = "syslog": your syslog
+# acquisition already reads those lines.
+filenames:
+  - /var/log/howdah/events.log
+labels:
+  type: howdah

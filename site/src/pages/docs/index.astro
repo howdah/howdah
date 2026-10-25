@@ -22,6 +22,7 @@ import { REPO } from '../../lib/site';
         <li><a class="card" href="/install/"><h3>Install &amp; verify</h3><p>The picker builds the exact apt/yum/tarball commands for your OS, PHP source, version and server type, with verify and rollback.</p></a></li>
         <li><a class="card" href="/docs/configuration/"><h3>Configuration &amp; rules</h3><p>The TOML file, every <code>howdah.*</code> setting, the Layer-1 and Layer-2 rule reference with defaults and severity, and the JSON log format.</p></a></li>
         <li><a class="card" href="/config/"><h3>Config editor</h3><p>Build <code>howdah.ini</code> and <code>howdah.toml</code> from a form, validated by the extension's own parser, then copy, download or fetch the file with <code>curl</code>.</p></a></li>
+        <li><a class="card" href="/docs/integrations/"><h3>Log integrations</h3><p>Ban addresses Howdah refused with fail2ban or CrowdSec, alert in Wazuh or Loki, and log the real client address behind a proxy. Every file was run in the real tool.</p></a></li>
         <li><a class="card" href="/docs/troubleshooting/"><h3>Troubleshooting &amp; FAQ</h3><p>&ldquo;Loaded in CLI but not FPM&rdquo;, detect vs block, upgrading and uninstalling, and common questions.</p></a></li>
         <li><a class="card" href="/coverage/"><h3>Coverage</h3><p>Exactly which PHP versions and server types have been tested, generated from the lab matrix.</p></a></li>
         <li><a class="card" href="/docs/compliance/"><h3>Compliance evidence</h3><p>PCI DSS 6.4.2 bullet by bullet, the log fields and retention setup to hand an assessor, a decision-record template, and how to answer end-of-life questions.</p></a></li>
@@ -33,6 +34,7 @@ import { REPO } from '../../lib/site';
       <p>The documentation on this site is drawn from the source-of-truth docs in the repository, which are versioned with the code:</p>
       <ul class="facts">
         <li><a href={`${REPO}/blob/main/docs/config.md`}>docs/config.md</a> — configuration and rule reference</li>
+        <li><a href={`${REPO}/tree/main/docs/integrations`}>docs/integrations/</a> — fail2ban, CrowdSec, Wazuh and Promtail files for the event log, and the proxy client-address setup</li>
         <li><a href={`${REPO}/blob/main/docs/exceptions.md`}>docs/exceptions.md</a> — scoped <code>[[exceptions]]</code>: from a log line to an entry, with the reason as the audit record</li>
         <li><a href={`${REPO}/tree/main/profiles`}>profiles/</a> — application profiles (WordPress, Drupal 7, Magento 1 and 2, Joomla, PrestaShop 1.6): starting points, never applied automatically</li>
         <li><a href={`${REPO}/blob/main/docs/coverage.md`}>docs/coverage.md</a> — coverage in prose</li>

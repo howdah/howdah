@@ -256,6 +256,7 @@ syslog_ident = "howdah"         # for "syslog": the tag
 # /usr/local/sbin/howdah-alert (root:root, mode 0755)
 [ "$HOWDAH_ACTION" = block ] || exit 0
 exec curl -fsS -m 5 -H 'Content-Type: application/json' --data-binary @- https://hooks.example.com/howdah`}</code></pre>
+      <p>Do not use it to ban addresses. The PHP worker user must not be able to change the firewall; let a <a href="/docs/integrations/">log reader such as fail2ban or CrowdSec</a> do that with its own privileges.</p>
       <div class="note">
         <h3>Security caveat</h3>
         <p>The program runs as the PHP worker user, whenever an attacker trips a rule. Keep it quick, owned by root and not writable by the PHP user (Howdah refuses a group- or world-writable one, but accepts one the PHP user owns, which a compromised application could rewrite). Treat its input as untrusted: the path and the names in <code>reason</code> come from the request. Starting a process from PHP is safe on the single-threaded (NTS) SAPIs Howdah supports, php-fpm, Apache mod_php with prefork, CGI and the CLI; <code>lab/integration/log_contract.sh</code> tests the built-in server, php-fpm and Apache prefork on PHP 7.4 and 8.3. Threaded (ZTS) PHP is not supported by Howdah at all.</p>
@@ -285,6 +286,7 @@ exec curl -fsS -m 5 -H 'Content-Type: application/json' --data-binary @- https:/
           source: ts
           format: UnixMs`}</code></pre>
       <p class="legend">Not tested: other SIEMs, Promtail's journal and syslog targets, and Grafana Alloy. Howdah itself sends nothing over the network.</p>
+      <p>To ban addresses that Howdah refused, with fail2ban or CrowdSec, and to log the real client address behind a proxy, see <a href="/docs/integrations/">log integrations</a>.</p>
     </div>
   </section>
 </Layout>

@@ -1,0 +1,237 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { REPO } from '../../lib/site';
+// The files below are the ones in docs/integrations/ that
+// lab/integration/log_consumers.sh runs in the real tools; the page shows them
+// without their header comments, so it cannot drift from what was tested.
+import f2bFilterRaw from '../../../../docs/integrations/fail2ban/filter.d/howdah.conf?raw';
+import f2bJailRaw from '../../../../docs/integrations/fail2ban/jail.d/howdah.conf?raw';
+import csParserRaw from '../../../../docs/integrations/crowdsec/parsers/s01-parse/howdah-logs.yaml?raw';
+import csScenarioRaw from '../../../../docs/integrations/crowdsec/scenarios/howdah-blocked.yaml?raw';
+import csAcquisRaw from '../../../../docs/integrations/crowdsec/acquis.d/howdah.yaml?raw';
+
+const body = (text: string) => text.replace(/^(#[^\n]*\n)+\n*/, '').trimEnd();
+const f2bFilter = body(f2bFilterRaw);
+const f2bJail = body(f2bJailRaw);
+const csParser = body(csParserRaw);
+const csScenario = body(csScenarioRaw);
+const csAcquis = body(csAcquisRaw);
+
+const INT = `${REPO}/tree/main/docs/integrations`;
+const README = `${REPO}/blob/main/docs/integrations/README.md`;
+const LAB = `${REPO}/blob/main/lab/integration/log_consumers.sh`;
+
+const nginx = String.raw`set_real_ip_from 10.0.0.5;      # your proxy or load balancer; never 0.0.0.0/0
+real_ip_header X-Forwarded-For;
+real_ip_recursive on;`;
+const apache = String.raw`RemoteIPHeader X-Forwarded-For
+RemoteIPInternalProxy 10.0.0.5`;
+const f2bInstall = String.raw`sudo cp filter.d/howdah.conf /etc/fail2ban/filter.d/
+sudo cp jail.d/howdah.conf /etc/fail2ban/jail.d/
+sudo fail2ban-regex /var/log/howdah/events.log /etc/fail2ban/filter.d/howdah.conf
+sudo fail2ban-client reload
+sudo fail2ban-client status howdah`;
+const csInstall = String.raw`sudo cp parsers/s01-parse/howdah-logs.yaml /etc/crowdsec/parsers/s01-parse/
+sudo cp scenarios/howdah-blocked.yaml /etc/crowdsec/scenarios/
+sudo cp acquis.d/howdah.yaml /etc/crowdsec/acquis.d/
+sudo cscli explain --file /var/log/howdah/events.log --type howdah
+sudo systemctl reload crowdsec
+sudo cscli decisions list`;
+---
+<Layout
+  title="Use Howdah's event log with fail2ban, CrowdSec and SIEMs"
+  description="Turn requests Howdah refused into firewall bans with fail2ban or CrowdSec, alert on them in Wazuh or Loki, and log the real client address behind a proxy. Every file was run against real event lines."
+  path="/docs/integrations/"
+>
+  <div class="pagehead">
+    <div class="wrap">
+      <p class="crumbs"><a href="/">Home</a> / <a href="/docs/">Docs</a> / <span aria-current="page">Log integrations</span></p>
+      <h1>Use the event log with other tools</h1>
+      <p class="lede">Howdah writes one JSON line per event. fail2ban or CrowdSec can turn repeated refusals from one address into a firewall ban, and a SIEM can alert on them. Each file on this page was run against real event lines in the real tool.</p>
+    </div>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <div class="note" role="note" aria-labelledby="scope-heading">
+        <h3 id="scope-heading">Before you start</h3>
+        <ul>
+          <li><strong>Only refusals lead to a ban.</strong> A line counts when Howdah refused the request or denied the call (<code>"action":"block"</code>). Detect-mode lines, observe's <code>proposed:</code> lines and <code>excepted</code> lines never count.</li>
+          <li><strong>Howdah never touches the firewall</strong> and sends nothing over the network. The tool that reads the log bans, with its own privileges.</li>
+          <li><strong>Behind a proxy, fix the client address first</strong>, or you ban the proxy and with it every visitor.</li>
+          <li><strong>The log is only as trustworthy as the PHP worker.</strong> Howdah writes the log from the worker, so code that runs as the worker user after a compromise can add lines and get any address banned. Keep the addresses you must never lose, such as your office and your monitoring, in <code>ignoreip</code> or a CrowdSec allowlist, and keep ban times bounded.</li>
+        </ul>
+      </div>
+
+      <figure class="diagram">
+        <svg class="d-wide" viewBox="0 0 760 232" role="img" aria-labelledby="int-title int-desc">
+          <title id="int-title">From an event line to a ban</title>
+          <desc id="int-desc">Howdah, inside the PHP worker, writes one line per event to a file or syslog. fail2ban and CrowdSec read block lines and ban the address through the firewall or a bouncer. Wazuh and Loki read every line for alerts and search.</desc>
+          <defs>
+            <marker id="int-arrow" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" class="d-flowfill"/></marker>
+          </defs>
+          <rect x="4" y="84" width="170" height="64" rx="10" class="d-wkr"/>
+          <text x="89" y="111" text-anchor="middle" class="d-th">PHP worker</text>
+          <text x="89" y="132" text-anchor="middle" class="d-tm">Howdah writes a line</text>
+          <line x1="174" y1="116" x2="204" y2="116" class="d-flow" marker-end="url(#int-arrow)"/>
+          <rect x="210" y="84" width="150" height="64" rx="9" class="d-chip"/>
+          <text x="285" y="111" text-anchor="middle" class="d-t">Event log</text>
+          <text x="285" y="132" text-anchor="middle" class="d-tm">file or syslog</text>
+          <line x1="360" y1="116" x2="402" y2="48" class="d-flow" marker-end="url(#int-arrow)"/>
+          <line x1="360" y1="116" x2="402" y2="116" class="d-flow" marker-end="url(#int-arrow)"/>
+          <line x1="360" y1="116" x2="402" y2="184" class="d-flow" marker-end="url(#int-arrow)"/>
+          <rect x="408" y="20" width="158" height="56" rx="9" class="d-chip d-chip-hot"/>
+          <text x="487" y="44" text-anchor="middle" class="d-t">fail2ban</text>
+          <text x="487" y="63" text-anchor="middle" class="d-tm">block lines only</text>
+          <rect x="408" y="88" width="158" height="56" rx="9" class="d-chip d-chip-hot"/>
+          <text x="487" y="112" text-anchor="middle" class="d-t">CrowdSec</text>
+          <text x="487" y="131" text-anchor="middle" class="d-tm">block lines only</text>
+          <rect x="408" y="156" width="158" height="56" rx="9" class="d-chip"/>
+          <text x="487" y="180" text-anchor="middle" class="d-t">Wazuh, Loki</text>
+          <text x="487" y="199" text-anchor="middle" class="d-tm">every line</text>
+          <line x1="566" y1="48" x2="598" y2="48" class="d-flow" marker-end="url(#int-arrow)"/>
+          <line x1="566" y1="116" x2="598" y2="116" class="d-flow" marker-end="url(#int-arrow)"/>
+          <line x1="566" y1="184" x2="598" y2="184" class="d-flow" marker-end="url(#int-arrow)"/>
+          <rect x="604" y="20" width="152" height="56" rx="9" class="d-ext"/>
+          <text x="680" y="44" text-anchor="middle" class="d-t">Firewall ban</text>
+          <text x="680" y="63" text-anchor="middle" class="d-tm">from the jail</text>
+          <rect x="604" y="88" width="152" height="56" rx="9" class="d-ext"/>
+          <text x="680" y="112" text-anchor="middle" class="d-t">Bouncer ban</text>
+          <text x="680" y="131" text-anchor="middle" class="d-tm">from a decision</text>
+          <rect x="604" y="156" width="152" height="56" rx="9" class="d-ext"/>
+          <text x="680" y="180" text-anchor="middle" class="d-t">Alerts, search</text>
+          <text x="680" y="199" text-anchor="middle" class="d-tm">in your SIEM</text>
+        </svg>
+        <svg class="d-tall" viewBox="0 0 360 324" role="img" aria-labelledby="int-title-m int-desc-m">
+          <title id="int-title-m">From an event line to a ban</title>
+          <desc id="int-desc-m">Howdah, inside the PHP worker, writes one line per event to a file or syslog. fail2ban and CrowdSec read block lines and ban the address through the firewall or a bouncer. Wazuh and Loki read every line for alerts and search.</desc>
+          <defs>
+            <marker id="int-arrow-m" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" class="d-flowfill"/></marker>
+          </defs>
+          <rect x="40" y="4" width="280" height="58" rx="10" class="d-wkr"/>
+          <text x="180" y="28" text-anchor="middle" class="d-th">PHP worker</text>
+          <text x="180" y="48" text-anchor="middle" class="d-tm">Howdah writes a line per event</text>
+          <line x1="180" y1="62" x2="180" y2="84" class="d-flow" marker-end="url(#int-arrow-m)"/>
+          <rect x="80" y="90" width="200" height="52" rx="9" class="d-chip"/>
+          <text x="180" y="112" text-anchor="middle" class="d-t">Event log</text>
+          <text x="180" y="130" text-anchor="middle" class="d-tm">file or syslog</text>
+          <line x1="180" y1="142" x2="64" y2="178" class="d-flow" marker-end="url(#int-arrow-m)"/>
+          <line x1="180" y1="142" x2="180" y2="178" class="d-flow" marker-end="url(#int-arrow-m)"/>
+          <line x1="180" y1="142" x2="296" y2="178" class="d-flow" marker-end="url(#int-arrow-m)"/>
+          <rect x="8" y="184" width="108" height="52" rx="9" class="d-chip d-chip-hot"/>
+          <text x="62" y="206" text-anchor="middle" class="d-t">fail2ban</text>
+          <text x="62" y="224" text-anchor="middle" class="d-tm">block lines</text>
+          <rect x="126" y="184" width="108" height="52" rx="9" class="d-chip d-chip-hot"/>
+          <text x="180" y="206" text-anchor="middle" class="d-t">CrowdSec</text>
+          <text x="180" y="224" text-anchor="middle" class="d-tm">block lines</text>
+          <rect x="244" y="184" width="108" height="52" rx="9" class="d-chip"/>
+          <text x="298" y="206" text-anchor="middle" class="d-t">Wazuh, Loki</text>
+          <text x="298" y="224" text-anchor="middle" class="d-tm">every line</text>
+          <line x1="62" y1="236" x2="62" y2="260" class="d-flow" marker-end="url(#int-arrow-m)"/>
+          <line x1="180" y1="236" x2="180" y2="260" class="d-flow" marker-end="url(#int-arrow-m)"/>
+          <line x1="298" y1="236" x2="298" y2="260" class="d-flow" marker-end="url(#int-arrow-m)"/>
+          <rect x="8" y="266" width="108" height="52" rx="9" class="d-ext"/>
+          <text x="62" y="288" text-anchor="middle" class="d-t">Firewall</text>
+          <text x="62" y="306" text-anchor="middle" class="d-tm">ban</text>
+          <rect x="126" y="266" width="108" height="52" rx="9" class="d-ext"/>
+          <text x="180" y="288" text-anchor="middle" class="d-t">Bouncer</text>
+          <text x="180" y="306" text-anchor="middle" class="d-tm">ban</text>
+          <rect x="244" y="266" width="108" height="52" rx="9" class="d-ext"/>
+          <text x="298" y="288" text-anchor="middle" class="d-t">Alerts</text>
+          <text x="298" y="306" text-anchor="middle" class="d-tm">and search</text>
+        </svg>
+        <figcaption>Howdah only writes the line. The reader bans with its own privileges, so the PHP worker never needs any right over the firewall.</figcaption>
+      </figure>
+
+      <h2 id="client-address">First: the client address behind a proxy</h2>
+      <p><code>client_ip</code> is <code>REMOTE_ADDR</code> as PHP's server API reports it. Howdah never reads <code>X-Forwarded-For</code>, because a client can set that header to anything. Behind a reverse proxy, load balancer or CDN, <code>REMOTE_ADDR</code> is the proxy's address.</p>
+      <p>Restore the client address in the web server, trusting only your own proxy. nginx in front of php-fpm:</p>
+      <pre tabindex="0"><code>{nginx}</code></pre>
+      <p>Apache with mod_php (enable the module with <code>a2enmod remoteip</code> on Debian and Ubuntu):</p>
+      <pre tabindex="0"><code>{apache}</code></pre>
+      <p>The lab checked both. With the module, a request from the trusted hop logs the forwarded address. A request from any other address keeps its own, whatever <code>X-Forwarded-For</code> it sends. Without the module, <code>client_ip</code> is the hop. Also put the proxy in the ban tool's ignore list.</p>
+
+      <h2 id="fail2ban">fail2ban</h2>
+      <p>The jail bans an address for an hour after 3 refused requests within 10 minutes, using your default <code>banaction</code>. Set <code>logpath</code> if your log is not <code>/var/log/howdah/events.log</code>, and run the filter against your own log before you reload. From <a href={`${INT}/fail2ban`}>docs/integrations/fail2ban</a>:</p>
+      <pre tabindex="0"><code>{f2bInstall}</code></pre>
+      <p><code>filter.d/howdah.conf</code> reads the keys in any order. A request cannot plant a match inside a value, because Howdah writes a quote inside a value as <code>\"</code>.</p>
+      <pre tabindex="0"><code>{f2bFilter}</code></pre>
+      <p><code>jail.d/howdah.conf</code>. Its <code>ignoreip</code> replaces any <code>[DEFAULT]</code> one, so add your proxies there and repeat your existing entries:</p>
+      <pre tabindex="0"><code>{f2bJail}</code></pre>
+      <p>With <code>[log] destination = "syslog"</code>, point <code>logpath</code> at the file your syslog daemon writes, such as <code>/var/log/syslog</code>. The filter matches the JSON inside those lines too.</p>
+
+      <h2 id="crowdsec">CrowdSec</h2>
+      <p>A parser, a scenario and the file acquisition, from <a href={`${INT}/crowdsec`}>docs/integrations/crowdsec</a>. Set the path in the acquisition file, check the parse, then reload:</p>
+      <pre tabindex="0"><code>{csInstall}</code></pre>
+      <p>The parser reads each field by name, takes the event time from <code>ts</code> and sets <code>source_ip</code> from <code>client_ip</code>:</p>
+      <pre tabindex="0"><code>{csParser}</code></pre>
+      <p>The scenario is a leaky bucket per address, so 3 refused requests in quick succession raise an alert. Your profiles turn the alert into a decision (the default profile bans for 4 hours), and a remediation component (bouncer) applies it:</p>
+      <pre tabindex="0"><code>{csScenario}</code></pre>
+      <p>The acquisition, for the event file:</p>
+      <pre tabindex="0"><code>{csAcquis}</code></pre>
+      <p>With <code>[log] destination = "syslog"</code>, leave the acquisition file out: your syslog acquisition already reads the lines, and the hub's <code>syslog-logs</code> parser hands them to this one. CrowdSec's <code>crowdsecurity/whitelists</code> parser ignores private and loopback addresses, so this scenario never bans an address in a private range, including an attacker inside your own network.</p>
+
+      <h2 id="siem">Wazuh and Loki</h2>
+      <p>For alerts and search rather than bans, the configuration page has a <a href="/docs/configuration/#siem">Wazuh decoder and rules and a Promtail pipeline</a>. Wazuh raises level 10 for <code>block</code> and 5 for <code>log</code>. Promtail labels <code>rule</code>, <code>action</code> and <code>layer</code>. Both are run in the real tools by <code>lab/integration/siem_snippets.sh</code>.</p>
+
+      <h2 id="exec">Why not the exec hook?</h2>
+      <p><code>[log] exec</code> runs a program for each event as the PHP worker user. That user must not be able to change the firewall. Use the hook for notifications, such as a webhook or a chat message, and let a log reader with its own privileges do the banning.</p>
+
+      <h2 id="tested">How it was tested</h2>
+      <p><a href={LAB}>lab/integration/log_consumers.sh</a> runs Howdah 1.5.0 on PHP 8.3 under php-fpm behind nginx, and under Apache mod_php. It sends a known mix of requests from documentation addresses:</p>
+      <ul class="facts">
+        <li>4 refused requests from one address,</li>
+        <li>5 detect-mode findings from another,</li>
+        <li>4 findings an exception turned off, logged as <code>excepted</code>,</li>
+        <li>4 hits on a script that Layer 4 observe logs as <code>proposed</code>,</li>
+        <li>4 refused requests whose variable name tries to forge <code>"client_ip":"192.0.2.66"</code>,</li>
+        <li>and refused requests through a hop with no real-IP setup and from an untrusted hop.</li>
+      </ul>
+      <p>It then feeds the 33 real event lines it captured to each tool. All 23 checks passed:</p>
+      <div class="tablewrap" tabindex="0" role="region" aria-label="What the lab checked (scrolls sideways on narrow screens)">
+        <table>
+          <caption class="sr-only">What the log-consumer lab checked, per tool</caption>
+          <thead><tr><th scope="col">Tool</th><th scope="col">Version</th><th scope="col">Checked</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">nginx realip</th><td>1.27</td><td>A trusted hop logs the forwarded address; an untrusted hop keeps its own; without realip, <code>client_ip</code> is the hop and <code>X-Forwarded-For</code> appears in no line</td></tr>
+            <tr><th scope="row">Apache mod_remoteip</th><td>2.4</td><td>The same three cases, with mod_php</td></tr>
+            <tr><th scope="row">fail2ban</th><td>1.1.0</td><td><code>fail2ban-regex</code> matches exactly the 16 block lines, in the file and in two syslog forms; a running jail bans exactly the two outside addresses with 3 or more blocks</td></tr>
+            <tr><th scope="row">CrowdSec</th><td>v1.7.0</td><td>All 33 lines parse, in the file and in two syslog forms; a running agent makes ban decisions for exactly those two addresses</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Neither tool banned the detect-mode, excepted, proposed or forged addresses. fail2ban ignored the loopback hop through <code>ignoreip</code>, and CrowdSec through its whitelist.</p>
+
+      <h2 id="not-covered">Not covered</h2>
+      <ul class="facts">
+        <li><strong>The ban itself.</strong> fail2ban ran with its <code>dummy</code> action, because a container has no firewall to change, and no CrowdSec bouncer was installed. The lab checks who would be banned, not the firewall rule.</li>
+        <li><strong>The syslog forms were built by the lab</strong> by adding rsyslog's traditional and RFC 3339 prefixes to the captured lines. fail2ban's journal backend (<code>backend = systemd</code>) was not tested.</li>
+        <li><strong>IPv6 client addresses</strong> and CDN headers such as <code>CF-Connecting-IP</code> were not tested.</li>
+        <li><strong>One PHP version.</strong> The lab ran on PHP 8.3 only.</li>
+        <li><strong>Other tools.</strong> Splunk, Elastic, Graylog and Sentinel have no tested snippet. The line is plain JSON, so their generic JSON input should work, but we have not checked any of them.</li>
+      </ul>
+      <p>The full notes are in <a href={README}>docs/integrations/README.md</a>, and the line format is in <a href={`${REPO}/blob/main/docs/log-schema.md`}>docs/log-schema.md</a>.</p>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .diagram { margin: 1.75rem 0 0; }
+  .diagram svg { width: 100%; height: auto; display: block; }
+  .diagram .d-wide { max-width: 760px; }
+  .diagram .d-tall { display: none; max-width: 360px; margin: 0 auto; }
+  @media (max-width: 640px) {
+    .diagram .d-wide { display: none; }
+    .diagram .d-tall { display: block; }
+  }
+  .diagram figcaption { font-size: .92rem; color: var(--muted); max-width: 48rem; margin-top: .85rem; }
+  .d-wkr { fill: var(--surface); stroke: var(--hot); stroke-width: 2; }
+  .d-ext { fill: none; stroke: var(--rule); stroke-width: 1.5; stroke-dasharray: 5 4; }
+  .d-chip { fill: var(--bg-2); stroke: var(--rule); stroke-width: 1; }
+  .d-chip-hot { fill: var(--hot-bg); stroke: var(--hot); stroke-width: 1.5; }
+  .d-flow { stroke: var(--muted); stroke-width: 1.5; fill: none; }
+  .d-flowfill { fill: var(--muted); }
+  .d-t { fill: var(--ink); font: 600 14px/1 var(--sans); }
+  .d-th { fill: var(--ink); font: 700 15px/1 var(--display); }
+  .d-tm { fill: var(--muted); font: 500 12.5px/1 var(--sans); }
+</style>

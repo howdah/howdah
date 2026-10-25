@@ -120,3 +120,75 @@ test('the Wazuh decoder and rules are well-formed and use real fields', () => {
   const decoder = dec.slice(dec.indexOf('<decoder')).trimEnd();
   assert.ok(page.includes(decoder), 'configuration.astro Wazuh decoder differs from the tested file');
 });
+
+/** fail2ban's INI dialect: [section], key = value, comment lines start with # or ;. */
+function ini(text) {
+  const out = {};
+  let sec = null;
+  for (const line of text.split('\n')) {
+    if (!line.trim() || /^\s*[#;]/.test(line)) continue;
+    const s = line.match(/^\[(.+)\]\s*$/);
+    if (s) { sec = out[s[1]] = {}; continue; }
+    const kv = line.match(/^(\w[\w.]*)\s*=\s*(.*)$/);
+    assert.ok(kv && sec, `unparsed line: ${line}`);
+    sec[kv[1]] = kv[2];
+  }
+  return out;
+}
+
+/** An event line as log.rs writes it (sorted keys), from overrides. */
+function eventLine(over = {}, order = (k) => k.sort()) {
+  const v = { action: 'block', client_ip: '198.51.100.9', layer: 1, method: 'POST', reason: 'input variable count exceeds limit',
+    request_id: '1fa7c36ea3c170856', rule: 'max_input_vars', schema: 2, ts: '1792894237549', uri: '/index.php', version: '1.5.0', ...over };
+  return '{' + order(Object.keys(v)).map((k) => `${JSON.stringify(k)}:${JSON.stringify(v[k])}`).join(',') + '}';
+}
+
+test('the fail2ban filter and jail parse, use real fields, and match block lines only', () => {
+  const filter = ini(read('docs/integrations/fail2ban/filter.d/howdah.conf')).Definition;
+  for (const [, f] of filter.failregex.matchAll(/"(\w+)":/g)) assert.ok(FIELDS.includes(f), `failregex: ${f} is not a field`);
+  assert.equal(filter.datepattern, '"ts":"{LEPOCH}"');
+  // The same regex in JS (fail2ban's <ADDR> is an IPv4 or IPv6 address).
+  const re = new RegExp(filter.failregex.replace('<ADDR>', '(?<ip>[0-9A-Fa-f.:]+)'));
+  const ip = (line) => line.match(re)?.groups.ip ?? null;
+  checkLine(eventLine(), 'fail2ban fixture');
+  assert.equal(ip(eventLine()), '198.51.100.9');
+  assert.equal(ip(eventLine({}, (k) => k.sort().reverse())), '198.51.100.9', 'key order must not matter');
+  assert.equal(ip(`Oct 24 18:02:54 web1 howdah[1429]: ${eventLine()}`), '198.51.100.9', 'syslog form');
+  assert.equal(ip(eventLine({ action: 'log', layer: 2, rule: 'sql_injection' })), null, 'log line');
+  assert.equal(ip(eventLine({ action: 'excepted', layer: 2, rule: 'sql_injection' })), null, 'excepted line');
+  assert.equal(ip(eventLine({ action: 'log', layer: 4, rule: 'unexpected_binary', reason: 'proposed: true' })), null, 'proposed line');
+  assert.equal(ip(eventLine({ client_ip: '' })), null, 'no client address');
+  // A value cannot plant a key: the forged text is escaped, so the real address wins.
+  const forged = eventLine({ layer: 2, rule: 'command_injection', reason: `command_injection pattern in post variable 'a"client_ip":"192.0.2.66"'` });
+  assert.equal(ip(forged), '198.51.100.9');
+  assert.equal(ip(eventLine({ action: 'log', reason: `x "action":"block","client_ip":"192.0.2.66"` })), null, 'forged action');
+  const jail = ini(read('docs/integrations/fail2ban/jail.d/howdah.conf')).howdah;
+  assert.deepEqual(
+    { enabled: jail.enabled, filter: jail.filter, logpath: jail.logpath, maxretry: jail.maxretry, findtime: jail.findtime, bantime: jail.bantime },
+    { enabled: 'true', filter: 'howdah', logpath: '/var/log/howdah/events.log', maxretry: '3', findtime: '10m', bantime: '1h' });
+});
+
+test('the CrowdSec parser, scenario and acquisition parse and use real fields', () => {
+  const parser = yaml.load(read('docs/integrations/crowdsec/parsers/s01-parse/howdah-logs.yaml'));
+  const scenario = yaml.load(read('docs/integrations/crowdsec/scenarios/howdah-blocked.yaml'));
+  const acquis = yaml.load(read('docs/integrations/crowdsec/acquis.d/howdah.yaml'));
+  assert.match(parser.filter, /evt\.Parsed\.program == 'howdah'/);
+  const meta = {};
+  for (const s of parser.statics) {
+    for (const [, f] of (s.expression ?? '').matchAll(/JsonExtract\(evt\.Parsed\.message, "(\w+)"\)/g)) {
+      assert.ok(FIELDS.includes(f), `JsonExtract ${f} is not a field`);
+    }
+    if (s.meta) meta[s.meta] = s.expression ?? s.value;
+  }
+  assert.equal(meta.source_ip, 'JsonExtract(evt.Parsed.message, "client_ip")');
+  assert.equal(meta.howdah_action, 'JsonExtract(evt.Parsed.message, "action")');
+  assert.ok(parser.statics.some((s) => s.target === 'evt.StrTime'), 'event time from ts');
+  assert.equal(scenario.type, 'leaky');
+  assert.equal(scenario.groupby, 'evt.Meta.source_ip');
+  assert.match(scenario.filter, /evt\.Meta\.howdah_action == 'block'/);
+  for (const [, m] of scenario.filter.matchAll(/evt\.Meta\.(\w+)/g)) assert.ok(m in meta, `scenario uses ${m}, which the parser does not set`);
+  assert.equal(scenario.labels.remediation, true);
+  // non-syslog sets program from the acquisition's type label.
+  assert.equal(acquis.labels.type, 'howdah');
+  assert.deepEqual(acquis.filenames, ['/var/log/howdah/events.log']);
+});

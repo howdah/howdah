@@ -193,6 +193,8 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::DangerousCallback => "string callback naming a command or code execution function",
         RuleId::Xxe => "XML document declaring an external entity",
         RuleId::TlsVerify => "curl TLS certificate verification disabled",
+        RuleId::OutOfMemory => "worker ended on out-of-memory",
+        RuleId::StartupFatal => "fatal error during request startup",
     }
 }
 

@@ -8,6 +8,7 @@ pub mod inspect;
 pub mod limits;
 pub mod log;
 pub mod multipart;
+pub mod oom;
 pub mod rules;
 pub mod sinks;
 

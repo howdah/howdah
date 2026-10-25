@@ -73,6 +73,21 @@ test('on_invalid_config: default omitted, off emitted as a top-level line, round
   assert.ok(E.emitToml(fresh(), { includeDefaults: true }).includes('# on_invalid_config = "block"'));
 });
 
+test('oom_exit: default true omitted, false emitted as a top-level line, round-trips', () => {
+  assert.equal(SCHEMA.top.find((t) => t.key === 'oom_exit').default, true);
+  assert.equal(validate('').config.oom_exit, true);
+  const s = fresh();
+  s.oom_exit = false;
+  s['limits.max_parts'] = 10;
+  const toml = E.emitToml(s, {});
+  assert.ok(toml.indexOf('oom_exit = false') < toml.indexOf('[limits]'), toml);
+  const v = validate(toml);
+  assert.equal(v.ok, true, v.error);
+  assert.equal(v.config.oom_exit, false);
+  assert.equal(E.loadFromCanonical(v.config, catalog).state.oom_exit, false);
+  assert.ok(E.emitToml(fresh(), { includeDefaults: true }).includes('# oom_exit = true'));
+});
+
 test('includeDefaults writes defaults as comments and still validates', () => {
   const toml = E.emitToml(fresh(), { includeDefaults: true });
   assert.ok(toml.includes('# max_parts = 2000'), toml);

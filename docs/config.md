@@ -43,6 +43,39 @@ is not valid UTF-8) means `block`. So the key works even when a sub-table is the
 broken part, but it is not a general parse: a typo in the line itself falls back
 to `block`. It is a TOML key, not a php.ini directive.
 
+### `oom_exit`
+
+```toml
+oom_exit = true   # true (default) | false
+```
+
+On by default. If PHP runs out of memory — or hits a fatal error during request
+startup — on an engine without upstream's fix, Howdah ends the worker before any
+code runs on the half-built request state (the PHP2Shell backstop,
+CVE-2026-109618 / CVE-2026-109619). The worker is replaced; the one request that
+ran out of memory gets a dropped connection (nginx answers 502). The event is
+logged with rule `out_of_memory` (or `startup_fatal`) and action `block`.
+
+The backstop runs only on web SAPIs (`apache2handler`, `fpm-fcgi`, `cgi-fcgi`,
+`litespeed`), never on the command line, and turns itself off on PHP versions
+that ship the upstream fix (8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 and later),
+detected at runtime so distro backports count too. It is also off whenever the
+global `mode` is `off` (including the `on_invalid_config = "off"` fallback) —
+`off` disables every layer, this one included; `detect` keeps it armed, since a
+worker running out of memory cannot be "detected only". The
+`OOM backstop (oom_exit)` row in `phpinfo()` served by the **web SAPI** shows
+the decision (`php --ri howdah` runs under the CLI SAPI, where it always reads
+off).
+
+The event names the script and line in its `reason` (the worker exits before
+PHP writes its own "exhausted in … on line …" message, so this is the operator's
+locus); it carries no URI.
+
+Set `oom_exit = false` to keep PHP's default behaviour (a fatal error page, the
+worker surviving) — on an unpatched engine that reopens the PHP2Shell window.
+Howdah does not fix the underlying PHP bug; patching remains the fix. It is a
+TOML key, not a php.ini directive.
+
 ## Build a config in the browser
 
 [howdah.org/config/](https://howdah.org/config/) builds `howdah.ini` and

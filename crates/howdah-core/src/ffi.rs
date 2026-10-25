@@ -193,6 +193,8 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::DangerousCallback => "string callback naming a command or code execution function",
         RuleId::Xxe => "XML document declaring an external entity",
         RuleId::TlsVerify => "curl TLS certificate verification disabled",
+        RuleId::OutOfMemory => "worker ended on out-of-memory",
+        RuleId::StartupFatal => "fatal error during request startup",
     }
 }
 
@@ -1630,6 +1632,42 @@ pub unsafe extern "C" fn howdah_exceptions_log(ctx: *mut howdah_ctx) -> i32 {
         return 0;
     }
     catch_unwind(AssertUnwindSafe(|| i32::from((*ctx).exceptions_log))).unwrap_or(0)
+}
+
+/// 1 iff the context's config has `oom_exit = true` (the default); 0 otherwise,
+/// for NULL and on panic. Read by the glue at MINIT to decide whether to install
+/// the out-of-memory backstop (`zend_error_cb` hook). A NULL ctx or a caught
+/// panic yields 0 (do not install: the fail-open direction — no behavior change).
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_oom_exit(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| i32::from((*ctx).config.oom_exit))).unwrap_or(0)
+}
+
+/// 1 iff the config ARMS the out-of-memory backstop: `oom_exit` is on AND the
+/// global mode is not `off`. A global `off` disables every layer (the backstop
+/// included), matching `[rules] decide` and the sink/inspect/behavior layers;
+/// `detect` keeps it armed, since it is a Critical fail-stop that cannot be
+/// "detected only". 0 for NULL and on panic. The glue applies the SAPI and
+/// patched-engine gates on top of this.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_oom_armed(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = &*ctx;
+        i32::from(c.config.oom_exit && c.config.mode != Mode::Off)
+    }))
+    .unwrap_or(0)
 }
 
 /// 1 iff some exception has a `script_sha256` facet that could apply to
@@ -3424,5 +3462,44 @@ mod tests {
             "an explicit inspect off is absolute; no override re-arms it"
         );
         assert_eq!(unsafe { howdah_inspect_armed(std::ptr::null_mut()) }, 0);
+    }
+
+    // ---- howdah_oom_exit: the out-of-memory backstop toggle -------------------
+
+    #[test]
+    fn oom_exit_getter() {
+        let on = init(""); // defaults -> oom_exit true
+        assert_eq!(unsafe { howdah_oom_exit(on) }, 1);
+        let off = init("oom_exit = false\n");
+        assert_eq!(unsafe { howdah_oom_exit(off) }, 0);
+        assert_eq!(unsafe { howdah_oom_exit(std::ptr::null_mut()) }, 0);
+        unsafe {
+            howdah_free(on);
+            howdah_free(off);
+        }
+    }
+
+    #[test]
+    fn oom_armed_honors_oom_exit_and_mode() {
+        // Default (mode block, oom_exit true) -> armed.
+        let a = init("");
+        assert_eq!(unsafe { howdah_oom_armed(a) }, 1);
+        // detect keeps it armed (Critical fail-stop).
+        let d = init("mode = \"detect\"\n");
+        assert_eq!(unsafe { howdah_oom_armed(d) }, 1);
+        // A global off disables it, even with oom_exit on (the default).
+        let off = init("mode = \"off\"\n");
+        assert_eq!(unsafe { howdah_oom_armed(off) }, 0);
+        assert_eq!(unsafe { howdah_oom_exit(off) }, 1, "oom_exit itself is still on");
+        // oom_exit = false disables it regardless of mode.
+        let no = init("mode = \"block\"\noom_exit = false\n");
+        assert_eq!(unsafe { howdah_oom_armed(no) }, 0);
+        assert_eq!(unsafe { howdah_oom_armed(std::ptr::null_mut()) }, 0);
+        unsafe {
+            howdah_free(a);
+            howdah_free(d);
+            howdah_free(off);
+            howdah_free(no);
+        }
     }
 }

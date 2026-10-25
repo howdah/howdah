@@ -328,6 +328,15 @@ pub enum RuleId {
     DangerousCallback,
     Xxe,
     TlsVerify,
+    /// PHP ran out of memory while the engine was parsing/handling the request
+    /// (the PHP2Shell out-of-memory backstop; see `crate::oom`). Critical,
+    /// Layer 1. Not produced by any limit check: the glue's `zend_error_cb`
+    /// hook reports it directly.
+    OutOfMemory,
+    /// A fatal error struck during request startup, before the half-built
+    /// request state could be used (the other backstop trigger). Critical,
+    /// Layer 1. Also reported directly by the glue, never by a limit check.
+    StartupFatal,
 }
 
 impl RuleId {
@@ -372,7 +381,7 @@ impl RuleId {
 /// or miss one it accepts. `rule_catalog_covers_every_variant` fails to
 /// compile when a variant is added here but not to the list.
 pub fn rule_catalog() -> &'static [RuleId] {
-    const ALL: [RuleId; 35] = [
+    const ALL: [RuleId; 37] = [
         RuleId::MaxParts,
         RuleId::MaxFiles,
         RuleId::MaxPartHeaders,
@@ -408,6 +417,8 @@ pub fn rule_catalog() -> &'static [RuleId] {
         RuleId::DangerousCallback,
         RuleId::Xxe,
         RuleId::TlsVerify,
+        RuleId::OutOfMemory,
+        RuleId::StartupFatal,
     ];
     &ALL
 }
@@ -607,10 +618,12 @@ mod tests {
                 | RuleId::AssertString
                 | RuleId::DangerousCallback
                 | RuleId::Xxe
-                | RuleId::TlsVerify => {}
+                | RuleId::TlsVerify
+                | RuleId::OutOfMemory
+                | RuleId::StartupFatal => {}
             }
         }
-        assert_eq!(rule_catalog().len(), 35);
+        assert_eq!(rule_catalog().len(), 37);
         let mut sorted = all.to_vec();
         sorted.sort();
         sorted.dedup();

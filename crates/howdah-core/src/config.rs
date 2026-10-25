@@ -591,6 +591,11 @@ pub struct Config {
     pub exceptions: Vec<ExceptionEntry>,
     /// Log matched exceptions as `action: "excepted"` events.
     pub exceptions_log: bool,
+    /// End the PHP worker on an out-of-memory (or a fatal during request
+    /// startup) before any code runs on the half-built request state — the
+    /// PHP2Shell backstop (§4.6). On by default; web SAPIs only, and off on
+    /// engines that carry upstream's fix (decided by the glue at startup).
+    pub oom_exit: bool,
 }
 
 #[derive(Deserialize)]
@@ -606,6 +611,7 @@ struct RawConfig {
     on_invalid_config: OnInvalidConfig,
     exceptions: Vec<ExceptionEntry>,
     exceptions_log: bool,
+    oom_exit: bool,
 }
 
 impl Default for RawConfig {
@@ -622,6 +628,7 @@ impl Default for RawConfig {
             on_invalid_config: c.on_invalid_config,
             exceptions: c.exceptions,
             exceptions_log: c.exceptions_log,
+            oom_exit: c.oom_exit,
         }
     }
 }
@@ -694,6 +701,7 @@ impl Config {
             on_invalid_config: raw.on_invalid_config,
             exceptions: raw.exceptions,
             exceptions_log: raw.exceptions_log,
+            oom_exit: raw.oom_exit,
         })
     }
 
@@ -762,6 +770,7 @@ impl Config {
             on_invalid_config: OnInvalidConfig::Block,
             exceptions: Vec::new(),
             exceptions_log: false,
+            oom_exit: true,
         }
     }
 }
@@ -1363,6 +1372,25 @@ self_test = "off"
     fn log_unknown_key_still_rejected() {
         assert!(Config::from_toml("[log]\nexec_args = []").is_err());
         assert!(Config::from_toml("[log]\nfacility = \"local0\"").is_err());
+    }
+
+    // ---- oom_exit (the out-of-memory backstop toggle) -------------------------
+
+    #[test]
+    fn oom_exit_defaults_on_and_serializes() {
+        let c = Config::safe_defaults();
+        assert!(c.oom_exit);
+        let j = serde_json::to_value(&c).unwrap();
+        assert_eq!(j["oom_exit"], true);
+        // Absent in the file -> default true.
+        assert!(Config::from_toml("mode = \"block\"\n").unwrap().oom_exit);
+    }
+
+    #[test]
+    fn oom_exit_parses_and_rejects_non_bool() {
+        assert!(!Config::from_toml("oom_exit = false\n").unwrap().oom_exit);
+        assert!(Config::from_toml("oom_exit = true\n").unwrap().oom_exit);
+        assert!(Config::from_toml("oom_exit = \"no\"").is_err());
     }
 
     // ---- [[exceptions]] -------------------------------------------------------

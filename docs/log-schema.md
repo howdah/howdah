@@ -48,7 +48,7 @@ order.
 
 | `layer` | What it is | Rules |
 |---|---|---|
-| 1 | Request-shape limits: multipart, input shape, request headers, and the self-test marker | `max_parts`, `max_files`, `max_part_headers`, `max_part_header_bytes`, `max_field_name_len`, `max_filename_len`, `parse_memory_budget`, `malformed_multipart`, `upload_progress_abuse`, `self_test`, `max_input_vars`, `max_input_nesting_depth`, `max_input_key_bytes`, `max_request_headers`, `max_request_header_bytes` |
+| 1 | Request-shape limits: multipart, input shape, request headers, the self-test marker, and the out-of-memory backstop | `max_parts`, `max_files`, `max_part_headers`, `max_part_header_bytes`, `max_field_name_len`, `max_filename_len`, `parse_memory_budget`, `malformed_multipart`, `upload_progress_abuse`, `self_test`, `max_input_vars`, `max_input_nesting_depth`, `max_input_key_bytes`, `max_request_headers`, `max_request_header_bytes`, `out_of_memory`, `startup_fatal` |
 | 2 | Input inspection (log-only by default) | `sql_injection`, `path_traversal`, `command_injection` |
 | 3 | Sink hardening (log-only by default) | `command_exec`, `include`, `eval`, `unserialize`, `phar`, `ssrf`, and the legacy-era sinks `mail_injection`, `preg_eval`, `create_function`, `assert_string`, `dangerous_callback`, `xxe`, `tls_verify` |
 | 4 | After-breach behaviour (log-only by default; inert until its lists are set) | `upload_exec`, `unexpected_binary`, `unexpected_egress`, `php_write` |
@@ -61,6 +61,17 @@ compile until it has a layer.
 `action: "log"`, never a block. An internal error caught at the extension
 boundary is also logged as `self_test`, with the reason
 `internal panic caught at FFI boundary; failed open`.
+
+`out_of_memory` and `startup_fatal` are written by the out-of-memory backstop
+(`oom_exit`, see `docs/config.md`) the moment before it ends the worker: PHP ran
+out of memory, or hit a fatal during request startup, on an unpatched engine.
+Both are `action: "block"`. The line is the only record of that request — the
+worker is gone before it could respond — so it carries no `client_ip`, `method`
+or `uri`; the `reason` names the script and line where the error struck (the
+operator's locus, since PHP never gets to write its own message). In the rare
+genuine host out-of-memory (an `mmap` failure, not `memory_limit`), the system
+allocator the log writer uses may itself fail, so the line can be lost — the
+worker still exits (fail-stop).
 
 Layer 4 in observe mode (`[behavior] observe = true`) writes its proposals
 as ordinary `action: "log"` lines whose `reason` starts with `proposed: `.

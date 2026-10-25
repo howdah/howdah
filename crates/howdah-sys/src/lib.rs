@@ -115,6 +115,23 @@ extern "C" {
     /// decided then is recorded for RINIT instead.
     pub fn howdah_during_request_startup() -> ::std::ffi::c_int;
 
+    /// Install the out-of-memory backstop (see `oom_hook.c`): save and chain
+    /// `zend_error_cb`, so an out-of-memory fatal (or any fatal during request
+    /// startup) ends the worker via `_exit()` before PHP longjmps, after `cb`
+    /// logs the event. Call once at MINIT, only when armed (web SAPI, unpatched
+    /// engine, `oom_exit` on). `cb` returns 1 to end the worker, 0 to chain.
+    pub fn howdah_install_oom_hook(cb: HowdahOomDecide);
+
+    /// Restore the `zend_error_cb` saved by `howdah_install_oom_hook`. No-op when
+    /// not installed. Called from MSHUTDOWN, before the core ctx is freed.
+    pub fn howdah_uninstall_oom_hook();
+
+    /// 1 iff the `memory_hard_limit_percent` ini directive is registered at
+    /// runtime: upstream's out-of-memory fix (8.2.35/8.3.36/8.4.27/8.5.12) adds
+    /// it, so its presence means the backstop should stay off (the engine
+    /// already handles out-of-memory safely). Catches distro backports.
+    pub fn howdah_memory_hard_limit_percent_exists() -> ::std::ffi::c_int;
+
     /// Build `$_SERVER` now if `auto_globals_jit` deferred it, so its variables
     /// pass through the chained `input_filter` before the script. No-op when it
     /// already exists.
@@ -154,6 +171,22 @@ pub type HowdahMailDecide = unsafe extern "C" fn(
 
 /// `howdah_sink_ssrf_armed`-shaped callback: 1 iff SSRF guarding is armed.
 pub type HowdahSsrfArmed = unsafe extern "C" fn(ctx: *mut ::std::ffi::c_void) -> ::std::ffi::c_int;
+
+/// The out-of-memory backstop's decide callback (see `oom_hook.c`). `error_type`
+/// is PHP's `E_*` code, `msg` the rendered message (8.x) or `format` string
+/// (5.x/7.x) for `msg_len` bytes, `during_startup` 1 inside `php_request_startup`,
+/// and `file`/`file_len`/`line` the error's location (script path + line, for
+/// the logged reason; `file` may be NULL). Returns 1 to end the worker (after
+/// logging), 0 to chain to the prior handler.
+pub type HowdahOomDecide = unsafe extern "C" fn(
+    error_type: ::std::ffi::c_int,
+    msg: *const ::std::ffi::c_char,
+    msg_len: usize,
+    during_startup: ::std::ffi::c_int,
+    file: *const ::std::ffi::c_char,
+    file_len: usize,
+    line: u32,
+) -> ::std::ffi::c_int;
 
 /// `howdah_sink_check_ssrf`-shaped callback. `ips` is `ips_count` x 17-byte
 /// records `[family 4|6][16 addr bytes]`. Returns 0 ALLOW / 1 LOG / 2 BLOCK.

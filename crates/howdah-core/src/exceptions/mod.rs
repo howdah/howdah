@@ -44,7 +44,9 @@ impl Layer {
             | RuleId::MaxInputNestingDepth
             | RuleId::MaxInputKeyBytes
             | RuleId::MaxRequestHeaders
-            | RuleId::MaxRequestHeaderBytes => Layer::Limits,
+            | RuleId::MaxRequestHeaderBytes
+            | RuleId::OutOfMemory
+            | RuleId::StartupFatal => Layer::Limits,
             RuleId::SqlInjection | RuleId::PathTraversal | RuleId::CommandInjection => Layer::Inspect,
             RuleId::CommandExec
             | RuleId::Include

@@ -501,6 +501,29 @@ int32_t howdah_exceptions_count(struct howdah_ctx *ctx);
 int32_t howdah_exceptions_log(struct howdah_ctx *ctx);
 
 /**
+ * 1 iff the context's config has `oom_exit = true` (the default); 0 otherwise,
+ * for NULL and on panic. Read by the glue at MINIT to decide whether to install
+ * the out-of-memory backstop (`zend_error_cb` hook). A NULL ctx or a caught
+ * panic yields 0 (do not install: the fail-open direction — no behavior change).
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_oom_exit(struct howdah_ctx *ctx);
+
+/**
+ * 1 iff the config ARMS the out-of-memory backstop: `oom_exit` is on AND the
+ * global mode is not `off`. A global `off` disables every layer (the backstop
+ * included); `detect` keeps it armed, since it is a Critical fail-stop that
+ * cannot be "detected only". 0 for NULL and on panic. The glue applies the SAPI
+ * and patched-engine gates on top of this.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_oom_armed(struct howdah_ctx *ctx);
+
+/**
  * 1 iff some exception has a `script_sha256` facet that could apply to
  * `script` (so the glue should hash the file); else 0. NULL / panic is 0.
  *

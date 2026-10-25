@@ -27,7 +27,7 @@
       "maxLength": 64
     },
     "layer": {
-      "description": "Protection layer of `rule`: 1 = request-shape limits (multipart, input shape, request headers, self-test), 2 = input inspection, 3 = sink hardening, 4 = after-breach behaviour. A future layer is added to this enum without changing `schema`.",
+      "description": "Protection layer of `rule`: 1 = request-shape limits (multipart, input shape, request headers, self-test, and the out-of-memory backstop), 2 = input inspection, 3 = sink hardening, 4 = after-breach behaviour. A future layer is added to this enum without changing `schema`.",
       "type": "integer",
       "enum": [1, 2, 3, 4]
     },

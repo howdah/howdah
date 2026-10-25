@@ -19,6 +19,10 @@ import { REPO } from '../../lib/site';
     <div class="wrap prose">
       <p>Howdah 1.2 is released. Layer 1 refuses abusive request <em>shapes</em>; Layer 2 reads the <em>content</em> of request values and logs what looks like an attack. Both watch the request on the way in. Layer 3 stands somewhere new: at the exact moment PHP is about to <em>do</em> something dangerous — run a shell command, unserialize attacker data, include a file, evaluate code — and checks it against a flat, operator-set policy. And, as with every Howdah layer, it watches first and tells you, before it ever gets in the way.</p>
 
+      <div class="note" role="note">
+        <p><strong>Update, 24 October 2026.</strong> Two things this post describes changed later. Howdah 1.3 made the <code>include</code> and <code>eval</code> guards active on PHP 5.x too, checked at compile time (see <a href="/blog/howdah-1-3/">Howdah 1.3</a>). And the 1.2.1 fix release closed a bypass of the multipart count rules in detect mode that affected every release up to 1.2.0.</p>
+      </div>
+
       <h2>What's in 1.2: Layer 3, sink hardening</h2>
       <p>At a guarded <em>sink</em>, there is no guessing about whether something dangerous is happening — it is. That makes a decision there more defensible than an input signature. Howdah 1.2 guards four:</p>
       <ul class="facts">
@@ -35,7 +39,7 @@ import { REPO } from '../../lib/site';
 
       <h2>Honest about scope</h2>
       <p>Flat-policy virtual patching is best-effort and bypassable — an application can reach a dangerous effect by a route Howdah does not guard — which is <em>why</em> it logs first. A few honest edges, stated plainly: <code>include</code> and <code>eval</code> guards need <strong>PHP 7.0+</strong> (the 5.x opcode VM does not expose what we need; command execution and <code>unserialize</code> still work on 5.4+). <code>proc_open</code> with an array command, and any non-string first argument, are not inspected. And <strong><code>phar://</code> deserialization and SSRF are not in 1.2</strong> — they are the Layer-3 roadmap, and this site never claims a layer is here before it is.</p>
-      <p>Every guard ships with a test that proves what it catches and what it leaves alone, across PHP 5.6, 7.4 and 8.3; the block path was audited leak-free before release. Our reproducers recreate only the harmless <em>shape</em> of an attack, never a working exploit.</p>
+      <p>Every guard ships with a test that proves what it catches and what it leaves alone, across PHP 5.6, 7.4 and 8.3; the block path was reviewed internally for memory leaks before release (there has been no third-party audit). Our reproducers recreate only the harmless <em>shape</em> of an attack, never a working exploit.</p>
 
       <h2>Get it</h2>
       <p>If you are already on Howdah, <code>apt-get update &amp;&amp; apt-get upgrade</code> (or the yum equivalent) brings in 1.2; Layer 3 arrives in <code>detect</code> mode, logging only. New here? Start at the <a href="/install/">install picker</a>, read the <a href="/docs/configuration/#layer-3-sinks">configuration reference</a> for the <code>[sinks]</code> settings, and check the <a href="/coverage/">coverage table</a> and the per-version sink matrix for your PHP version. The source and this site are on <a href={REPO}>GitHub</a> — if a sink flags something interesting on your traffic, we would like to hear about it.</p>

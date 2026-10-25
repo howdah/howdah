@@ -58,7 +58,7 @@ packaging/verify-reproducible.sh v1.5.0 8.3 x86_64-musl     # or aarch64`;
         <h3 id="scope-heading">What these checks do not tell you</h3>
         <ul>
           <li>They tie a file to the public source, the project key and the release workflow. They do not say the code is free of bugs. Howdah has had no third-party security audit yet; <a href={AUDIT_MD}>the audit brief</a> is the scope we are asking one to cover.</li>
-          <li>Build provenance and the SBOM start with the first release after 1.4.0. Releases 1.4.0 and earlier have no attestations; their GPG signatures are unchanged.</li>
+          <li>Build provenance and the SBOM start with 1.5.0. Releases 1.4.0 and earlier have no attestations; their GPG signatures are unchanged.</li>
         </ul>
       </div>
 
@@ -80,7 +80,7 @@ packaging/verify-reproducible.sh v1.5.0 8.3 x86_64-musl     # or aarch64`;
       <pre tabindex="0"><code>{sbom}</code></pre>
 
       <h2 id="rebuild">4. Reproducible rebuild</h2>
-      <p>The release tarballs are reproducible: the same tag gives byte-identical tarballs on any machine with Docker. <a href={SCRIPT}>packaging/verify-reproducible.sh</a> checks the signed <code>SHA256SUMS</code>, rebuilds one PHP minor with that tag's own build scripts, and prints <code>MATCH</code> or <code>MISMATCH</code> along with the sha256 of the <code>howdah.so</code> inside each tarball.</p>
+      <p>The release tarballs are built to be reproducible: the same tag should give byte-identical tarballs on any machine with Docker. What was checked: two clean builds of one commit gave identical PHP 7.4 and 8.3 x86_64 tarballs; the aarch64 and musl flavours use the same scripts but were not rebuilt twice, and the Remi headers and Alpine packages they install are not pinned (see the residual causes in <a href={VERIFY_MD}>docs/verify.md</a>). <a href={SCRIPT}>packaging/verify-reproducible.sh</a> checks the signed <code>SHA256SUMS</code>, rebuilds one PHP minor with that tag's own build scripts, and prints <code>MATCH</code> or <code>MISMATCH</code> along with the sha256 of the <code>howdah.so</code> inside each tarball.</p>
       <pre tabindex="0"><code>{rebuild}</code></pre>
       <p>The compiler, base image, build tools, PHP sources and archive metadata are pinned. Known residual causes of a mismatch: the PHP 5.4 to 8.1 headers for x86_64 come from Remi's EL7 repository by name, and the musl build installs Alpine 3.21 packages by name. The <code>.deb</code> packages are reproducible for a given dpkg version; the <code>.rpm</code> packages are not byte-reproducible (EL7's rpm stamps the build time, and the published rpm is signed), but their payload is. Tags up to 1.4.0 do not rebuild to the same tarball; for 1.4.0 the <code>howdah.so</code> inside does. Details: <a href={`${VERIFY_MD}#4-reproducible-rebuild`}>docs/verify.md</a>.</p>
     </div>

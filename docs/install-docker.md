@@ -25,7 +25,7 @@ multipart limits still block, everything else only logs.
 |---|---|---|
 | `ghcr.io/howdah/howdah:<version>-php<minor>` | `php:<minor>-fpm` (Debian) | `linux/amd64`, and `linux/arm64` when the release has that minor's aarch64 tarball (1.4.0 has all of them) |
 | `ghcr.io/howdah/howdah:<version>-php<minor>-alpine` | `php:<minor>-fpm-alpine` | `linux/amd64` only; PHP 7.2 to 8.5 only (see "Alpine"); from 1.5.0, the first release with `*-linux-x86_64-musl.tar.gz` tarballs |
-| `ghcr.io/howdah/howdah:php<minor>` and `php<minor>-alpine` | as above | moves to the newest release |
+| `ghcr.io/howdah/howdah:php<minor>` and `php<minor>-alpine` | as above | moves to the newest release; pushed by the automatic release run, or a manual run with `floating: true`. **Not published for 1.5.0** (its images came from a manual run without it), so use the versioned tag for now |
 
 `<minor>` is one of 5.6, 7.0, 7.1, 7.2, 7.3, 7.4, 8.0, 8.1, 8.2, 8.3, 8.4,
 8.5 (`-alpine`: 7.2 and later). There is no image for 5.4 or 5.5: `php:5.4-fpm` is a schema-1 manifest

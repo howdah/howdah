@@ -35,19 +35,6 @@
       build: function () { return flood(2500); }
     },
     {
-      id: 'malformed',
-      title: 'Malformed multipart',
-      shape: 'One well-formed field, then a part with no Content-Disposition header.',
-      expect: { action: 'block', rule: 'malformed_multipart' },
-      explain: 'A part that the multipart grammar does not allow is a sign of a confused or hostile parser input, so it is flagged as malformed.',
-      build: function () {
-        return H.buildBody([
-          { name: 'a', content: 'ok' },
-          { raw: '--' + H.BOUNDARY + '\r\nX-Note: no disposition here\r\n\r\nx\r\n' }
-        ]);
-      }
-    },
-    {
       id: 'filename',
       title: 'Oversized filename',
       shape: 'One file part whose filename is 600 characters long (default limit: 512 bytes).',

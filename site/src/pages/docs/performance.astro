@@ -93,7 +93,7 @@ const benign = C.totals.benign;
         <li><strong>A GET with no body:</strong> Howdah changed the median (p50) request time by {range(getAdded)}&nbsp;µs, across every layer combination, PHP version and server tested, on requests that take {n1(Math.min(...getBase))} to {n1(Math.max(...getBase))}&nbsp;µs without it. The same cell moved by about {n1(getSpread)}&nbsp;µs between rounds. The design aimed for no measurable overhead here; a few microseconds is measurable, and small next to a real application's own time.</li>
         <li><strong>Layer 2 costs time in proportion to the values it scans.</strong> With Layer 2 on, the 1&nbsp;KB form moved by {range(formL2)}&nbsp;µs and the 50&nbsp;KB multipart body (8 text fields of about 200 bytes each, 2 files) by {range(mpL2)}&nbsp;µs. With Layer 1 alone, the multipart body moved by {range(mpL1)}&nbsp;µs: counting parts costs little, scanning values costs more.</li>
         <li><strong>Layer 3 with every sink in detect mode:</strong> the <code>system('true')</code> + <code>include</code> request moved by {range(sinkAll)}&nbsp;µs on a request that takes {n1(Math.min(...sinkBase))} to {n1(Math.max(...sinkBase))}&nbsp;µs, most of it spent forking a shell. Those cells moved by up to {n1(sinkSpread)}&nbsp;µs between rounds, so the Layer 3 difference is inside the noise.</li>
-        <li><strong>OPcache JIT:</strong> before <a href={`${REPO}/pull/42`}>#42</a>, loading Howdah turned the JIT off on PHP 8.x ({jitOff.map((r: any) => r.php).join(', ')} measured). #42 shipped in 1.5.0 as the JIT-safe <code>[sinks] hook</code> (default <code>auto</code> keeps the JIT on); the numbers on this page were measured on Howdah 1.3.0, before the change, and a re-measure is pending. The PHP 8.3 latency numbers on this page are without the JIT. <a href="#jit">Details</a>.</li>
+        <li><strong>OPcache JIT:</strong> before <a href={`${REPO}/pull/42`}>#42</a>, loading Howdah turned the JIT off on PHP 8.x ({jitOff.map((r: any) => r.php).join(', ')} measured). #42 shipped in 1.5.0 as the JIT-safe <code>[sinks] hook</code> (default <code>auto</code> keeps the JIT on); the numbers on this page were measured before it (latency on Howdah {m.howdah_version}, the JIT and detection runs on 1.3.0), and a re-measure is pending. The PHP 8.3 latency numbers on this page are without the JIT. <a href="#jit">Details</a>.</li>
         <li><strong>Layer 2 flagged {frac(l2InScope.f, l2InScope.n)}</strong> of the GoTestWAF payloads in its three classes that arrived where it looks, and {frac(benign.flagged, benign.reached)} of GoTestWAF's benign requests. That is what a narrow, log-only layer catches of a standard corpus, not a WAF score. <a href="#detection">Details</a>.</li>
       </ul>
     </div>
@@ -112,7 +112,7 @@ const benign = C.totals.benign;
         <li><strong>Checks:</strong> before each cell a probe request proves which configuration is loaded (an injection-shaped value, a non-allowlisted command and a <code>phar://</code> path must log exactly for the layers that are on). After each cell the Howdah log must be empty: benign traffic wrote no events in any cell.</li>
       </ul>
       <pre tabindex="0"><code>sh lab/bench/run.sh      <span class="c"># latency: PHP 5.6, 7.4, 8.3 x php-fpm, Apache (about 80 minutes)</span>
-sh lab/bench/jit.sh      <span class="c"># OPcache JIT check: PHP 8.1, 8.3</span>
+sh lab/bench/jit.sh 8.1 8.3 8.5   <span class="c"># OPcache JIT check (8.1 and 8.3 without arguments)</span>
 sh lab/bench/corpus.sh   <span class="c"># GoTestWAF corpus against Layer 2</span></code></pre>
       <p class="legend">The scripts, configs and raw results are in <a href={`${REPO}/tree/main/lab/bench`}>lab/bench</a>; <a href={`${REPO}/blob/main/docs/performance.md`}>docs/performance.md</a> has the same tables in the repository.</p>
     </div>
@@ -308,7 +308,7 @@ sh lab/bench/corpus.sh   <span class="c"># GoTestWAF corpus against Layer 2</spa
           <li>One machine, one day. Your hardware, PHP build and application will give different absolute numbers; the added microseconds are the part worth comparing.</li>
           <li>The benchmark scripts are tiny. A real application spends far longer in its own code, so the same added microseconds are a smaller share of its request time.</li>
           <li>Benign traffic only: no cell measures the cost of writing a log line or of blocking, and the SSRF sink's DNS lookup never runs because the script makes no outbound request.</li>
-          <li>Memory use was not measured. Neither were Layer 4 (off in every cell), ZTS builds, aarch64, PHP versions other than {versions.join(', ')}, or php-cgi.</li>
+          <li>Memory use was not measured. Neither were Layer 4 (off in every cell), the seven legacy sinks added in 1.5, the 1.5 refusal path, ZTS builds, aarch64, PHP versions other than {versions.join(', ')}, or php-cgi.</li>
           <li>wrk is a closed-loop load generator: it measures latency at the load it creates, not under an open arrival rate.</li>
           <li>The detection run uses one corpus, on one PHP version and server. GoTestWAF's payloads lean towards WAF-evasion variants; Layer 2's signatures are listed in <a href={`${REPO}/blob/main/docs/coverage-data.md`}>docs/coverage-data.md</a>.</li>
         </ul>

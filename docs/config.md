@@ -227,8 +227,8 @@ review is still pending.
 `sinks.mode` defaults to `detect` (log only) and is **independent of the global
 `howdah.mode`**: a global `howdah.mode = block` does **not** arm any sink. To
 block, set a sink's mode to `block` explicitly, and **set its allowlist first**
-— with an empty allowlist every call is "not allowlisted". Any active sink can
-block when explicitly armed.
+— with an empty allowlist every call is "not allowlisted". Every active sink
+except `tls` (detect-only in this release) can block when explicitly armed.
 
 **The sink argument is never logged.** An event records only the sink and the
 function name (plus the class name for `unserialize`) — never the command line

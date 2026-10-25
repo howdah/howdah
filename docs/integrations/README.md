@@ -173,5 +173,5 @@ has not been tested here.
   checked any of them.
 - The `journal` and `syslog` scrape targets of Promtail are not tested; only
   the file is.
-- Howdah sends nothing over the network itself. Off-host shipping is the
+- Howdah ships no events off the host itself. Off-host shipping is the
   job of the collector you run.

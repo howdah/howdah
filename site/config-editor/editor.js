@@ -164,13 +164,26 @@
 
   // Build a state from the config the core parsed. Refuses (with the key
   // names) anything the form cannot represent, so a load-then-download round
-  // trip never silently drops a setting. Today that is only [log] (any key:
-  // path, destination, syslog_*, exec, exec_rate_limit). `[[exceptions]]` and
-  // `exceptions_log` are carried through verbatim.
+  // trip never silently drops a setting. Today that is [log] (any key: path,
+  // destination, syslog_*, exec, exec_rate_limit) and [behavior] (Layer 4)
+  // when any key differs from its default; the core always returns the full
+  // [behavior] table, and a file that only restates the defaults (as the
+  // shipped profiles do) loses nothing. `[[exceptions]]` and `exceptions_log`
+  // are carried through verbatim.
+  var BEHAVIOR_DEFAULTS = {
+    enabled: true, mode: 'detect', observe: false, deny_php_writes: false,
+    deny_exec_dirs: [], allow_exec_binaries: [], allow_egress_hosts: []
+  };
+  function behaviorIsDefault(b) {
+    return Object.keys(b || {}).every(function (k) {
+      return JSON.stringify(b[k]) === JSON.stringify(BEHAVIOR_DEFAULTS[k]);
+    });
+  }
   function loadFromCanonical(config, catalog) {
     var unsupported = [];
     var log = config.log || {};
     if (Object.keys(log).some(function (k) { return log[k] != null; })) unsupported.push('log');
+    if (!behaviorIsDefault(config.behavior)) unsupported.push('behavior');
     if (unsupported.length) return { unsupported: unsupported };
     var state = SCHEMA_API.defaultState(catalog);
     state['howdah.mode'] = config.mode;

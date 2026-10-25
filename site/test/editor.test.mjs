@@ -131,6 +131,34 @@ test('load refuses every [log] key, not only path', () => {
   assert.ok(E.loadFromCanonical(validate('[log]\n').config, catalog).state);
 });
 
+test('load refuses any non-default [behavior] key: the form cannot write Layer 4', () => {
+  for (const toml of [
+    '[behavior]\nmode = "block"',
+    '[behavior]\nenabled = false',
+    '[behavior]\nobserve = true',
+    '[behavior]\ndeny_php_writes = true',
+    '[behavior]\ndeny_exec_dirs = ["/var/www/uploads"]',
+    '[behavior]\nallow_exec_binaries = ["/usr/bin/gs"]',
+    '[behavior]\nallow_egress_hosts = ["api.example.com"]',
+  ]) {
+    const v = validate(toml);
+    assert.equal(v.ok, true, toml + ': ' + v.error);
+    assert.deepEqual(E.loadFromCanonical(v.config, catalog), { unsupported: ['behavior'] }, toml);
+  }
+  // Restating the defaults (as every shipped profile does) loses nothing.
+  assert.ok(E.loadFromCanonical(validate('[behavior]\nmode = "detect"\n').config, catalog).state);
+  assert.deepEqual(E.loadFromCanonical(validate('[log]\npath = "/x"\n[behavior]\nobserve = true').config, catalog),
+    { unsupported: ['log', 'behavior'] });
+});
+
+test('every rule the core accepts has a heading in the [rules] section', () => {
+  const rules = SCHEMA.sections.find((s) => s.id === 'rules');
+  for (const k of rules.rulesKeys(catalog)) {
+    assert.ok(k.layer in rules.groups, `${k.key} (layer ${k.layer}) has no group, so the form never shows it`);
+  }
+  assert.ok(rules.rulesKeys(catalog).some((k) => k.key === 'upload_exec' && k.layer === 'behavior' && k.noop));
+});
+
 test('load then emit reproduces a non-trivial config', () => {
   const toml = [
     'mode = "detect"',

@@ -5,6 +5,52 @@ All notable changes to Howdah are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-10-25
+
+### Added
+- An out-of-memory backstop for the PHP fatal the official PHP2Shell
+  advisories name as the root cause (CVE-2026-109618): PHP's out-of-memory
+  bailout `longjmp`s out of a half-built request, so Howdah installs its own
+  `zend_error_cb` and, on that fatal — an out-of-memory `E_ERROR`
+  (`"Allowed memory size of …"` / `"Out of memory"`) or any bailout-fatal
+  raised while `PG(during_request_startup)` — logs the event without
+  allocating and calls `_exit()` before the `longjmp`, so the worker leaves
+  cleanly instead of running on over corrupt state. Web SAPIs only; a runtime
+  probe (`memory_hard_limit_percent`) keeps it off on a patched engine, and it
+  never arms under the CLI. Two Critical Layer 1 rules, `out_of_memory` and
+  `startup_fatal`, and a new top-level `oom_exit` (default `true`;
+  `php --ri howdah` shows the backstop and whether it is armed). Installed at
+  MINIT, restored at MSHUTDOWN. `lab/integration/oom_backstop*.sh` passes on
+  PHP 5.6/7.4/8.0/8.1 (armed) and 8.3 (patched → off). Run against a vulnerable
+  PHP build with the backstop armed, the PHP2Shell exploit no longer lands —
+  the worker exits on the out-of-memory fatal instead of carrying on over
+  corrupt state. Design §4.6:
+  `docs/superpowers/specs/2026-10-24-howdah-php2shell-gaps-design.md`.
+- Request-parsing limits for the three PHP2Shell parse-amplification shapes
+  the parsed-event path cannot see (PHP fires it only after it has parsed a
+  part). Howdah wraps `sapi_module.read_post` and runs a second, independent
+  multipart byte-scanner over the raw body, framed on the request's real
+  boundary extracted the way PHP's `rfc1867.c` does and armed only for a body
+  PHP itself resolved as `multipart/form-data`. It closes a header flood
+  within one part (`max_part_headers`), a body past `post_max_size` counted as
+  PHP buffers it including the in-flight field (`post_too_large`), and summed,
+  widely-nested field and file names (`nesting_budget`); a parse-memory
+  estimate (`parse_memory_estimate`) is sized against the request's live
+  `memory_limit / 4`, so the limit holds on upload-heavy servers that raise
+  their limits, not just at stock settings. Three Critical Layer 1 rules and
+  two `[limits]` keys (`max_nesting_levels`, `memory_ceiling_bytes`, `0` =
+  automatic). The scanner can only ever add a block — the structural counter
+  (`max_parts`/`max_files`/name lengths) stays wired as the floor, so a
+  scanner desync fails closed — and is deliberately lenient about shapes PHP
+  accepts (LF-only line endings, header folding, non-`form-data`
+  dispositions). Verified by a benign corpus (multi-file gallery, extra
+  headers, nested arrays, chunked, LF-only, `attachment`) blocking nothing
+  with the scanner active, and by the limits firing on over-threshold inputs,
+  on PHP 5.6/7.4/8.3, plus a chunk-invariance fuzz target in CI. Confirmed
+  against the PHP2Shell exploit on a vulnerable PHP build: with these limits
+  active the parse-amplification shapes no longer reach the out-of-memory
+  state the exploit relies on. Design §4.1–4.5 (same spec).
+
 ### Fixed
 - The 1.5.0 Docker images were not published: the `docker.yml` run after the
   release (run 40140181320) failed every image. Two causes:

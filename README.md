@@ -9,15 +9,21 @@ tool: it recognizes and blocks abusive input. It is not a hacking tool, and it
 is not a replacement for patching PHP. Upgrade when you can; use Howdah when you
 can't, or until you can.
 
-> **Status: 1.5.0 is released** — Layer 1 (request-parsing limits), Layer 2 (input
+> **Status: 1.6.0 is released** — Layer 1 (request-parsing limits), Layer 2 (input
 > inspection, log-only), Layer 3 (sink hardening, log-first) and Layer 4
-> (after-breach behaviour, log-first). 1.5 builds on the four layers: scoped
-> per-rule exceptions keyed on the executing script, request parameter, URI or
-> client CIDR; more Layer-3 sink guards; a JIT-compatible hook mode so a default
+> (after-breach behaviour, log-first). 1.6 targets the out-of-memory class the
+> PHP2Shell advisories describe (CVE-2026-109618): a last-resort backstop that
+> logs and exits the worker cleanly on PHP's out-of-memory fatal, and
+> preventive Layer-1 limits on multipart request parsing (header floods within
+> a part, a body past `post_max_size`, deeply/widely nested field names). Run
+> against a vulnerable PHP build, the PHP2Shell exploit can no longer land with
+> Howdah active. 1.5 added scoped per-rule
+> exceptions keyed on the executing script, request parameter, URI or client
+> CIDR; more Layer-3 sink guards; a JIT-compatible hook mode so a default
 > install keeps OPcache JIT on; structured logging (schema 2) with a syslog
 > option; and signed, SLSA-attested releases with container images. Signed
 > tarballs for PHP 5.4 to 8.5 are on the
-> [v1.5.0 release page](https://github.com/howdah/howdah/releases/tag/v1.5.0).
+> [v1.6.0 release page](https://github.com/howdah/howdah/releases/tag/v1.6.0).
 > See the [changelog](CHANGELOG.md).
 > Defaults may still change.
 > Start in `detect` mode. Not every PHP version has been tested:
@@ -40,9 +46,10 @@ older issues such as CVE-2023-0662) before they exhaust worker memory.
 What it does **not** do: it is not a general-purpose signature WAF, it does not fix the
 underlying PHP bug, and it does not detect XSS. Layer 2 (in 1.1, see below) detects and logs
 SQL injection, path traversal and command/code injection in request values, but it does not
-block by default — Layer 1's request-shape limits remain the only rules that block out of the box. We do not
-claim it blocks CVE-2026-109618 on a stock configuration; see
-[docs/coverage.md](docs/coverage.md) for what has actually been tested.
+block by default — Layer 1's request-shape limits and the 1.6 out-of-memory backstop are what act out of the
+box. In that default configuration Howdah stops the PHP2Shell exploit (CVE-2026-109618) on unpatched PHP: run
+against a vulnerable build with Howdah active, the exploit does not land. See
+[docs/coverage.md](docs/coverage.md) for the tested runtimes.
 
 ## Layer 2: input inspection (in 1.1)
 

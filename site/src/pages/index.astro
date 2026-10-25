@@ -1,5 +1,6 @@
 ---
 import Layout from '../layouts/Layout.astro';
+import FitTable from '../components/FitTable.astro';
 import coverage from '../data/coverage.json';
 import { REPO, PKG, VERSION } from '../lib/site';
 
@@ -28,6 +29,61 @@ const compare = [
   { name: 'Aikido Zen', where: 'In-app agent (separate process)', license: 'Open-source agent + commercial cloud', job: 'Hooks runtime sinks (SQLi, SSRF, path/command injection)', eol: 'PHP 7.2+ (not 5.x)', ext: 'Aikido cloud (SaaS)' },
   { name: 'ModSecurity + OWASP CRS', where: 'Web-server module (Apache / Nginx)', license: 'Apache-2.0', job: 'Generic signature WAF at the server layer', eol: 'PHP-agnostic (sits in front of PHP)', ext: 'None' },
   { name: 'Datadog App & API Protection', where: 'In-app (tracing library) + SaaS', license: 'Proprietary (commercial)', job: 'In-app WAF / threat protection with managed rules', eol: 'Per the Datadog PHP library', ext: 'Datadog cloud (paid)' },
+];
+const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const compareRows = compare.map((c) => ({ head: esc(c.name), self: c.self, cells: [c.where, c.license, c.job, c.eol, c.ext].map(esc) }));
+
+// The reference tables below render through FitTable, which never scrolls
+// sideways (rows stack under a narrow container). Cells are HTML.
+const multipartLimits = [
+  { head: 'max_parts', cells: ['2000', 'Floods of form-field parts'] },
+  { head: 'max_files', cells: ['200', 'File-part floods (the PHP2Shell shape)'] },
+  { head: 'max_filename_bytes', cells: ['512', 'Oversized filenames'] },
+  { head: 'max_field_name_bytes', cells: ['1024', 'Oversized field names'] },
+  { head: 'max_parse_memory_bytes', cells: ['256&nbsp;MiB', 'Total body Howdah will process'] },
+];
+const inputLimits = [
+  { head: 'max_input_vars', cells: ['2000', 'Variable / hash-collision floods'] },
+  { head: 'max_input_nesting_depth', cells: ['64', 'Deeply nested arrays'] },
+  { head: 'max_input_key_bytes', cells: ['1024', 'Oversized variable names / keys'] },
+  { head: 'max_request_headers', cells: ['200', 'Request-header floods'] },
+  { head: 'max_request_header_bytes', cells: ['16&nbsp;KiB', 'Oversized header lines'] },
+];
+const inspectClasses = [
+  { head: 'SQL injection', cells: ['<code>sql_injection</code>', '<code>&#39; OR 1=1 --</code>'] },
+  { head: 'Path traversal', cells: ['<code>path_traversal</code>', '<code>../../etc/passwd</code>'] },
+  { head: 'Command / code injection', cells: ['<code>command_injection</code>', '<code>; cat /etc/passwd</code>'] },
+];
+const coreSinks = [
+  { head: 'Command execution', cells: ['<code>system</code>, <code>exec</code>, <code>shell_exec</code>, <code>passthru</code>, <code>popen</code>, <code>proc_open</code>', 'Logs when not allowlisted'] },
+  { head: 'Unserialize', cells: ['<code>unserialize</code>', '<strong>Off</strong>; opt in to log'] },
+  { head: 'Include', cells: ['<code>include</code>, <code>require</code>', 'Inert until <code>allow_paths</code> is set'] },
+  { head: 'Eval', cells: ['<code>eval</code>', 'Logs when reached'] },
+  { head: 'Phar', cells: ['<code>phar://</code> via stream functions and <code>include</code>', '<strong>Off</strong>; opt in per sink'] },
+  { head: 'SSRF', cells: ['<code>file_get_contents</code>, <code>fopen</code>, <code>get_headers</code>, <code>fsockopen</code>, <code>stream_socket_client</code>, curl', '<strong>Off</strong>; opt in per sink'] },
+];
+const behaviorFacets = [
+  { head: 'Execution origin', cells: ['<code>deny_exec_dirs</code>', 'PHP run from a denied directory, as the requested script or <code>require</code>d by another'] },
+  { head: 'Expected binaries', cells: ['<code>allow_exec_binaries</code>', '<code>exec</code>, <code>system</code>, <code>popen</code>, <code>proc_open</code>, <code>shell_exec</code>, <code>passthru</code> to a program not on the list'] },
+  { head: 'Expected egress', cells: ['<code>allow_egress_hosts</code>', 'An outbound connection to a host not on the list'] },
+  { head: '<code>.php</code> writes', cells: ['<code>deny_php_writes</code>', 'A PHP file written into a denied directory, or from a script that lives in one'] },
+];
+// Layer 3 by PHP version: every core sink detects and blocks on every
+// generation; the footnotes carry the differences the old table spelled out.
+const sinkVersions = [
+  { sink: 'Command execution', marks: ['', '', ''] },
+  { sink: '<code>unserialize</code> (off by default)', marks: ['', '', ''] },
+  { sink: '<code>include</code> / <code>require</code>', marks: ['1', '', ''] },
+  { sink: '<code>eval</code>', marks: ['', '', ''] },
+  { sink: '<code>phar://</code> (off by default)', marks: ['2', '2', '3'] },
+  { sink: 'SSRF (off by default)', marks: ['', '', ''] },
+];
+const aptLines = [
+  'sudo install -d -m 0755 /etc/apt/keyrings',
+  'curl -fsSL https://howdah.org/key.asc | sudo tee /etc/apt/keyrings/howdah.asc >/dev/null',
+  `echo "deb [signed-by=/etc/apt/keyrings/howdah.asc] ${PKG}/apt stable main" \\`,
+  '  | sudo tee /etc/apt/sources.list.d/howdah.list',
+  'sudo apt-get update && sudo apt-get install php8.1-howdah',
 ];
 ---
 <Layout
@@ -157,37 +213,13 @@ const compare = [
       <div class="cols two" style="margin-top:1.5rem">
         <div>
           <h3>Multipart upload limits</h3>
-          <div class="tablewrap" tabindex="0" role="region" aria-label="Multipart limits (scrolls sideways on narrow screens)">
-            <table>
-              <caption class="sr-only">Multipart upload default limits</caption>
-              <thead><tr><th scope="col">Limit</th><th scope="col">Default</th><th scope="col">Stops</th></tr></thead>
-              <tbody>
-                <tr><th scope="row">max_parts</th><td>2000</td><td>Floods of form-field parts</td></tr>
-                <tr><th scope="row">max_files</th><td>200</td><td>File-part floods (the PHP2Shell shape)</td></tr>
-                <tr><th scope="row">max_filename_bytes</th><td>512</td><td>Oversized filenames</td></tr>
-                <tr><th scope="row">max_field_name_bytes</th><td>1024</td><td>Oversized field names</td></tr>
-                <tr><th scope="row">max_parse_memory_bytes</th><td>256&nbsp;MiB</td><td>Total body Howdah will process</td></tr>
-              </tbody>
-            </table>
-          </div>
+          <FitTable caption="Multipart upload default limits" cols={['Limit', 'Default', 'Stops']} rows={multipartLimits} />
           <p class="legend">Enforced <strong>while PHP parses the body</strong>, before per-part memory is allocated — the 403/413 lands before your script runs. <code>max_part_headers</code> and <code>max_part_header_bytes</code> also exist but are best-effort (only the <code>Content-Disposition</code> header reaches the extension).</p>
         </div>
         <div>
           <h3>Input-shape &amp; request-header limits</h3>
-          <div class="tablewrap" tabindex="0" role="region" aria-label="Input and header limits (scrolls sideways on narrow screens)">
-            <table>
-              <caption class="sr-only">Input-shape and request-header default limits</caption>
-              <thead><tr><th scope="col">Limit</th><th scope="col">Default</th><th scope="col">Stops</th></tr></thead>
-              <tbody>
-                <tr><th scope="row">max_input_vars</th><td>2000</td><td>Variable / hash-collision floods</td></tr>
-                <tr><th scope="row">max_input_nesting_depth</th><td>64</td><td>Deeply nested arrays</td></tr>
-                <tr><th scope="row">max_input_key_bytes</th><td>1024</td><td>Oversized variable names / keys</td></tr>
-                <tr><th scope="row">max_request_headers</th><td>200</td><td>Request-header floods</td></tr>
-                <tr><th scope="row">max_request_header_bytes</th><td>16&nbsp;KiB</td><td>Oversized header lines</td></tr>
-              </tbody>
-            </table>
-          </div>
-          <p class="legend"><strong>Honest caveat:</strong> for these, the guaranteed mitigation is that Howdah <strong>drops the offending variable</strong> (bounding the symbol table) and logs it. The 403 is best-effort and may arrive at request shutdown on SAPIs that build superglobals lazily. See the <a href="/docs/configuration/">rule reference</a>.</p>
+          <FitTable caption="Input-shape and request-header default limits" cols={['Limit', 'Default', 'Stops']} rows={inputLimits} />
+          <p class="legend"><strong>Honest caveat:</strong> the input-shape limits <strong>drop the offending variable</strong> (bounding the symbol table), log it, and refuse the request before your script runs. The request-header limits drop nothing: they log, and when the script builds <code>$_SERVER</code> itself and Layer 2 is not armed, the 403 is set at request shutdown, after the script; there the log line is the signal. See <a href="/docs/configuration/#enforcement-timing">enforcement timing</a>.</p>
         </div>
       </div>
       <p class="legend" style="margin-top:1.5rem"><strong>Modes &amp; severity.</strong> Critical rules (the unambiguous resource-exhaustion shapes) block even in <code>detect</code> mode; Standard rules log in detect and block only in <code>block</code> mode. This is why a &ldquo;start in detect&rdquo; rollout still refuses the critical resource-exhaustion shapes while you watch everything else. (Howdah does not claim to block CVE-2026-109618 on a stock configuration &mdash; see the <a href="/coverage/">coverage page</a> for exactly what was tested.) Full directive and rule reference: <a href="/docs/configuration/">Configuration</a>.</p>
@@ -201,17 +233,7 @@ const compare = [
       <div class="cols two" style="margin-top:1.5rem">
         <div>
           <h3>Three classes of pattern</h3>
-          <div class="tablewrap" tabindex="0" role="region" aria-label="Layer 2 detection classes (scrolls sideways on narrow screens)">
-            <table>
-              <caption class="sr-only">Layer 2 detection classes with illustrative shapes</caption>
-              <thead><tr><th scope="col">Class</th><th scope="col">Rule name</th><th scope="col">Example shape</th></tr></thead>
-              <tbody>
-                <tr><th scope="row">SQL injection</th><td><code>sql_injection</code></td><td><code>&#39; OR 1=1 --</code></td></tr>
-                <tr><th scope="row">Path traversal</th><td><code>path_traversal</code></td><td><code>../../etc/passwd</code></td></tr>
-                <tr><th scope="row">Command / code injection</th><td><code>command_injection</code></td><td><code>; cat /etc/passwd</code></td></tr>
-              </tbody>
-            </table>
-          </div>
+          <FitTable caption="Layer 2 detection classes with illustrative shapes" cols={['Class', 'Rule name', 'Example shape']} rows={inspectClasses} />
           <p class="legend">The examples illustrate each shape; they are not a complete list of what is matched. Cross-site scripting (XSS) is <strong>not</strong> covered.</p>
           <h3 style="margin-top:1.5rem">How detection works</h3>
           <p>A small, high-confidence signature scan that runs in linear time, so there is no catastrophic backtracking. Work is bounded per value and per request, so the scan itself cannot be turned into a denial of service; values past a budget are not scanned.</p>
@@ -221,7 +243,7 @@ const compare = [
           <p>Layer 2 has its own <code>inspect.mode</code>, which defaults to <code>detect</code> (log only). It is independent of the global <code>howdah.mode</code>: setting <code>howdah.mode = block</code> does <strong>not</strong> arm it. To block, an operator sets <code>inspect.mode</code>, or one class, to <code>block</code> explicitly.</p>
           <h3 style="margin-top:1.5rem">What a detection looks like</h3>
           <p>One JSON log line carrying the rule class, the source (<code>get</code>, <code>post</code>, <code>cookie</code> or <code>path</code>) and the variable name. The matched value is never logged.</p>
-          <pre tabindex="0" data-sample="event"><code>{`{"action":"log","client_ip":"203.0.113.7","layer":2,"method":"GET","reason":"sql_injection pattern in get variable 'q'","request_id":"1a2d239820e2f06bc","rule":"sql_injection","schema":2,"ts":"1792864974146","uri":"/index.php","version":"1.5.0"}`}</code></pre>
+          <pre class="fold hang" data-sample="event"><code>{`{"action":"log","client_ip":"203.0.113.7","layer":2,"method":"GET","reason":"sql_injection pattern in get variable 'q'","request_id":"1a2d239820e2f06bc","rule":"sql_injection","schema":2,"ts":"1792864974146","uri":"/index.php","version":"1.5.0"}`}</code></pre>
           <p class="legend">From a lab run (PHP 7.4, php-fpm, request <code>/index.php?q=' OR 1=1 --</code>). The query string is stripped from the logged <code>uri</code>; for a path detection the path itself is the logged URI. Every field: <a href="/docs/configuration/#log">event log reference</a>.</p>
         </div>
       </div>
@@ -236,37 +258,25 @@ const compare = [
       <div class="cols two" style="margin-top:1.5rem">
         <div>
           <h3>The six core sinks</h3>
-          <div class="tablewrap" tabindex="0" role="region" aria-label="Layer 3 core sinks (scrolls sideways on narrow screens)">
-            <table>
-              <caption class="sr-only">Layer 3 core sinks</caption>
-              <thead><tr><th scope="col">Sink</th><th scope="col">Functions</th><th scope="col">Default</th></tr></thead>
-              <tbody>
-                <tr><th scope="row">Command execution</th><td><code>system</code>, <code>exec</code>, <code>shell_exec</code>, <code>passthru</code>, <code>popen</code>, <code>proc_open</code></td><td>Logs when not allowlisted</td></tr>
-                <tr><th scope="row">Unserialize</th><td><code>unserialize</code></td><td><strong>Off</strong>; opt in to log</td></tr>
-                <tr><th scope="row">Include</th><td><code>include</code>, <code>require</code></td><td>Inert until <code>allow_paths</code> is set</td></tr>
-                <tr><th scope="row">Eval</th><td><code>eval</code></td><td>Logs when reached</td></tr>
-                <tr><th scope="row">Phar</th><td><code>phar://</code> via stream functions and <code>include</code></td><td><strong>Off</strong>; opt in per sink</td></tr>
-                <tr><th scope="row">SSRF</th><td><code>file_get_contents</code>, <code>fopen</code>, <code>get_headers</code>, <code>fsockopen</code>, <code>stream_socket_client</code>, curl</td><td><strong>Off</strong>; opt in per sink</td></tr>
-              </tbody>
-            </table>
-          </div>
+          <FitTable caption="Layer 3 core sinks" cols={['Sink', 'Functions', 'Default']} rows={coreSinks} />
           <p class="legend">Known limitation: <code>proc_open</code> with an array command (PHP 7.4+) is not inspected.</p>
           <p class="legend"><strong>Seven legacy sinks (new in 1.5), all log-first:</strong> <code>mail_injection</code>, <code>preg_eval</code> (PHP 5.x), <code>create_function</code> and <code>assert_string</code> (5.x/7.x), <code>dangerous_callback</code>, <code>xxe</code> (with <code>[sinks.xml] external_entities</code>), and <code>tls_verify</code> (detect-only). See the <a href="/docs/configuration/#layer-3-sinks">configuration reference</a> for each one's PHP-version applicability and defaults.</p>
           <h3 style="margin-top:1.5rem">Coverage by PHP version</h3>
-          <div class="tablewrap" tabindex="0" role="region" aria-label="Layer 3 coverage by PHP version (scrolls sideways on narrow screens)">
+          <div class="vmatrix">
             <table>
-              <caption class="sr-only">Layer 3 sink coverage by PHP version</caption>
-              <thead><tr><th scope="col">Sink</th><th scope="col">PHP 5.4–5.6</th><th scope="col">PHP 7.0–7.4</th><th scope="col">PHP 8.0–8.5</th></tr></thead>
+              <caption class="sr-only">Layer 3 sink coverage by PHP version: every cell is detect and block</caption>
+              <thead><tr><th scope="col">Sink</th><th scope="col">PHP <span class="nw">5.4–5.6</span></th><th scope="col">PHP <span class="nw">7.0–7.4</span></th><th scope="col">PHP <span class="nw">8.0–8.5</span></th></tr></thead>
               <tbody>
-                <tr><th scope="row">Command execution</th><td><span class="pill ok">detect + block</span></td><td><span class="pill ok">detect + block</span></td><td><span class="pill ok">detect + block</span></td></tr>
-                <tr><th scope="row"><code>unserialize</code> (off by default)</th><td><span class="pill ok">detect + block</span></td><td><span class="pill ok">detect + block</span></td><td><span class="pill ok">detect + block</span></td></tr>
-                <tr><th scope="row"><code>include</code> / <code>require</code></th><td><span class="pill ok">detect + block</span> (opcache caveat)</td><td><span class="pill ok">detect + block</span></td><td><span class="pill ok">detect + block</span></td></tr>
-                <tr><th scope="row"><code>eval</code></th><td><span class="pill ok">detect + block</span></td><td><span class="pill ok">detect + block</span></td><td><span class="pill ok">detect + block</span></td></tr>
-                <tr><th scope="row"><code>phar://</code> (off by default)</th><td><span class="pill ok">detect + block</span>, deserialization</td><td><span class="pill ok">detect + block</span>, deserialization</td><td><span class="pill ok">detect + block</span> only (no deserialization claim)</td></tr>
-                <tr><th scope="row">SSRF (off by default)</th><td><span class="pill ok">detect + block</span></td><td><span class="pill ok">detect + block</span></td><td><span class="pill ok">detect + block</span></td></tr>
+                {sinkVersions.map((s) => (
+                  <tr>
+                    <th scope="row" set:html={s.sink} />
+                    {s.marks.map((m) => <td><span class="mark" aria-hidden="true">✓</span><span class="sr-only">detect and block{m && `, note ${m}`}</span>{m && <sup aria-hidden="true">{m}</sup>}</td>)}
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
+          <p class="legend"><span aria-hidden="true">✓</span> = detect and block (when armed). <sup>1</sup>&nbsp;Checked at compile time: a file served from a warm opcache is not re-inspected. <sup>2</sup>&nbsp;Includes phar metadata deserialization through the stream wrapper. <sup>3</sup>&nbsp;Detection and denial of <code>phar://</code> use only; no deserialization claim.</p>
           <p class="legend">Verified on PHP 5.4, 5.6, 7.4, 8.3 and 8.5; other minors build and are expected to work but are not independently verified. A debug-build leak review is pending. Blocking an include or eval stops it running and the script continues. <strong>PHP 5.x <code>include</code> is checked at compile time, so a file served from a warm opcache is not re-inspected</strong> (<code>eval</code> is unaffected; the 7.0+ opcode handler is not affected by opcache). <strong>Phar:</strong> on PHP 5.x/7.x this covers metadata deserialization via the stream wrapper; on 8.x it is detection and denial of <code>phar://</code> use only. The direct Phar API (<code>new Phar</code>, <code>PharData</code>, <code>Phar::loadPhar</code>, <code>Phar::mapPhar</code>, <code>Phar::getMetadata</code>) is not covered. <strong>SSRF</strong> is best-effort, resolve-at-check-time detection, not a connection-time boundary: DNS rebinding, redirects, <code>curl_multi_*</code>, <code>CURLOPT_RESOLVE</code>/<code>CONNECT_TO</code> and a non-string or absent <code>CURLOPT_URL</code> bypass it, and <code>copy</code>, <code>file</code>, <code>readfile</code>, <code>SoapClient</code>, <code>DOMDocument::load*</code> and <code>simplexml_load_file</code> are not hooked. It adds a DNS lookup per distinct outbound host with no timeout. More detail on the <a href="/coverage/">coverage page</a>.</p>
         </div>
         <div>
@@ -287,18 +297,7 @@ const compare = [
       <div class="cols two" style="margin-top:1.5rem">
         <div>
           <h3>Four things it watches</h3>
-          <div class="tablewrap" tabindex="0" role="region" aria-label="Layer 4 facets (scrolls sideways on narrow screens)">
-            <table>
-              <caption class="sr-only">Layer 4 facets in 1.4</caption>
-              <thead><tr><th scope="col">Facet</th><th scope="col">Setting</th><th scope="col">Flags</th></tr></thead>
-              <tbody>
-                <tr><th scope="row">Execution origin</th><td><code>deny_exec_dirs</code></td><td>PHP run from a denied directory, as the requested script or <code>require</code>d by another</td></tr>
-                <tr><th scope="row">Expected binaries</th><td><code>allow_exec_binaries</code></td><td><code>exec</code>, <code>system</code>, <code>popen</code>, <code>proc_open</code>, <code>shell_exec</code>, <code>passthru</code> to a program not on the list</td></tr>
-                <tr><th scope="row">Expected egress</th><td><code>allow_egress_hosts</code></td><td>An outbound connection to a host not on the list</td></tr>
-                <tr><th scope="row"><code>.php</code> writes</th><td><code>deny_php_writes</code></td><td>A PHP file written into a denied directory, or from a script that lives in one</td></tr>
-              </tbody>
-            </table>
-          </div>
+          <FitTable caption="Layer 4 facets in 1.4" cols={['Facet', 'Setting', 'Flags']} rows={behaviorFacets} />
           <p class="legend">Lab-verified on PHP 5.4, 5.6, 7.4, 8.3, 8.4 and 8.5: 27 checks per version, covering each facet in <code>detect</code> and <code>block</code>, that a framework-style view write and a plain read of a <code>.php</code> file are not flagged, and that the default configuration is inert. Other minors are not independently verified. More detail on the <a href="/coverage/">coverage page</a>.</p>
         </div>
         <div>
@@ -361,33 +360,7 @@ const compare = [
     <div class="wrap">
       <h2>How Howdah compares</h2>
       <p>Howdah does a narrow set of things well: request-shape limits that block, plus log-first input inspection, sink hardening and after-breach checks &mdash; all from inside PHP, on versions most tools no longer cover. It is not a general-purpose WAF. Here is where it sits among tools people reach for, as of {compareAsOf}.</p>
-      <div class="tablewrap" tabindex="0" role="region" aria-label="Comparison with other tools (scrolls sideways on narrow screens)">
-        <table>
-          <caption class="sr-only">How Howdah compares with other PHP protection tools, as of {compareAsOf}</caption>
-          <thead>
-            <tr>
-              <th scope="col">Tool</th>
-              <th scope="col">Where it runs</th>
-              <th scope="col">License</th>
-              <th scope="col">Main job</th>
-              <th scope="col">Runs on EOL PHP (5.4&ndash;8.1)?</th>
-              <th scope="col">External service</th>
-            </tr>
-          </thead>
-          <tbody>
-            {compare.map((c) => (
-              <tr style={c.self ? 'background:var(--hot-bg)' : undefined}>
-                <th scope="row">{c.name}</th>
-                <td>{c.where}</td>
-                <td>{c.license}</td>
-                <td>{c.job}</td>
-                <td>{c.eol}</td>
-                <td>{c.ext}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <FitTable stack="wide" caption={`How Howdah compares with other PHP protection tools, as of ${compareAsOf}`} cols={['Tool', 'Where it runs', 'License', 'Main job', 'Runs on EOL PHP (5.4–8.1)?', 'External service']} rows={compareRows} />
       <p class="legend">Compiled {compareAsOf} from each project's own documentation: Snuffleupagus (snuffleupagus.readthedocs.io), OpenRASP (github.com/baidu/openrasp), Aikido Zen (github.com/AikidoSec/firewall-php), ModSecurity &amp; OWASP CRS (owasp.org / owasp-modsecurity), Datadog (docs.datadoghq.com). These tools do more than Howdah in their own areas; Howdah's point is the narrow, in-PHP, EOL-friendly niche. Found something out of date? <a href={`${REPO}/issues`}>Tell us</a>.</p>
     </div>
   </section>
@@ -404,14 +377,10 @@ const compare = [
     <div class="wrap">
       <h2>Install in a minute</h2>
       <p>On Debian/Ubuntu with the apt repository (one build per PHP minor; replace <code>8.1</code> with yours). The key is pinned to this repo only:</p>
-      <pre tabindex="0"><code>sudo install -d -m 0755 /etc/apt/keyrings
-curl -fsSL https://howdah.org/key.asc | sudo tee /etc/apt/keyrings/howdah.asc &gt;/dev/null
-echo "deb [signed-by=/etc/apt/keyrings/howdah.asc] {PKG}/apt stable main" \
-  | sudo tee /etc/apt/sources.list.d/howdah.list
-sudo apt-get update &amp;&amp; sudo apt-get install php8.1-howdah</code></pre>
+      <pre class="fold"><code>{aptLines.map((l) => <span class="l">{l}</span>)}</code></pre>
       <p>On RHEL/CentOS/Alma (Remi layout) the package is <code>php81-howdah</code> via <code>yum</code>, with both package and metadata signatures enforced. Both package names, the exact <code>.repo</code> file, the signed-tarball path for other setups, and the verify/rollback steps are in the picker. Once it is installed, the config editor writes your <code>howdah.ini</code> and <code>howdah.toml</code> from a form and checks the TOML with the extension's own parser.</p>
       <p>Prefer containers? Pull a ready-made image &mdash; Howdah is installed and enabled in detect mode:</p>
-      <pre tabindex="0"><code>docker pull ghcr.io/howdah/howdah:{shortVersion}-php8.3</code></pre>
+      <pre class="fold hang"><code>docker pull ghcr.io/howdah/howdah:{VERSION}-php8.3</code></pre>
       <p>Images cover PHP 5.6&ndash;8.5 (Debian, amd64 + arm64); an <code>-alpine</code> variant covers PHP 7.2&ndash;8.5 (amd64). Or use a signed, SLSA-attested tarball for any other setup &mdash; every method is in the <a href="/install/#docker">install picker</a>.</p>
       <div class="cta"><a class="btn primary" href="/install/">Open the install picker</a> <a class="btn ghost" href="/config/">Build your config file</a> <a class="btn ghost" href="/coverage/">Check your PHP version first</a></div>
     </div>
@@ -435,6 +404,17 @@ sudo apt-get update &amp;&amp; sudo apt-get install php8.1-howdah</code></pre>
   .d-tm { fill: var(--muted); font: 500 12.5px/1 var(--sans); }
   .d-strong { font-weight: 700; }
   .d-mono { font-family: var(--mono); font-size: 12px; }
+
+  /* Layer 3 by PHP version: a check-mark matrix narrow enough for a phone. */
+  .vmatrix { border: 1px solid var(--rule); border-radius: 10px; background: var(--surface); overflow-x: auto; }
+  .vmatrix table { min-width: 0; }
+  .vmatrix tbody th { white-space: normal; overflow-wrap: break-word; }
+  .vmatrix thead th:not(:first-child), .vmatrix td { text-align: center; }
+  .vmatrix th, .vmatrix td { padding: .55rem .6rem; }
+  .vmatrix .mark { color: var(--ok); font-weight: 700; }
+  .vmatrix sup { color: var(--muted); margin-left: .1rem; }
+  .vmatrix .nw { white-space: nowrap; }
+  @media (max-width: 22.4rem) { .vmatrix .nw { white-space: normal; } }
 
   /* Four-layer diagram: a top-down stack the request flows through. */
   .layers { list-style: none; margin: 1.5rem 0 0; padding: 0; display: grid; gap: .6rem; counter-reset: none; }

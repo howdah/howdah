@@ -149,6 +149,13 @@ td small { display: block; color: var(--muted); margin-top: .2rem; font-size: .8
 /* ---------- code ---------- */
 pre { background: var(--code-bg); color: var(--code-ink); border-radius: 10px; padding: 1rem 1.2rem; overflow-x: auto; font: 400 .88rem/1.6 var(--mono); margin: 1rem 0 1.5rem; max-width: 100%; border: 1px solid var(--rule); }
 pre .c { color: var(--code-dim); }
+/* Code that wraps instead of scrolling sideways. Wrapped continuation lines
+   hang two characters in, so each line's start stays visible: per line with
+   <span class="l">, or for a single-line block with .hang. */
+pre.fold { white-space: pre-wrap; overflow-x: visible; }
+pre.fold code { overflow-wrap: anywhere; }
+pre.fold .l { display: block; padding-left: 2ch; text-indent: -2ch; }
+pre.hang { padding-left: calc(1.2rem + 2ch); text-indent: -2ch; }
 .steps { counter-reset: s; list-style: none; padding: 0; margin: 0; }
 .steps > li { counter-increment: s; position: relative; padding-left: 3rem; margin-bottom: 1.25rem; }
 .steps > li::before { content: counter(s); position: absolute; left: 0; top: .1rem; width: 2.1rem; height: 2.1rem; border-radius: 50%; background: var(--hot-bg); color: var(--ink); border: 2px solid var(--hot); font: 600 .95rem/1.85rem var(--mono); text-align: center; }

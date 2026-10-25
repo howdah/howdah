@@ -49,37 +49,41 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
   </div>
 
   <section>
-    <div class="wrap editor">
+    <div class="editor">
       <form id="cfg" aria-label="Howdah configuration" autocomplete="off">
-        <div class="presets" role="group" aria-label="Start from">
-          <span class="presets-label">Start from</span>
-          <button type="button" class="btn ghost" data-preset="defaults">Shipped defaults</button>
-          <button type="button" class="btn ghost" data-preset="enforcing">Enforcing</button>
-          <a class="btn ghost jump" href="#out">Your files ↓</a>
-          <details class="load">
-            <summary class="btn ghost">Application profile…</summary>
-            <p class="small">Start from a shipped profile for a vanilla install: a complete detect-mode file whose <code>[[exceptions]]</code> entries and commented allowlist suggestions cover the application's own verified behaviours, each with a cited reason. It is loaded through the same path as "Load existing" and parsed by the core first. Replace <code>/var/www/html</code> with your docroot and read every entry; nothing is applied automatically. Source: <a href={REPO + '/tree/main/profiles'}>profiles/</a>.</p>
-            <div class="row">
-              <label for="profile-pick" class="sr-only">Application profile</label>
-              <select id="profile-pick">
-                {SCHEMA.profiles.map((p) => <option value={p.id}>{p.title}</option>)}
-              </select>
-              <button type="button" class="btn primary" id="profile-btn">Load profile into the form</button>
-              <a class="btn ghost" id="profile-raw" href="/profiles/wordpress.toml" download>Download the .toml</a>
+        <div class="startfrom" role="group" aria-label="Start from">
+          <div class="sf-presets">
+            <span class="sf-label">Start from</span>
+            <button type="button" class="btn ghost" data-preset="defaults">Shipped defaults</button>
+            <button type="button" class="btn ghost" data-preset="enforcing">Enforcing</button>
+            <a class="btn ghost jump" href="#out">Your files ↓</a>
+          </div>
+          <div class="sf-grid">
+            <div class="sf-card">
+              <span class="sf-h">An application profile</span>
+              <p class="small">A complete detect-mode file for a vanilla install, with <code>[[exceptions]]</code> and commented allowlist suggestions for that app's verified behaviours, each with a cited reason. Parsed by the core, then loaded into the form — nothing is applied automatically. Replace <code>/var/www/html</code> with your docroot and read every entry. Source: <a href={REPO + '/tree/main/profiles'}>profiles/</a>.</p>
+              <div class="row">
+                <label for="profile-pick" class="sr-only">Application profile</label>
+                <select id="profile-pick">
+                  {SCHEMA.profiles.map((p) => <option value={p.id}>{p.title}</option>)}
+                </select>
+                <button type="button" class="btn primary" id="profile-btn">Load into the form</button>
+                <a class="btn ghost" id="profile-raw" href="/profiles/wordpress.toml" download>Download .toml</a>
+              </div>
+              <p id="profile-msg" class="msg" aria-live="polite"></p>
             </div>
-            <p id="profile-msg" class="msg" aria-live="polite"></p>
-          </details>
-          <details class="load">
-            <summary class="btn ghost">Load existing…</summary>
-            <p class="small">Paste a <code>howdah.toml</code> or choose the file. It is parsed by the core first; if the core rejects it, you see the exact error and the form is left as it is.</p>
-            <label for="load-text" class="sr-only">Existing howdah.toml</label>
-            <textarea id="load-text" rows="6" spellcheck="false" placeholder='mode = "detect"&#10;[limits]&#10;max_files = 50'></textarea>
-            <div class="row">
-              <label class="btn ghost file"><input type="file" id="load-file" accept=".toml,text/plain,text/toml" /> Choose file</label>
-              <button type="button" class="btn primary" id="load-btn">Load into the form</button>
+            <div class="sf-card">
+              <span class="sf-h">An existing <code>howdah.toml</code></span>
+              <p class="small">Paste it or choose the file. The core parses it first; if it rejects the file you see the exact error and the form is left as it is.</p>
+              <label for="load-text" class="sr-only">Existing howdah.toml</label>
+              <textarea id="load-text" rows="4" spellcheck="false" placeholder='mode = "detect"&#10;[limits]&#10;max_files = 50'></textarea>
+              <div class="row">
+                <label class="btn ghost file"><input type="file" id="load-file" accept=".toml,text/plain,text/toml" /> Choose file</label>
+                <button type="button" class="btn primary" id="load-btn">Load into the form</button>
+              </div>
+              <p id="load-msg" class="msg" aria-live="polite"></p>
             </div>
-            <p id="load-msg" class="msg" aria-live="polite"></p>
-          </details>
+          </div>
         </div>
         <p class="js-note" data-nojs>Showing the shipped defaults. With JavaScript, the files on the right update as you change the controls, and each change is validated by the real core. Without it, this page is still a reference for every setting it offers, with its default and what it does. The <code>[log]</code> and <code>[behavior]</code> (Layer 4) tables are not offered here; they are in the <a href="/docs/configuration/">configuration reference</a>.</p>
 
@@ -543,35 +547,43 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
 </script>
 
 <style>
-  /* Single column on narrow screens: give it an explicit minmax(0,1fr) track so
-     it stays viewport-width. Without it the implicit grid track sizes to
-     max-content and a wide child (the exceptions table / output panel) blows
-     out the page; min-width:0 on the item lets inner panels scroll inside it. */
-  .editor { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2rem; padding-block: 2rem; }
+  /* The editor is a tool, not prose, so it gets a wider container than the
+     68rem text column and sets its own gutter (it is no longer inside .wrap).
+     Single column on narrow screens with an explicit minmax(0,1fr) track so it
+     stays viewport-width: without it the implicit track sizes to max-content
+     and a wide child (the exceptions table / output panel) blows out the page.
+     min-width:0 on the items lets inner panels scroll inside them. */
+  .editor { width: 100%; max-width: 92rem; margin-inline: auto; padding: 0 16px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 2.5rem; }
   .editor > * { min-width: 0; }
-  @media (min-width: 60rem) { .editor { grid-template-columns: minmax(0, 1.25fr) minmax(20rem, 1fr); gap: 2.5rem; } #out { position: sticky; top: 1rem; align-self: start; max-height: calc(100vh - 2rem); overflow: auto; } }
-  .presets { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin-bottom: 1rem; }
-  .presets-label { font-weight: 600; margin-right: .3rem; }
+  @media (min-width: 48rem) { .editor { padding-inline: 32px; } }
+  @media (min-width: 64rem) { .editor { grid-template-columns: minmax(0, 1.15fr) minmax(27rem, .95fr); gap: 3rem; } #out { position: sticky; top: 1rem; align-self: start; max-height: calc(100vh - 2rem); overflow: auto; } }
+
+  /* "Start from" is surfaced in a panel, not tucked behind disclosures. */
+  .startfrom { margin-bottom: 1.75rem; }
+  .sf-presets { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin-bottom: 1rem; }
+  .sf-label { font-weight: 600; margin-right: .3rem; }
   .jump { margin-left: auto; }
-  @media (min-width: 60rem) { .jump { display: none; } }
-  .load { flex-basis: 100%; }
-  .load summary { list-style: none; cursor: pointer; }
-  .load summary::-webkit-details-marker { display: none; }
-  .load[open] { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: .75rem 1rem 1rem; }
-  .load textarea { width: 100%; font-family: var(--mono); font-size: .9rem; margin: .5rem 0; }
+  @media (min-width: 64rem) { .jump { display: none; } }
+  .sf-grid { display: grid; gap: 1rem; grid-template-columns: 1fr; }
+  @media (min-width: 42rem) { .sf-grid { grid-template-columns: 1fr 1fr; } }
+  .sf-card { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: .9rem 1.1rem 1rem; }
+  .sf-h { display: block; font-family: var(--display); font-weight: 600; font-size: 1.05rem; margin-bottom: .1rem; }
+  .sf-card .small { margin-top: .25rem; }
+  .sf-card textarea { width: 100%; font-family: var(--mono); font-size: .9rem; min-height: 5rem; margin: .25rem 0 0; padding: .4rem .6rem; border: 1px solid var(--rule); border-radius: 6px; background: var(--bg); color: var(--ink); }
+  .sf-card select { flex: 1 1 12rem; max-width: 100%; min-height: 44px; font: inherit; font-family: var(--mono); padding: .4rem .6rem; border: 1px solid var(--rule); border-radius: 6px; background: var(--bg); color: var(--ink); }
   .file input { position: absolute; width: 1px; height: 1px; opacity: 0; }
   .file:focus-within { outline: 3px solid var(--focus); outline-offset: 2px; }
-  .row { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: .6rem; }
+  .row { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: .6rem; align-items: center; }
   .msg:empty { display: none; }
   .msg { margin: .6rem 0 0; }
-  #cfg fieldset { border: 1px solid var(--rule); background: var(--surface); border-radius: 10px; margin: 0 0 1.25rem; padding: .75rem 1.1rem 1rem; min-width: 0; }
+  #cfg fieldset { border: 1px solid var(--rule); background: var(--surface); border-radius: 10px; margin: 0 0 1.5rem; padding: 1rem 1.3rem 1.2rem; min-width: 0; }
   #cfg legend { font-weight: 600; font-family: var(--display); padding: 0 .4rem; font-size: 1.15rem; }
   #cfg .small, .small { font-size: .9rem; color: var(--muted); margin: .25rem 0 .75rem; }
   .group h3 { font-size: 1rem; font-family: var(--sans); margin: 1rem 0 .25rem; }
-  .ctl { padding: .55rem 0; border-top: 1px solid var(--rule); }
+  .ctl { padding: .7rem 0; border-top: 1px solid var(--rule); }
   .ctl:first-of-type { border-top: 0; }
   .ctl label { display: block; margin-bottom: .3rem; }
-  .ctl input[type=number], .ctl input[type=text], .ctl select, .ctl textarea { width: 100%; max-width: 28rem; min-height: 44px; font-size: 1rem; font-family: var(--mono); padding: .4rem .6rem; border: 1px solid var(--rule); border-radius: 6px; background: var(--bg); color: var(--ink); }
+  .ctl input[type=number], .ctl input[type=text], .ctl select, .ctl textarea { width: 100%; max-width: 34rem; min-height: 44px; font-size: 1rem; font-family: var(--mono); padding: .4rem .6rem; border: 1px solid var(--rule); border-radius: 6px; background: var(--bg); color: var(--ink); }
   .ctl textarea { min-height: 5rem; }
   .ctl input[type=checkbox] { width: 1.5rem; height: 1.5rem; }
   .ctl small { display: block; color: var(--muted); font-size: .85rem; margin-top: .3rem; max-width: 60ch; }
@@ -592,10 +604,10 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
   .tag.critical { background: var(--no-bg); color: var(--no); border-color: transparent; }
   .tag.standard { background: var(--ok-bg); color: var(--ok); border-color: transparent; }
   .tag.php { background: var(--hot-bg); color: var(--hot); border-color: transparent; }
-  #out { background: var(--surface); border: 2px solid var(--rule); border-radius: 10px; padding: 1rem 1.2rem 1.2rem; min-width: 0; }
+  #out { background: var(--surface); border: 2px solid var(--rule); border-radius: 10px; padding: 1.25rem 1.4rem 1.4rem; min-width: 0; }
   #out h2 { margin-top: 0; font-size: 1.3rem; }
   #out h3 { font-size: 1.05rem; margin: 1.25rem 0 .4rem; }
-  #out pre { margin: 0; max-height: 24rem; overflow: auto; white-space: pre; }
+  #out pre { margin: 0; max-height: 32rem; overflow: auto; white-space: pre; }
   .valid { font-weight: 600; padding: .5rem .7rem; border-radius: 6px; border-left: 4px solid var(--rule); background: var(--bg); }
   .valid.ok { border-left-color: var(--ok); }
   .valid.bad { border-left-color: var(--no); font-family: var(--mono); font-weight: 500; font-size: .9rem; white-space: pre-wrap; }

@@ -26,6 +26,16 @@
 #define MAX_PATH 4096
 
 /**
+ * §4.5 cost of one array-nesting level in the parse-memory estimate (bytes).
+ */
+#define COST_PER_LEVEL_BYTES 384
+
+/**
+ * §4.5 fallback ceiling (bytes) when `memory_limit = -1` (no limit).
+ */
+#define FALLBACK_CEILING_BYTES (64 * 1024 * 1024)
+
+/**
  * Action codes returned over the ABI. Pinned: Allow=0, Log=1, Block=2.
  */
 #define HOWDAH_ALLOW 0
@@ -188,6 +198,37 @@ void howdah_request_begin(struct howdah_ctx *ctx,
 int32_t howdah_feed(struct howdah_ctx *ctx, const char *chunk, size_t len);
 
 /**
+ * §4.2: arm the byte-stream scanner from the request's `Content-Type` (the real
+ * boundary is extracted here). Call once per request before `howdah_scan_post`,
+ * when the SAPI reports a `multipart/form-data` body. A non-multipart type or an
+ * absent boundary leaves the scanner off. NULL ctx / panic is a no-op.
+ *
+ * `post_max_size` and `memory_limit` are PHP's effective INI values for this
+ * request in bytes (`post_max_size <= 0` = unlimited -> gap B off;
+ * `memory_limit = -1` = no limit -> §4.5 fallback ceiling).
+ *
+ * # Safety
+ * `ctx` NULL or live; `content_type` NULL or valid for `ct_len` bytes.
+ */
+void howdah_scan_post_begin(struct howdah_ctx *ctx,
+                            const char *content_type,
+                            size_t ct_len,
+                            int64_t post_max_size,
+                            int64_t memory_limit);
+
+/**
+ * §4.2: feed `len` raw body bytes (as the `read_post` wrapper reads them) to the
+ * byte-stream scanner. Returns the most severe action so far (0 Allow, 1 Log,
+ * 2 Block); `Block` tells the wrapper to stop reading. The bytes are scanned for
+ * framing only, never logged. NULL ctx, a scanner that was never armed, or a
+ * panic returns 0 (fail open).
+ *
+ * # Safety
+ * `ctx` NULL or live; `buf` NULL or valid for `len` bytes.
+ */
+int32_t howdah_scan_post(struct howdah_ctx *ctx, const char *buf, size_t len);
+
+/**
  * Signal end of body: detects a truncated body (MalformedMultipart) and
  * returns the final action code. Panic or NULL ctx returns 0.
  *
@@ -230,6 +271,18 @@ int32_t howdah_part_data(struct howdah_ctx *ctx, size_t len);
  * `ctx` NULL or live; `name` NULL or valid for `name_len` bytes.
  */
 int32_t howdah_input_var(struct howdah_ctx *ctx, const char *name, size_t name_len);
+
+/**
+ * Feed one multipart FORMDATA/FILE_START name into the gap-C nesting budget
+ * (§4.4). `is_file` is non-zero for a FILE_START name (weighted higher). The
+ * part itself is counted by `howdah_part`; this only adds its array levels. The
+ * name is inspected for `[` depth, never logged. Returns the most severe action
+ * so far (0 Allow, 1 Log, 2 Block). Panic or NULL ctx returns 0.
+ *
+ * # Safety
+ * `ctx` NULL or live; `name` NULL or valid for `name_len` bytes.
+ */
+int32_t howdah_note_name(struct howdah_ctx *ctx, const char *name, size_t name_len, int32_t is_file);
 
 /**
  * Inspect one request value (Layer 2). `source` is a `HOWDAH_SRC_*` code.

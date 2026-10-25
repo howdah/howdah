@@ -134,6 +134,7 @@ pub unsafe extern "C" fn get_module() -> *mut sys::zend_module_entry {
         module_shutdown_func: Some(mshutdown),
         request_startup_func: Some(rinit),
         request_shutdown_func: Some(rshutdown),
+        post_deactivate_func: Some(post_deactivate),
         info_func: Some(minfo),
         version: VERSION.as_ptr() as *const c_char,
         type_: 1, // MODULE_PERSISTENT
@@ -490,6 +491,23 @@ unsafe fn exec_dir_decision() -> Option<(c_int, String)> {
     Some((status, request_id))
 }
 
+/// `post_deactivate_func`: `zend_post_deactivate_modules()` runs this
+/// UNCONDITIONALLY at request shutdown, even when RSHUTDOWN was skipped — a
+/// startup failure before `modules_activated` (a `max_input_time` fatal on a
+/// slow upload, PHP's own OOM) skips every RSHUTDOWN. php-fpm then exits the
+/// worker, but mod_php and the CLI server survive; without this, the next
+/// request on that worker would inherit a stale scanner arm / stop latch /
+/// `BEGUN`, since the body is read before RINIT could reset them. Clearing here
+/// makes a skipped RSHUTDOWN harmless (and closes the long-standing `BEGUN`
+/// staleness too). Idempotent with the RSHUTDOWN reset.
+///
+/// # Safety
+/// Called by PHP once per request at shutdown (NTS).
+unsafe extern "C" fn post_deactivate() -> c_int {
+    let _ = catch_unwind(AssertUnwindSafe(|| clear_request_state()));
+    SUCCESS
+}
+
 /// Reset the per-request lifecycle flags for the next request. Runs at the end
 /// of RSHUTDOWN AND — via [`rfc1867::emit_and_bail`] — immediately before a
 /// bailout refusal. The second call site is load-bearing: `zend_bailout` is a
@@ -523,6 +541,8 @@ pub(crate) unsafe fn clear_request_state() {
     // persist; a bailout can skip RSHUTDOWN). Idempotent; a no-op when the ssrf
     // hooks were never installed.
     sys::howdah_ssrf_request_reset();
+    // §4.1: clear the read_post scanner's per-request arm + stop latch.
+    crate::post_scan::reset();
 }
 
 /// Everything up to the first `?` (log the path, never the query string).
@@ -801,6 +821,12 @@ unsafe extern "C" fn minit(type_: c_int, module_number: c_int) -> c_int {
     PRIOR_INPUT_FILTER = (*ptr::addr_of!(sys::sapi_module)).input_filter;
     (*ptr::addr_of_mut!(sys::sapi_module)).input_filter = Some(input_filter::filter);
 
+    // §4.1: wrap sapi_module.read_post so the raw body passes through the
+    // byte-stream scanner before PHP parses it (gaps A/B + the §4.5 estimate).
+    // Process-global; armed per request by the scanner only for multipart, a
+    // no-op otherwise. Restored at MSHUTDOWN.
+    sys::howdah_install_read_post_hook(crate::post_scan::decide);
+
     // Layer 3: install the function-table sink hooks (process-global; no
     // MSHUTDOWN restore, like the other installs).
     sys::howdah_install_sink_hooks(crate::sink_filter::decide);
@@ -948,6 +974,8 @@ unsafe extern "C" fn mshutdown(_type: c_int, _module_number: c_int) -> c_int {
     // Restore the prior zend_error_cb if the OOM backstop swapped it (no-op
     // otherwise). Before freeing the ctx, though the handler needs no ctx.
     sys::howdah_uninstall_oom_hook();
+    // Restore the prior sapi_module.read_post (§4.1 wrapper).
+    sys::howdah_uninstall_read_post_hook();
     core::howdah_free(CTX);
     CTX = ptr::null_mut();
     sys::zend_unregister_ini_entries(MODULE_NUMBER);

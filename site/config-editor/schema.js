@@ -51,7 +51,11 @@
     { key: 'max_request_headers', group: 'headers', type: 'int', min: 1, default: 200,
       note: 'Request headers in one request. Browsers send 10–30 and proxies add a few. Counting needs $_SERVER to be read (auto_globals_jit).' },
     { key: 'max_request_header_bytes', group: 'headers', type: 'int', min: 1, default: 16384,
-      note: 'Bytes (name + value) of any one request header; 16 KiB tolerates large cookies and auth tokens.' }
+      note: 'Bytes (name + value) of any one request header; 16 KiB tolerates large cookies and auth tokens.' },
+    { key: 'max_nesting_levels', group: 'input', type: 'int', min: 1, default: 10000,
+      note: 'Summed array-nesting levels across all variable/field/file names in one request (gap C). File names are weighted (PHP builds several metadata arrays per file). Bounds total array-building cost, which a flood of nested names drives up regardless of any one depth.' },
+    { key: 'memory_ceiling_bytes', group: 'input', type: 'int', min: 0, default: 0,
+      note: 'Override (bytes) for the parse-memory estimate ceiling (§4.5). 0 = automatic: the request’s live memory_limit / 4, or a fixed fallback when memory_limit = -1. Set a byte value to pin the ceiling.' }
   ];
 
   // Which layer each rule name belongs to (grouping in the [rules] section).
@@ -62,6 +66,9 @@
     self_test: 'multipart',
     max_input_vars: 'input', max_input_nesting_depth: 'input', max_input_key_bytes: 'input',
     max_request_headers: 'headers', max_request_header_bytes: 'headers',
+    // §4.1-4.5 request limits (Layer 1): gap A reuses max_part_headers above;
+    // gap B is a body (multipart) rule, gap C and the §4.5 estimate are input.
+    post_too_large: 'multipart', nesting_budget: 'input', parse_memory_estimate: 'input',
     sql_injection: 'inspect', path_traversal: 'inspect', command_injection: 'inspect',
     command_exec: 'sinks', include: 'sinks', eval: 'sinks', unserialize: 'sinks',
     phar: 'sinks', ssrf: 'sinks',

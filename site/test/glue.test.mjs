@@ -30,10 +30,11 @@ test('validateConfigWith returns the core error text', () => {
 
 test('ruleCatalogWith lists every rule with severities', () => {
   const rules = H.ruleCatalogWith(x);
-  assert.equal(rules.length, 37);
+  assert.equal(rules.length, 40);
   assert.ok(rules.some((r) => r.name === 'phar') && rules.some((r) => r.name === 'ssrf'));
   assert.ok(rules.some((r) => r.name === 'tls_verify') && rules.some((r) => r.name === 'dangerous_callback'));
   assert.ok(rules.some((r) => r.name === 'out_of_memory') && rules.some((r) => r.name === 'startup_fatal'));
+  assert.ok(rules.some((r) => r.name === 'post_too_large') && rules.some((r) => r.name === 'nesting_budget') && rules.some((r) => r.name === 'parse_memory_estimate'));
   assert.deepEqual(rules[0], { name: 'max_parts', severity: 'critical' });
   assert.equal(rules.find((r) => r.name === 'malformed_multipart').severity, 'standard');
 });

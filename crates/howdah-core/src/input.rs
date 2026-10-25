@@ -13,6 +13,12 @@ fn longest_key(name: &[u8]) -> usize {
     name.split(|&b| b == b'[' || b == b']').map(<[u8]>::len).max().unwrap_or(0)
 }
 
+/// Per-file weight for the nesting budget (gap C / §4.4): PHP builds several
+/// metadata arrays per file (`name`, `type`, `tmp_name`, `error`, `size` under
+/// `$_FILES[name]`), so a file name's levels cost more than a field name's.
+/// Provisional; calibrated against peak RSS in the lab (plan Task 8).
+pub const FILE_NAME_WEIGHT: u64 = 5;
+
 /// High-water marks over the input variables of one request.
 #[derive(Debug, Clone, Default)]
 pub struct InputState {
@@ -21,6 +27,11 @@ pub struct InputState {
     max_key_bytes: usize,
     headers: u64,
     max_header_bytes: usize,
+    /// Summed array-nesting levels across ALL variable/field/file names of the
+    /// request (gap C / §4.4). Memory grows with the total number of levels, not
+    /// with any one depth, so this is a sum, not a high-water mark. File names
+    /// are weighted by `FILE_NAME_WEIGHT`.
+    total_levels: u64,
 }
 
 impl InputState {
@@ -28,11 +39,33 @@ impl InputState {
         Self::default()
     }
 
-    /// Record one input variable name.
+    /// Record one input variable name (GET/POST/cookie, the input_filter path).
     pub fn note_var(&mut self, name: &[u8]) {
         self.vars += 1;
         self.max_depth = self.max_depth.max(nesting_depth(name));
         self.max_key_bytes = self.max_key_bytes.max(longest_key(name));
+        self.add_levels(name, false);
+    }
+
+    /// Record one multipart FORMDATA/FILE_START name for the nesting budget only
+    /// (the part count/limits are handled separately by `MultipartState`). The
+    /// name is inspected for `[` depth, never logged.
+    pub fn note_name(&mut self, name: &[u8], is_file: bool) {
+        self.add_levels(name, is_file);
+    }
+
+    /// Add one name's weighted array levels to the running total. The `+ 1` base
+    /// makes even a flat name (the empty-file-control / trigger-(3) shape, many
+    /// flat file names) accumulate.
+    fn add_levels(&mut self, name: &[u8], is_file: bool) {
+        let base = nesting_depth(name) as u64 + 1;
+        let weight = if is_file { FILE_NAME_WEIGHT } else { 1 };
+        self.total_levels = self.total_levels.saturating_add(base.saturating_mul(weight));
+    }
+
+    /// Summed, file-weighted nesting levels over the whole request (gap C).
+    pub fn total_levels(&self) -> u64 {
+        self.total_levels
     }
 
     /// Record one request header (name and value lengths in bytes).
@@ -109,6 +142,33 @@ mod tests {
         assert_eq!((h.rule, h.severity), (RuleId::MaxRequestHeaderBytes, Severity::Standard));
         assert_eq!(RuleId::MaxRequestHeaderBytes.severity(), Severity::Standard);
     }
+    #[test] fn total_levels_sums_across_vars_file_weighted() {
+        let mut s = InputState::new();
+        // Two flat field names -> (0+1)*1 each = 2.
+        s.note_var(b"a");
+        s.note_var(b"b");
+        assert_eq!(s.total_levels(), 2);
+        // A nested field name a[b][c] -> (2+1)*1 = 3 -> total 5.
+        s.note_var(b"a[b][c]");
+        assert_eq!(s.total_levels(), 5);
+        // A flat FILE name -> (0+1)*FILE_NAME_WEIGHT.
+        s.note_name(b"upload", true);
+        assert_eq!(s.total_levels(), 5 + FILE_NAME_WEIGHT);
+        // A multipart field name feeds it unweighted.
+        s.note_name(b"x[y]", false);
+        assert_eq!(s.total_levels(), 5 + FILE_NAME_WEIGHT + 2);
+    }
+
+    #[test] fn many_shallow_and_few_deep_reach_the_same_total() {
+        // The budget is on the SUM of levels, not any one depth.
+        let mut shallow = InputState::new();
+        for _ in 0..6 { shallow.note_var(b"a[b]"); } // 6 * (1+1) = 12
+        let mut deep = InputState::new();
+        deep.note_var(b"a[b][c][d][e][f][g][h][i][j][k][l]"); // 11 brackets -> (11+1) = 12
+        assert_eq!(shallow.total_levels(), 12);
+        assert_eq!(shallow.total_levels(), deep.total_levels());
+    }
+
     #[test] fn variable_checks_precede_header_checks() {
         let l = Limits { max_input_vars: 1, max_request_headers: 1, ..Limits::defaults() };
         let mut s = InputState::new();

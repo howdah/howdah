@@ -72,6 +72,13 @@ pub struct MultipartState {
     headers: u32,
     saw_disposition: bool,
     closed: bool,
+    /// Whether the current part is a file upload (set from its
+    /// Content-Disposition). Field (non-file) part bodies are buffered whole in
+    /// memory by PHP; file data goes to a temp file. The §4.5 estimate uses the
+    /// summed non-file bytes (gap B / §4.3). Byte-feed mode only.
+    current_is_file: bool,
+    /// Summed bytes of all non-file (field) part bodies seen (feed mode).
+    nonfile_bytes: u64,
     // High-water marks (never reset): let limit checks hold regardless of
     // when they run or whether a call's events were dropped by an error.
     max_headers: u32,
@@ -122,6 +129,8 @@ impl MultipartState {
             headers: 0,
             saw_disposition: false,
             closed: false,
+            current_is_file: false,
+            nonfile_bytes: 0,
             max_headers: 0,
             max_header_bytes: 0,
             max_field_name: 0,
@@ -205,6 +214,13 @@ impl MultipartState {
         self.total_fed
     }
 
+    /// Summed bytes of all non-file (field) part bodies seen in byte-feed mode.
+    /// PHP buffers these whole in memory, so they drive the §4.5 estimate; file
+    /// data (which goes to a temp file) is excluded.
+    pub fn total_nonfile_bytes(&self) -> u64 {
+        self.nonfile_bytes
+    }
+
     /// Signal end of input. Errors if the closing boundary was never seen.
     /// A structurally reported request (see `note_part`) has no closing
     /// boundary to see and is never truncated or malformed.
@@ -277,6 +293,9 @@ impl MultipartState {
                     if self.m == self.pat.len() {
                         if !preamble {
                             self.max_part_data = self.max_part_data.max(self.data_len);
+                            if !self.current_is_file {
+                                self.nonfile_bytes = self.nonfile_bytes.saturating_add(self.data_len);
+                            }
                             ev.push(Event::PartData { len: self.data_len });
                             ev.push(Event::PartEnd);
                         }
@@ -332,6 +351,7 @@ impl MultipartState {
                     self.parts += 1;
                     self.headers = 0;
                     self.saw_disposition = false;
+                    self.current_is_file = false;
                     self.line.clear();
                     self.phase = Phase::Headers;
                     ev.push(Event::PartStart);
@@ -397,10 +417,12 @@ impl MultipartState {
                     self.max_field_name = self.max_field_name.max(name_len);
                     self.max_filename = self.max_filename.max(filename_len);
                     self.files += 1;
+                    self.current_is_file = true;
                     ev.push(Event::FileStart { filename_len });
                 }
                 Ok((name_len, None)) => {
                     self.max_field_name = self.max_field_name.max(name_len);
+                    self.current_is_file = false;
                     ev.push(Event::FieldStart { name_len });
                 }
             }
@@ -488,4 +510,34 @@ fn parse_disposition(v: &[u8]) -> Result<(usize, Option<usize>), &'static str> {
         *slot = Some(vlen);
     }
     Ok((name.unwrap_or(0), filename))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nonfile_bytes_sums_field_bodies_only() {
+        // Two field parts (5 and 3 bytes) and one file part (10 bytes): only the
+        // field bodies count toward nonfile_bytes (PHP buffers those in memory).
+        let body = concat!(
+            "--B\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nhello\r\n",
+            "--B\r\nContent-Disposition: form-data; name=\"f\"; filename=\"x\"\r\n\r\n0123456789\r\n",
+            "--B\r\nContent-Disposition: form-data; name=\"b\"\r\n\r\nxyz\r\n",
+            "--B--\r\n"
+        );
+        let mut st = MultipartState::new(b"B");
+        st.feed(body.as_bytes()).expect("body must parse");
+        assert_eq!(st.total_nonfile_bytes(), 8); // 5 + 3; the file's 10 excluded
+    }
+
+    #[test]
+    fn nonfile_bytes_resumable_across_chunks() {
+        let body = "--B\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nhello\r\n--B--\r\n";
+        let mut st = MultipartState::new(b"B");
+        for ch in body.as_bytes().chunks(3) {
+            st.feed(ch).expect("chunk must parse");
+        }
+        assert_eq!(st.total_nonfile_bytes(), 5);
+    }
 }

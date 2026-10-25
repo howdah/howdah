@@ -46,7 +46,8 @@ impl Layer {
             | RuleId::MaxRequestHeaders
             | RuleId::MaxRequestHeaderBytes
             | RuleId::OutOfMemory
-            | RuleId::StartupFatal => Layer::Limits,
+            | RuleId::StartupFatal
+            | RuleId::PostTooLarge => Layer::Limits,
             RuleId::SqlInjection | RuleId::PathTraversal | RuleId::CommandInjection => Layer::Inspect,
             RuleId::CommandExec
             | RuleId::Include

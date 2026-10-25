@@ -143,6 +143,12 @@ pub struct howdah_ctx {
     /// never switch the structural limits off (design §4.2, fail closed).
     /// `None` until `howdah_scan_post_begin` sees a multipart boundary.
     post_scan: Option<MultipartState>,
+    /// PHP's effective `post_max_size` for this request (bytes; `<= 0` =
+    /// unlimited → gap B off). Set by `howdah_scan_post_begin`.
+    post_max_size: i64,
+    /// PHP's effective `memory_limit` for this request (bytes; `-1` = no limit →
+    /// §4.5 uses a fixed fallback ceiling). Set by `howdah_scan_post_begin`.
+    memory_limit: i64,
     request_id: String,
     meta: Meta,
     worst: Action,
@@ -201,6 +207,7 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::TlsVerify => "curl TLS certificate verification disabled",
         RuleId::OutOfMemory => "worker ended on out-of-memory",
         RuleId::StartupFatal => "fatal error during request startup",
+        RuleId::PostTooLarge => "request body exceeds post_max_size",
     }
 }
 
@@ -243,6 +250,8 @@ impl howdah_ctx {
             config,
             state: None,
             post_scan: None,
+            post_max_size: 0,
+            memory_limit: -1,
             request_id: new_request_id(),
             meta: Meta::default(),
             worst: Action::Allow,
@@ -784,8 +793,10 @@ impl howdah_ctx {
     /// from `content_type`. A non-multipart type or an absent boundary leaves the
     /// scanner off (fail open; the parsed-event counter still enforces the
     /// structural limits).
-    fn scan_post_begin(&mut self, content_type: &[u8]) {
+    fn scan_post_begin(&mut self, content_type: &[u8], post_max_size: i64, memory_limit: i64) {
         self.post_scan = crate::boundary::extract(content_type).map(|b| MultipartState::new(&b));
+        self.post_max_size = post_max_size;
+        self.memory_limit = memory_limit;
     }
 
     /// §4.2: feed `chunk` raw body bytes to the byte-stream scanner and fold any
@@ -801,6 +812,7 @@ impl howdah_ctx {
         if self.worst == Action::Block {
             return self.worst;
         }
+        let pms = self.post_max_size;
         let Some(state) = self.post_scan.as_mut() else {
             return self.worst; // not multipart / no boundary: fail open
         };
@@ -819,6 +831,8 @@ impl howdah_ctx {
             Err(_) => hits.push(limits.check(state, &Event::PartEnd)),
         }
         hits.push(limits.check_fed_bytes(state.total_fed_bytes()));
+        // Gap B (§4.3): bytes actually read vs PHP's effective post_max_size.
+        hits.push(limits.check_post_bytes(state.total_fed_bytes(), pms));
         for h in hits {
             self.apply(h.as_ref());
         }
@@ -964,6 +978,8 @@ pub unsafe extern "C" fn howdah_request_begin(
         };
         c.state = Some(MultipartState::new(&b));
         c.post_scan = None; // set by howdah_scan_post_begin once the boundary is known
+        c.post_max_size = 0;
+        c.memory_limit = -1;
         c.request_id = new_request_id();
         c.worst = Action::Allow;
         c.log = None;
@@ -1015,10 +1031,20 @@ pub unsafe extern "C" fn howdah_feed(ctx: *mut howdah_ctx, chunk: *const c_char,
 /// when the SAPI reports a `multipart/form-data` body. A non-multipart type or an
 /// absent boundary leaves the scanner off. NULL ctx / panic is a no-op.
 ///
+/// `post_max_size` and `memory_limit` are PHP's effective INI values for this
+/// request in bytes (`post_max_size <= 0` = unlimited → gap B off;
+/// `memory_limit = -1` = no limit → §4.5 fallback ceiling).
+///
 /// # Safety
 /// `ctx` NULL or live; `content_type` NULL or valid for `ct_len` bytes.
 #[no_mangle]
-pub unsafe extern "C" fn howdah_scan_post_begin(ctx: *mut howdah_ctx, content_type: *const c_char, ct_len: usize) {
+pub unsafe extern "C" fn howdah_scan_post_begin(
+    ctx: *mut howdah_ctx,
+    content_type: *const c_char,
+    ct_len: usize,
+    post_max_size: i64,
+    memory_limit: i64,
+) {
     if ctx.is_null() {
         return;
     }
@@ -1028,7 +1054,7 @@ pub unsafe extern "C" fn howdah_scan_post_begin(ctx: *mut howdah_ctx, content_ty
         } else {
             std::slice::from_raw_parts(content_type as *const u8, ct_len)
         };
-        (*ctx).scan_post_begin(ct);
+        (*ctx).scan_post_begin(ct, post_max_size, memory_limit);
     }));
 }
 
@@ -3637,7 +3663,7 @@ mod tests {
         let ct = b"multipart/form-data; boundary=B";
         let body = header_flood_body();
         unsafe {
-            howdah_scan_post_begin(ctx, ct.as_ptr() as *const c_char, ct.len());
+            howdah_scan_post_begin(ctx, ct.as_ptr() as *const c_char, ct.len(), 0, -1);
             let a = howdah_scan_post(ctx, body.as_ptr() as *const c_char, body.len());
             assert_eq!(a, HOWDAH_BLOCK);
             assert!(scan_line(ctx).contains("max_part_headers"));
@@ -3651,7 +3677,7 @@ mod tests {
         let ct = b"multipart/form-data; boundary=B";
         let body = "--B\r\nContent-Disposition: form-data; name=\"a\"\r\nContent-Type: text/plain\r\nContent-Transfer-Encoding: binary\r\n\r\nvalue\r\n--B--\r\n";
         unsafe {
-            howdah_scan_post_begin(ctx, ct.as_ptr() as *const c_char, ct.len());
+            howdah_scan_post_begin(ctx, ct.as_ptr() as *const c_char, ct.len(), 0, -1);
             assert_eq!(howdah_scan_post(ctx, body.as_ptr() as *const c_char, body.len()), HOWDAH_ALLOW);
             howdah_free(ctx);
         }
@@ -3663,7 +3689,7 @@ mod tests {
         let ct = b"multipart/form-data; boundary=B";
         let body = header_flood_body();
         unsafe {
-            howdah_scan_post_begin(ctx, ct.as_ptr() as *const c_char, ct.len());
+            howdah_scan_post_begin(ctx, ct.as_ptr() as *const c_char, ct.len(), 0, -1);
             let mut worst = HOWDAH_ALLOW;
             for ch in body.as_bytes().chunks(7) {
                 worst = worst.max(howdah_scan_post(ctx, ch.as_ptr() as *const c_char, ch.len()));
@@ -3674,12 +3700,40 @@ mod tests {
     }
 
     #[test]
+    fn scan_post_trips_post_too_large_over_effective_post_max_size() {
+        // A benign single field whose read bytes exceed a low post_max_size (100)
+        // → gap B PostTooLarge, even though no structural limit is near.
+        let ctx = init("");
+        let ct = b"multipart/form-data; boundary=B";
+        let mut body = String::from("--B\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n");
+        body.push_str(&"x".repeat(500));
+        body.push_str("\r\n--B--\r\n");
+        unsafe {
+            howdah_scan_post_begin(ctx, ct.as_ptr() as *const c_char, ct.len(), 100, 134217728);
+            let a = howdah_scan_post(ctx, body.as_ptr() as *const c_char, body.len());
+            assert_eq!(a, HOWDAH_BLOCK);
+            assert!(scan_line(ctx).contains("post_too_large"));
+            howdah_free(ctx);
+        }
+        // With post_max_size unlimited (0) the same body is allowed by gap B.
+        let ctx = init("");
+        let mut body = String::from("--B\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n");
+        body.push_str(&"x".repeat(500));
+        body.push_str("\r\n--B--\r\n");
+        unsafe {
+            howdah_scan_post_begin(ctx, ct.as_ptr() as *const c_char, ct.len(), 0, 134217728);
+            assert_eq!(howdah_scan_post(ctx, body.as_ptr() as *const c_char, body.len()), HOWDAH_ALLOW);
+            howdah_free(ctx);
+        }
+    }
+
+    #[test]
     fn scan_post_off_when_not_multipart() {
         let ctx = init("");
         let ct = b"application/x-www-form-urlencoded";
         let body = header_flood_body();
         unsafe {
-            howdah_scan_post_begin(ctx, ct.as_ptr() as *const c_char, ct.len());
+            howdah_scan_post_begin(ctx, ct.as_ptr() as *const c_char, ct.len(), 0, -1);
             assert_eq!(howdah_scan_post(ctx, body.as_ptr() as *const c_char, body.len()), HOWDAH_ALLOW);
             howdah_free(ctx);
         }

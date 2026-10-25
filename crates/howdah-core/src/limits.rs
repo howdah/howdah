@@ -256,6 +256,22 @@ impl Limits {
             detail: format!("{total_fed} body bytes exceeds budget {}", self.max_parse_memory_bytes),
         })
     }
+
+    /// Gap B (§4.3): the bytes actually read for a multipart body exceed PHP's
+    /// effective `post_max_size`. `post_max_size <= 0` means unlimited (PHP's `0`
+    /// / `-1`): the check is off and §4.5 still bounds memory. Unlike
+    /// `max_parse_memory_bytes` (Howdah's own fixed backstop), this limit is
+    /// PHP's own INI value, read per request by the glue.
+    pub fn check_post_bytes(&self, total_read: u64, post_max_size: i64) -> Option<LimitHit> {
+        if post_max_size <= 0 {
+            return None;
+        }
+        (total_read > post_max_size as u64).then(|| LimitHit {
+            rule: RuleId::PostTooLarge,
+            severity: Severity::Critical,
+            detail: format!("{total_read} body bytes exceeds post_max_size {post_max_size}"),
+        })
+    }
 }
 
 impl Default for Limits {
@@ -337,6 +353,10 @@ pub enum RuleId {
     /// request state could be used (the other backstop trigger). Critical,
     /// Layer 1. Also reported directly by the glue, never by a limit check.
     StartupFatal,
+    /// The multipart body read more bytes than PHP's effective `post_max_size`
+    /// (gap B, §4.3): backports upstream's `fill_buffer` check, enforced from the
+    /// byte stream the read_post wrapper sees. Critical, Layer 1.
+    PostTooLarge,
 }
 
 impl RuleId {
@@ -381,7 +401,7 @@ impl RuleId {
 /// or miss one it accepts. `rule_catalog_covers_every_variant` fails to
 /// compile when a variant is added here but not to the list.
 pub fn rule_catalog() -> &'static [RuleId] {
-    const ALL: [RuleId; 37] = [
+    const ALL: [RuleId; 38] = [
         RuleId::MaxParts,
         RuleId::MaxFiles,
         RuleId::MaxPartHeaders,
@@ -419,6 +439,7 @@ pub fn rule_catalog() -> &'static [RuleId] {
         RuleId::TlsVerify,
         RuleId::OutOfMemory,
         RuleId::StartupFatal,
+        RuleId::PostTooLarge,
     ];
     &ALL
 }
@@ -542,6 +563,19 @@ mod tests {
     }
 
     #[test]
+    fn post_too_large_vs_effective_post_max_size() {
+        let l = Limits::defaults();
+        // Over PHP's post_max_size -> Critical PostTooLarge.
+        let h = l.check_post_bytes(8 * 1024 * 1024 + 1, 8 * 1024 * 1024).unwrap();
+        assert_eq!((h.rule, h.severity), (RuleId::PostTooLarge, Severity::Critical));
+        // Exactly at the limit, or under, is fine.
+        assert!(l.check_post_bytes(8 * 1024 * 1024, 8 * 1024 * 1024).is_none());
+        // 0 / negative post_max_size = unlimited -> never fires (gap B off).
+        assert!(l.check_post_bytes(u64::MAX, 0).is_none());
+        assert!(l.check_post_bytes(u64::MAX, -1).is_none());
+    }
+
+    #[test]
     fn fires_from_state_after_mid_chunk_error_dropped_events() {
         let l = Limits { max_filename_bytes: 4, ..Limits::defaults() };
         let mut st = MultipartState::new(b"B");
@@ -620,10 +654,11 @@ mod tests {
                 | RuleId::Xxe
                 | RuleId::TlsVerify
                 | RuleId::OutOfMemory
-                | RuleId::StartupFatal => {}
+                | RuleId::StartupFatal
+                | RuleId::PostTooLarge => {}
             }
         }
-        assert_eq!(rule_catalog().len(), 37);
+        assert_eq!(rule_catalog().len(), 38);
         let mut sorted = all.to_vec();
         sorted.sort();
         sorted.dedup();

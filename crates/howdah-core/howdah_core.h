@@ -193,10 +193,18 @@ int32_t howdah_feed(struct howdah_ctx *ctx, const char *chunk, size_t len);
  * when the SAPI reports a `multipart/form-data` body. A non-multipart type or an
  * absent boundary leaves the scanner off. NULL ctx / panic is a no-op.
  *
+ * `post_max_size` and `memory_limit` are PHP's effective INI values for this
+ * request in bytes (`post_max_size <= 0` = unlimited -> gap B off;
+ * `memory_limit = -1` = no limit -> §4.5 fallback ceiling).
+ *
  * # Safety
  * `ctx` NULL or live; `content_type` NULL or valid for `ct_len` bytes.
  */
-void howdah_scan_post_begin(struct howdah_ctx *ctx, const char *content_type, size_t ct_len);
+void howdah_scan_post_begin(struct howdah_ctx *ctx,
+                            const char *content_type,
+                            size_t ct_len,
+                            int64_t post_max_size,
+                            int64_t memory_limit);
 
 /**
  * §4.2: feed `len` raw body bytes (as the `read_post` wrapper reads them) to the

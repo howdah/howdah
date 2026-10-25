@@ -68,8 +68,17 @@
     upload_exec: 'behavior', unexpected_binary: 'behavior', unexpected_egress: 'behavior', php_write: 'behavior',
     // 1.5 legacy-era sinks: modes come from [sinks.<sink>] mode, as for the others.
     mail_injection: 'sinks', preg_eval: 'sinks', create_function: 'sinks', assert_string: 'sinks',
-    dangerous_callback: 'sinks', xxe: 'sinks', tls_verify: 'sinks'
+    dangerous_callback: 'sinks', xxe: 'sinks', tls_verify: 'sinks',
+    // The out-of-memory backstop's rules (Layer 1): grouped under "Other", and
+    // marked noop below — they are governed by the top-level oom_exit key, not
+    // by a per-rule [rules] mode.
+    out_of_memory: 'other', startup_fatal: 'other'
   };
+
+  // Rules shown in the [rules] section for completeness but not controllable
+  // there: the out-of-memory backstop is turned on and off by oom_exit.
+  var BACKSTOP_RULES = { out_of_memory: 1, startup_fatal: 1 };
+  var OOM_NOOP_NOTE = 'Accepted by the core but has no effect here: the out-of-memory backstop is turned on and off by the top-level oom_exit key, not by a per-rule mode.';
 
   var RULE_NOTES = {
     critical: 'Critical: blocks even when the global mode is detect. Set to off to disable it entirely.',
@@ -85,11 +94,12 @@
   function rulesKeys(catalog) {
     return (catalog || []).map(function (r) {
       var layer = RULE_LAYER[r.name] || 'other';
-      var noop = layer === 'inspect' || layer === 'sinks' || layer === 'behavior';
+      var backstop = !!BACKSTOP_RULES[r.name];
+      var noop = layer === 'inspect' || layer === 'sinks' || layer === 'behavior' || backstop;
       return {
         key: r.name, type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
         severity: r.severity, layer: layer, noop: noop,
-        note: noop ? NOOP_NOTE : (RULE_NOTES[r.severity] || '')
+        note: backstop ? OOM_NOOP_NOTE : (noop ? NOOP_NOTE : (RULE_NOTES[r.severity] || ''))
       };
     });
   }
@@ -161,7 +171,9 @@
     { key: 'on_invalid_config', type: 'enum', values: ['block', 'off'], default: 'block',
       note: 'Mode used if this file fails to parse. Scanned from the raw file, so it must stay on a top-level line.' },
     { key: 'exceptions_log', type: 'bool', default: false,
-      note: 'Write every matched [[exceptions]] entry to the event log as action "excepted" (Layers 3 and 4: one line per excepted call; Layers 1 and 2: at most one per request). Off by default so adding an exception never adds log volume by itself; turn it on while tuning or when an auditor wants to see exceptions in use.' }
+      note: 'Write every matched [[exceptions]] entry to the event log as action "excepted" (Layers 3 and 4: one line per excepted call; Layers 1 and 2: at most one per request). Off by default so adding an exception never adds log volume by itself; turn it on while tuning or when an auditor wants to see exceptions in use.' },
+    { key: 'oom_exit', type: 'bool', default: true,
+      note: 'End the PHP worker if it runs out of memory (or hits a fatal during request startup) before any code runs on the half-built request state — the PHP2Shell backstop (CVE-2026-109618/109619). On by default. Web SAPIs only (php-fpm, Apache mod_php, cgi-fcgi, LiteSpeed), never the command line, and automatically off on PHP versions that carry upstream’s fix (detected at runtime). The dropped request becomes a 502 and the worker is replaced; the event is logged with rule out_of_memory or startup_fatal. Set to false to keep PHP’s default behaviour, which on an unpatched engine reopens the PHP2Shell window.' }
   ];
 
   // [[exceptions]]: the keys of one entry, in the order the emitter writes

@@ -79,8 +79,11 @@ test('every [limits] key documented in docs/config.md is in the schema with the 
 test('Layer 2/3 rule names under [rules] are marked as having no effect', () => {
   // The extension resolves Layer 2 overrides only from [inspect.rule_modes]
   // and never reads [rules] for sinks; the core merely accepts these keys.
+  // The out-of-memory backstop rules are Layer 1 but governed by oom_exit, not
+  // by a per-rule [rules] mode, so they are noop too.
+  const backstop = (k) => k.key === 'out_of_memory' || k.key === 'startup_fatal';
   for (const k of sectionKeys('rules')) {
-    const noop = k.layer === 'inspect' || k.layer === 'sinks' || k.layer === 'behavior';
+    const noop = k.layer === 'inspect' || k.layer === 'sinks' || k.layer === 'behavior' || backstop(k);
     assert.equal(!!k.noop, noop, k.key);
     if (noop) assert.match(k.note, /no effect/);
     else assert.doesNotMatch(k.note, /no effect/);

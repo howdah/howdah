@@ -43,6 +43,27 @@ pub const HOWDAH_BLOCK: i32 = 2;
 pub const HOWDAH_PART_FIELD: i32 = 0;
 pub const HOWDAH_PART_FILE: i32 = 1;
 
+/// Whether the read_post scanner must STOP the body (truncate, return EOF) when
+/// this rule blocks. True for the unbounded-growth guards, where letting PHP
+/// keep reading would buffer an unbounded body: gap B (`post_too_large`), the
+/// raw-byte budget (`parse_memory_budget`), the §4.5 estimate
+/// (`parse_memory_estimate`), and the per-part header flood (`max_part_headers`/
+/// `max_part_header_bytes`, gap A — the scanner is the only enforcer and the
+/// headers grow per part). False for the bounded COUNT limits `max_parts` /
+/// `max_files` (and name-length rules): the parsed-event counter blocks those
+/// and `deliver_startup_refusal` drains the bounded body for a clean 403, so
+/// truncating them only resets the FastCGI client.
+fn rule_stops_the_read(rule: RuleId) -> bool {
+    matches!(
+        rule,
+        RuleId::PostTooLarge
+            | RuleId::ParseMemoryBudget
+            | RuleId::ParseMemoryEstimate
+            | RuleId::MaxPartHeaders
+            | RuleId::MaxPartHeaderBytes
+    )
+}
+
 /// Input sources for `howdah_inspect_value`.
 pub const HOWDAH_SRC_GET: i32 = 0;
 pub const HOWDAH_SRC_POST: i32 = 1;
@@ -149,6 +170,15 @@ pub struct howdah_ctx {
     /// PHP's effective `memory_limit` for this request (bytes; `-1` = no limit →
     /// §4.5 uses a fixed fallback ceiling). Set by `howdah_scan_post_begin`.
     memory_limit: i64,
+    /// True once the read_post byte-scanner hit an UNBOUNDED-growth limit (see
+    /// [`rule_stops_the_read`]) — continuing to read would buffer an unbounded
+    /// body, so it must be truncated (the wrapper returns EOF). It alone drives
+    /// that EOF. A BOUNDED count limit (`max_parts`/`max_files`), even one the
+    /// scanner detects itself, must NOT truncate: the parsed-event counter
+    /// blocks it and `deliver_startup_refusal` drains the bounded body for a
+    /// clean 403; truncating there leaves the FastCGI body unread and resets the
+    /// client. Reset by `scan_post_begin`.
+    post_scan_blocked: bool,
     request_id: String,
     meta: Meta,
     worst: Action,
@@ -254,6 +284,7 @@ impl howdah_ctx {
             post_scan: None,
             post_max_size: 0,
             memory_limit: -1,
+            post_scan_blocked: false,
             request_id: new_request_id(),
             meta: Meta::default(),
             worst: Action::Allow,
@@ -340,17 +371,18 @@ impl howdah_ctx {
     /// Standard hit that an exception covers (URI / client facets; Layer 1
     /// knows no script or parameter) is dropped here, before the mode is
     /// applied. Critical hits never consult the exceptions.
-    fn apply(&mut self, hit: Option<&LimitHit>) {
+    fn apply(&mut self, hit: Option<&LimitHit>) -> Action {
         if let Some(h) = hit {
             if h.severity == Severity::Standard {
                 if let Some(m) = self.excepted(h.rule, None, None, None) {
                     self.note_excepted_request(h.rule, &m);
-                    return;
+                    return Action::Allow;
                 }
             }
         }
         let a = decide(hit, self.config.mode, &self.config.rule_modes);
         self.fold(hit, a, None);
+        a
     }
 
     /// Fold an already-resolved action into the sticky worst action; log only
@@ -799,6 +831,7 @@ impl howdah_ctx {
         self.post_scan = crate::boundary::extract(content_type).map(|b| MultipartState::new(&b));
         self.post_max_size = post_max_size;
         self.memory_limit = memory_limit;
+        self.post_scan_blocked = false;
     }
 
     /// §4.2: feed `chunk` raw body bytes to the byte-stream scanner and fold any
@@ -811,12 +844,18 @@ impl howdah_ctx {
         if tests::FORCE_PANIC.with(|f| f.get()) {
             panic!("injected test panic");
         }
-        if self.worst == Action::Block {
-            return self.worst;
+        // The scanner's return drives the read_post wrapper's EOF: it stops the
+        // body ONLY on an unbounded-growth limit (see `rule_stops_the_read`),
+        // never for a bounded count limit — even one the scanner detects itself.
+        // A bounded body that trips `max_parts`/`max_files` must drain so
+        // `deliver_startup_refusal` can answer with a clean 403; truncating it
+        // leaves the FastCGI body unread and resets the client.
+        if self.post_scan_blocked {
+            return Action::Block; // scanner already stopped the body; stay stopped
         }
         let pms = self.post_max_size;
         let Some(state) = self.post_scan.as_mut() else {
-            return self.worst; // not multipart / no boundary: fail open
+            return Action::Allow; // not multipart / no boundary: never truncate
         };
         let res = state.feed(chunk);
         let limits = &self.config.limits;
@@ -835,8 +874,13 @@ impl howdah_ctx {
         hits.push(limits.check_fed_bytes(state.total_fed_bytes()));
         // Gap B (§4.3): bytes actually read vs PHP's effective post_max_size.
         hits.push(limits.check_post_bytes(state.total_fed_bytes(), pms));
+        // Every hit folds into `worst` (verdict + fail-closed), but only an
+        // UNBOUNDED-growth limit stops the body: a bounded one (max_parts, etc.)
+        // the scanner also detects must still drain for a clean 403.
+        let mut scanner_block = false;
         for h in hits {
-            self.apply(h.as_ref());
+            let stops_read = h.as_ref().is_some_and(|x| rule_stops_the_read(x.rule));
+            scanner_block |= self.apply(h.as_ref()) == Action::Block && stops_read;
         }
         // A scanner parse error is NOT a block: PHP's rfc1867 accepts shapes this
         // strict scanner rejects (LF-only line endings, header folding, a
@@ -846,18 +890,25 @@ impl howdah_ctx {
         // independent parsed-event counter remains the floor (over-count, never
         // under-count; §4.2). `MalformedMultipart` is deliberately not raised.
         // §4.5: the buffered non-file bytes may have grown; re-check the estimate.
-        self.apply_memory_estimate();
-        self.worst
+        scanner_block |= self.apply_memory_estimate() == Action::Block;
+        if scanner_block {
+            self.post_scan_blocked = true;
+        }
+        if self.post_scan_blocked {
+            Action::Block
+        } else {
+            Action::Allow
+        }
     }
 
     /// §4.5: fold the parse-memory estimate (summed nesting levels from the input
     /// paths + buffered non-file field bytes from the byte scanner) against the
     /// live-`memory_limit` ceiling. Called whenever either input grows.
-    fn apply_memory_estimate(&mut self) {
+    fn apply_memory_estimate(&mut self) -> Action {
         let levels = self.input.total_levels();
         let nonfile = self.post_scan.as_ref().map(|s| s.total_nonfile_bytes()).unwrap_or(0);
         let hit = self.config.limits.check_memory_estimate(levels, nonfile, self.memory_limit);
-        self.apply(hit.as_ref());
+        self.apply(hit.as_ref())
     }
 
     /// One already-parsed multipart part (the PHP glue's `FORMDATA` /
@@ -3832,6 +3883,44 @@ mod tests {
         unsafe {
             howdah_scan_post_begin(ctx, ct.as_ptr() as *const c_char, ct.len(), 0, -1);
             assert_eq!(howdah_scan_post(ctx, body.as_ptr() as *const c_char, body.len()), HOWDAH_ALLOW);
+            howdah_free(ctx);
+        }
+    }
+
+    #[test]
+    fn scan_post_truncates_only_on_unbounded_growth_limits() {
+        // Regression (1.6.0 docker smoke): the read_post scanner stops the body
+        // (returns EOF) only for an UNBOUNDED-growth limit. A bounded limit the
+        // scanner detects itself (max_parts here) must still record the verdict
+        // (fail-closed) but NOT truncate — rfc1867 drains the bounded body and
+        // `deliver_startup_refusal` sends a clean 403; truncating leaves the
+        // FastCGI body unread and resets the client.
+        let ct = b"multipart/form-data; boundary=B";
+        unsafe {
+            // Bounded: the scanner's OWN max_parts (3 parts, limit 1) blocks the
+            // request but does NOT stop the body.
+            let ctx = init("[limits]\nmax_parts = 1\n");
+            howdah_scan_post_begin(ctx, ct.as_ptr() as *const c_char, ct.len(), 0, -1);
+            let three = b"--B\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nx\r\n--B\r\nContent-Disposition: form-data; name=\"b\"\r\n\r\ny\r\n--B\r\nContent-Disposition: form-data; name=\"c\"\r\n\r\nz\r\n--B--\r\n";
+            assert_eq!(
+                howdah_scan_post(ctx, three.as_ptr() as *const c_char, three.len()),
+                HOWDAH_ALLOW,
+                "the scanner's own max_parts is bounded; it must not truncate the body"
+            );
+            assert!(scan_line(ctx).contains("max_parts"), "but the verdict is still recorded (fail-closed)");
+            howdah_free(ctx);
+
+            // Unbounded: gap B (post_too_large) MUST stop the body.
+            let ctx = init("");
+            let mut big = String::from("--B\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n");
+            big.push_str(&"x".repeat(500));
+            big.push_str("\r\n--B--\r\n");
+            howdah_scan_post_begin(ctx, ct.as_ptr() as *const c_char, ct.len(), 100, 134217728);
+            assert_eq!(
+                howdah_scan_post(ctx, big.as_ptr() as *const c_char, big.len()),
+                HOWDAH_BLOCK,
+                "post_too_large is unbounded; it must stop the body"
+            );
             howdah_free(ctx);
         }
     }

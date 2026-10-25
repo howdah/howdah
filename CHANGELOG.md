@@ -5,6 +5,24 @@ All notable changes to Howdah are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-10-25
+
+### Fixed
+- Under php-fpm (FastCGI), an over-limit `multipart/form-data` request that
+  tripped a bounded count limit (`max_parts`/`max_files`) was blocked and
+  logged and the worker survived, but the client got a reset connection instead
+  of the clean 403 that 1.5.0 (#44) delivers: the 1.6.0 §4.1 read_post scanner
+  stopped the body (returned EOF) on those bounded limits too, leaving the
+  request body undrained so php-fpm reset the FastCGI socket. The scanner now
+  stops the body only for the unbounded-growth limits where it must —
+  `post_too_large` (gap B), the raw-byte budget, the §4.5 parse-memory estimate,
+  and the gap-A per-part header flood (`max_part_headers`/`max_part_header_bytes`,
+  which the scanner alone enforces) — while a bounded count limit drains the
+  (bounded) body and is answered with a clean 403. The security behaviour is
+  unchanged: the request is still blocked, the amplifying allocation suppressed
+  and the worker survives; only the client-facing delivery is restored. Verified
+  on PHP 5.6 / 7.4 / 8.3 (php-fpm behind nginx).
+
 ## [1.6.0] - 2026-10-25
 
 ### Added

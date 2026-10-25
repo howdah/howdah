@@ -133,7 +133,7 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
 
         <fieldset>
           <legend>[rules]: per-rule mode</legend>
-          <p class="small"><strong>Critical</strong> rules block even when the mode is <code>detect</code>; <strong>Standard</strong> rules log in detect and block only in block mode. "inherit" leaves the rule at the global behaviour; <code>off</code> disables it entirely. Every rule name the core accepts is listed, so a loaded file never has a rule this form cannot show; the Layer 2, 3 and 4 names are accepted by the core but not read by the extension, so they sit under their own headings.</p>
+          <p class="small">These set the mode of each <strong>Layer 1</strong> request-shape rule. <strong>Critical</strong> rules block even when the mode is <code>detect</code>; <strong>Standard</strong> rules log in detect and block only in block mode. <code>inherit</code> leaves a rule at the global behaviour; <code>off</code> disables it entirely. <strong>Layers 2, 3 and 4 are enabled and configured in their own sections below</strong> — <code>[inspect]</code> and <code>[sinks]</code> on this page, <code>[behavior]</code> by hand — not in this table.</p>
           {ruleGroups.filter((g) => !g.keys[0].noop).map((g) => (
             <div class="group">
               <h3>{g.title}</h3>
@@ -147,16 +147,16 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
               </div>
             </div>
           ))}
-          <details class="noop">
-            <summary>Layer 2 and 3 rule names: accepted by the core, no effect in the extension</summary>
-            <p class="small">The extension reads Layer 2 overrides only from <code>[inspect.rule_modes]</code> and sink modes only from each <code>[sinks.&lt;sink&gt;]</code> table (both are in the sections below). A <code>[rules]</code> entry for these names is valid TOML that changes nothing; they are listed so a file that contains one can still be loaded, and the load message says so.</p>
+          <details class="noop" id="noop-rules" hidden>
+            <summary>Layer 2, 3 and 4 names found in your file (no effect under <code>[rules]</code>)</summary>
+            <p class="small">The file you loaded puts these names under <code>[rules]</code>, where the extension does not read them. Those layers are set elsewhere: Layer 2 from <code>[inspect.rule_modes]</code>, Layer 3 from each <code>[sinks.&lt;sink&gt;]</code> table, and Layer 4 from <code>[behavior]</code> — all in the sections below. They are kept here so re-saving your file does not silently drop them; to make one take effect, set the matching control below instead.</p>
             {ruleGroups.filter((g) => g.keys[0].noop).map((g) => (
               <div class="group">
                 <h3>{g.title}</h3>
                 <div class="rules">
                   {g.keys.map((k) => (
                     <div class="ctl rule">
-                      <label for={'r-' + k.key}><code>{k.key}</code> <span class="tag">no effect</span></label>
+                      <label for={'r-' + k.key}><code>{k.key}</code> <span class="tag">no effect here</span></label>
                       <select id={'r-' + k.key} name={'rules.' + k.key} data-type="enum" data-rule={k.key} data-severity={k.severity} data-noop="true">{k.values.map((v) => <option value={v} selected={v === k.default}>{v}</option>)}</select>
                     </div>
                   ))}
@@ -444,6 +444,8 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
         var preset = S.SCHEMA.presets[b.getAttribute('data-preset')] || {};
         Object.keys(preset).forEach(function (k) { state[k] = preset[k]; });
         writeState(state);
+        var noopBox = document.getElementById('noop-rules');
+        if (noopBox) { noopBox.hidden = true; noopBox.open = false; }
         render();
       });
     });
@@ -465,10 +467,14 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
           var el = form.querySelector('[data-rule="' + name + '"]');
           return el && el.getAttribute('data-noop') === 'true';
         });
+        // Only surface the "no effect" group when the loaded file actually uses
+        // one of those names; it stays hidden for everyone else.
+        var noopBox = document.getElementById('noop-rules');
+        if (noopBox) { noopBox.hidden = noops.length === 0; if (noops.length) noopBox.open = true; }
         var nExc = (r.state.exceptions || []).length;
         loadMsg.textContent = 'Loaded. The form now shows that file; the output is rebuilt from it.' +
           (nExc ? ' ' + nExc + ' [[exceptions]] ' + (nExc === 1 ? 'entry is' : 'entries are') + ' in the exceptions table.' : '') +
-          (noops.length ? ' Note: [rules] ' + noops.join(', ') + ' in this file ' + (noops.length === 1 ? 'has' : 'have') + ' no effect in the extension (see the [rules] section).' : '');
+          (noops.length ? ' Note: [rules] ' + noops.join(', ') + ' ' + (noops.length === 1 ? 'is a Layer 2/3/4 name and has' : 'are Layer 2/3/4 names and have') + ' no effect under [rules]; set those layers in [inspect]/[sinks]/[behavior] below (the names are shown under the [rules] section).' : '');
       }).catch(function (e) { loadMsg.textContent = 'Could not validate: ' + (e && e.message || e); });
     }
 

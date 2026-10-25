@@ -90,6 +90,8 @@ unsafe fn process(event: c_uint, event_data: *mut c_void) -> bool {
             let name = cbytes(ev.name);
             note_selftest(&name);
             note(core::howdah_part(module::CTX, core::HOWDAH_PART_FIELD, name.len(), 0));
+            // §4.4 gap C: feed the field name's array levels to the nesting budget.
+            note(core::howdah_note_name(module::CTX, name.as_ptr() as *const c_char, name.len(), 0));
             if ev.length > 0 {
                 note(core::howdah_part_data(module::CTX, ev.length as usize));
             }
@@ -105,6 +107,8 @@ unsafe fn process(event: c_uint, event_data: *mut c_void) -> bool {
                 CStr::from_ptr(*ev.filename).to_bytes().len()
             };
             note(core::howdah_part(module::CTX, core::HOWDAH_PART_FILE, name.len(), filename_len));
+            // §4.4 gap C: file names are weighted higher in the nesting budget.
+            note(core::howdah_note_name(module::CTX, name.as_ptr() as *const c_char, name.len(), 1));
             BLOCKED
         }
         x if x == sys::MULTIPART_EVENT_FILE_DATA => {

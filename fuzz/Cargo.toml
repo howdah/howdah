@@ -25,4 +25,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "post_scan_diff"
+path = "fuzz_targets/post_scan_diff.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

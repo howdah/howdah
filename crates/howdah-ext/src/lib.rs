@@ -37,6 +37,8 @@ mod oom_filter;
 #[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]
 mod origin;
 #[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]
+mod post_scan;
+#[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]
 mod response;
 #[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]
 mod rfc1867;

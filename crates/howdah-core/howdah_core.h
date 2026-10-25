@@ -263,6 +263,18 @@ int32_t howdah_part_data(struct howdah_ctx *ctx, size_t len);
 int32_t howdah_input_var(struct howdah_ctx *ctx, const char *name, size_t name_len);
 
 /**
+ * Feed one multipart FORMDATA/FILE_START name into the gap-C nesting budget
+ * (§4.4). `is_file` is non-zero for a FILE_START name (weighted higher). The
+ * part itself is counted by `howdah_part`; this only adds its array levels. The
+ * name is inspected for `[` depth, never logged. Returns the most severe action
+ * so far (0 Allow, 1 Log, 2 Block). Panic or NULL ctx returns 0.
+ *
+ * # Safety
+ * `ctx` NULL or live; `name` NULL or valid for `name_len` bytes.
+ */
+int32_t howdah_note_name(struct howdah_ctx *ctx, const char *name, size_t name_len, int32_t is_file);
+
+/**
  * Inspect one request value (Layer 2). `source` is a `HOWDAH_SRC_*` code.
  * The value is scanned binary-safe and NEVER logged; the log carries only the
  * class, source and (truncated) variable name. Resolved against the

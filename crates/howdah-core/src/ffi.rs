@@ -208,6 +208,7 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::OutOfMemory => "worker ended on out-of-memory",
         RuleId::StartupFatal => "fatal error during request startup",
         RuleId::PostTooLarge => "request body exceeds post_max_size",
+        RuleId::NestingBudget => "too many array-nesting levels across request inputs",
     }
 }
 
@@ -892,6 +893,20 @@ impl howdah_ctx {
         self.worst
     }
 
+    /// Feed one multipart FORMDATA/FILE_START name into the gap-C nesting budget
+    /// (the part is already counted by `MultipartState`; this only adds its
+    /// array levels). The name is inspected for `[` depth, never logged.
+    fn note_name(&mut self, name: &[u8], is_file: bool) -> Action {
+        #[cfg(test)]
+        if tests::FORCE_PANIC.with(|f| f.get()) {
+            panic!("injected test panic");
+        }
+        self.input.note_name(name, is_file);
+        let hit = self.config.limits.check_input(&self.input);
+        self.apply(hit.as_ref());
+        self.worst
+    }
+
     fn request_header(&mut self, name_len: usize, value_len: usize) -> Action {
         #[cfg(test)]
         if tests::FORCE_PANIC.with(|f| f.get()) {
@@ -1166,6 +1181,38 @@ pub unsafe extern "C" fn howdah_input_var(ctx: *mut howdah_ctx, name: *const c_c
             std::slice::from_raw_parts(name as *const u8, name_len)
         };
         code((*ctx).input_var(bytes))
+    }));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// Feed one multipart FORMDATA/FILE_START name into the gap-C nesting budget
+/// (§4.4). `is_file` is non-zero for a FILE_START name (weighted higher). The
+/// part itself is counted by `howdah_part`; this only adds its array levels. The
+/// name is inspected for `[` depth, never logged. Returns the most severe action
+/// so far (0 Allow, 1 Log, 2 Block). Panic or NULL ctx returns 0.
+///
+/// # Safety
+/// `ctx` NULL or live; `name` NULL or valid for `name_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_note_name(
+    ctx: *mut howdah_ctx,
+    name: *const c_char,
+    name_len: usize,
+    is_file: i32,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let bytes: &[u8] = if name.is_null() || name_len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(name as *const u8, name_len)
+        };
+        code((*ctx).note_name(bytes, is_file != 0))
     }));
     r.unwrap_or_else(|_| {
         report_panic(ctx);

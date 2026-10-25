@@ -48,6 +48,11 @@ pub struct Limits {
     pub max_request_headers: usize,
     /// Maximum bytes (name + value) of any single request header.
     pub max_request_header_bytes: usize,
+    /// Maximum summed array-nesting levels across all variable/field/file names
+    /// in one request (gap C, §4.4). File names are weighted (they build several
+    /// metadata arrays). Bounds the total array-building cost, which a flood of
+    /// deeply- or widely-nested names drives up regardless of any one depth.
+    pub max_nesting_levels: usize,
 }
 
 impl Limits {
@@ -116,6 +121,12 @@ impl Limits {
             // 16 KiB tolerates large cookies and auth tokens in one header line
             // (servers commonly cap a header line at 8-16 KiB).
             max_request_header_bytes: 16384,
+            // Summed, file-weighted nesting levels. Stock PHP caps vars at 1000
+            // and files at 20; a legitimate form nests a handful of levels, so a
+            // few thousand total levels is far above benign use yet well below
+            // the counts a trigger-(3)/gap-C flood needs to stress array
+            // building. Provisional; the Task-8 corpus + RSS calibration pins it.
+            max_nesting_levels: 10000,
         }
     }
 
@@ -134,6 +145,7 @@ impl Limits {
             ("max_input_key_bytes", self.max_input_key_bytes),
             ("max_request_headers", self.max_request_headers),
             ("max_request_header_bytes", self.max_request_header_bytes),
+            ("max_nesting_levels", self.max_nesting_levels),
         ];
         for (name, v) in fields {
             if v == 0 {
@@ -241,6 +253,16 @@ impl Limits {
                     "request header of {} bytes exceeds limit {}",
                     st.max_header_bytes(),
                     self.max_request_header_bytes
+                ),
+            );
+        }
+        if st.total_levels() > self.max_nesting_levels as u64 {
+            return hit(
+                RuleId::NestingBudget,
+                format!(
+                    "summed nesting levels {} exceeds limit {}",
+                    st.total_levels(),
+                    self.max_nesting_levels
                 ),
             );
         }
@@ -357,6 +379,10 @@ pub enum RuleId {
     /// (gap B, §4.3): backports upstream's `fill_buffer` check, enforced from the
     /// byte stream the read_post wrapper sees. Critical, Layer 1.
     PostTooLarge,
+    /// Summed array-nesting levels across all variable/field/file names exceeded
+    /// `max_nesting_levels` (gap C, §4.4): memory grows with the total number of
+    /// array levels, not any one depth. Critical, Layer 1.
+    NestingBudget,
 }
 
 impl RuleId {
@@ -401,7 +427,7 @@ impl RuleId {
 /// or miss one it accepts. `rule_catalog_covers_every_variant` fails to
 /// compile when a variant is added here but not to the list.
 pub fn rule_catalog() -> &'static [RuleId] {
-    const ALL: [RuleId; 38] = [
+    const ALL: [RuleId; 39] = [
         RuleId::MaxParts,
         RuleId::MaxFiles,
         RuleId::MaxPartHeaders,
@@ -440,6 +466,7 @@ pub fn rule_catalog() -> &'static [RuleId] {
         RuleId::OutOfMemory,
         RuleId::StartupFatal,
         RuleId::PostTooLarge,
+        RuleId::NestingBudget,
     ];
     &ALL
 }
@@ -563,6 +590,27 @@ mod tests {
     }
 
     #[test]
+    fn nesting_budget_sums_levels_across_names() {
+        use crate::input::{InputState, FILE_NAME_WEIGHT};
+        let l = Limits { max_nesting_levels: 10, ..Limits::defaults() };
+        let mut s = InputState::new();
+        for _ in 0..10 {
+            s.note_var(b"a");
+        } // 10 * 1 = 10, at the limit
+        assert!(l.check_input(&s).is_none());
+        s.note_var(b"a"); // 11 > 10
+        let h = l.check_input(&s).unwrap();
+        assert_eq!((h.rule, h.severity), (RuleId::NestingBudget, Severity::Critical));
+        // A single file name weighs FILE_NAME_WEIGHT.
+        let l = Limits { max_nesting_levels: FILE_NAME_WEIGHT as usize, ..Limits::defaults() };
+        let mut s = InputState::new();
+        s.note_name(b"f", true);
+        assert!(l.check_input(&s).is_none());
+        s.note_name(b"g", true);
+        assert_eq!(l.check_input(&s).unwrap().rule, RuleId::NestingBudget);
+    }
+
+    #[test]
     fn post_too_large_vs_effective_post_max_size() {
         let l = Limits::defaults();
         // Over PHP's post_max_size -> Critical PostTooLarge.
@@ -655,10 +703,11 @@ mod tests {
                 | RuleId::TlsVerify
                 | RuleId::OutOfMemory
                 | RuleId::StartupFatal
-                | RuleId::PostTooLarge => {}
+                | RuleId::PostTooLarge
+                | RuleId::NestingBudget => {}
             }
         }
-        assert_eq!(rule_catalog().len(), 38);
+        assert_eq!(rule_catalog().len(), 39);
         let mut sorted = all.to_vec();
         sorted.sort();
         sorted.dedup();

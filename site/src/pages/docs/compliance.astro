@@ -34,9 +34,9 @@ const logIni = String.raw`howdah.log = /var/log/howdah/events.log`;
 const logSyslog = String.raw`[log]
 destination = "syslog"   # facility local0, tag "howdah" unless set`;
 
-const samples = String.raw`{"action":"block","client_ip":"203.0.113.7","layer":1,"method":"POST","reason":"multipart part count exceeds limit","request_id":"11eccf6d90ad2987d","rule":"max_parts","schema":2,"ts":"1792864974141","uri":"/index.php","version":"1.4.0"}
-{"action":"log","client_ip":"203.0.113.7","layer":2,"method":"GET","reason":"sql_injection pattern in get variable 'q'","request_id":"1a2d239820e2f06bc","rule":"sql_injection","schema":2,"ts":"1792864974146","uri":"/index.php","version":"1.4.0"}
-{"action":"log","client_ip":"203.0.113.7","layer":3,"method":"GET","reason":"non-allowlisted command via system","request_id":"1fa7c36ea3c170856","rule":"command_exec","schema":2,"ts":"1792864974151","uri":"/index.php","version":"1.4.0"}`;
+const samples = String.raw`{"action":"block","client_ip":"203.0.113.7","layer":1,"method":"POST","reason":"multipart part count exceeds limit","request_id":"11eccf6d90ad2987d","rule":"max_parts","schema":2,"ts":"1792864974141","uri":"/index.php","version":"1.5.0"}
+{"action":"log","client_ip":"203.0.113.7","layer":2,"method":"GET","reason":"sql_injection pattern in get variable 'q'","request_id":"1a2d239820e2f06bc","rule":"sql_injection","schema":2,"ts":"1792864974146","uri":"/index.php","version":"1.5.0"}
+{"action":"log","client_ip":"203.0.113.7","layer":3,"method":"GET","reason":"non-allowlisted command via system","request_id":"1fa7c36ea3c170856","rule":"command_exec","schema":2,"ts":"1792864974151","uri":"/index.php","version":"1.5.0"}`;
 
 const logDir = String.raw`# The directory belongs to the PHP worker user (www-data on Debian, apache or nginx on RHEL).
 sudo install -d -m 0750 -o www-data -g www-data /var/log/howdah`;
@@ -147,7 +147,7 @@ const noJq = String.raw`zcat -f /var/log/howdah/events.log* | awk -F'"rule":"' '
             </tr>
             <tr>
               <th scope="row">Configured to either block web-based attacks or generate an alert that is immediately investigated</th>
-              <td>Layer 1 Critical rules block (403/413) in both <code>block</code> and <code>detect</code> mode. Standard rules block in <code>block</code> mode. Layer 2 and the Layer 3 sinks only log (and <code>unserialize</code>, <code>phar</code> and <code>ssrf</code> are off) until you arm a class or sink with <code>mode = "block"</code>.</td>
+              <td>Layer 1 Critical rules block (403/413) in both <code>block</code> and <code>detect</code> mode. Standard rules block in <code>block</code> mode. Layer 2, the Layer 3 sinks (including the legacy sinks added in 1.5) and Layer 4 (shipped in 1.4, with empty lists, plus <code>observe</code> to propose allowlists) only log (and <code>unserialize</code>, <code>phar</code> and <code>ssrf</code> are off) until you arm a class or sink with <code>mode = "block"</code>.</td>
               <td><code>howdah.toml</code> with each mode and the reason for it (<a href="#decision-record">decision record</a>); for log-only rules, the alert rule in your log system (or the <code>[log] exec</code> program) and records of alerts being investigated.</td>
               <td>It has no built-in email, webhook or pager integration. Alerts come from your log pipeline, or from a program you write that Howdah runs once per event (<code>[log] exec</code>, at most 10 starts per second per PHP process by default; beyond that events are logged but not passed on). An armed Layer 2 class refuses the request before the script runs on php-fpm, Apache mod_php, php-cgi and the CLI server (lab-verified on 5.6, 7.4 and 8.3), but its signatures are best-effort and bypassable, so treat Layer 2 as detection with an optional block, not as a boundary.</td>
             </tr>
@@ -162,7 +162,7 @@ const noJq = String.raw`zcat -f /var/log/howdah/events.log* | awk -F'"rule":"' '
         <li><strong>The standard's own guidance names RASP.</strong> The guidance for requirement 6.4.1, which 6.4.2 replaces, says: &ldquo;Another example of an automated technical solution is Runtime Application Self-Protection (RASP) technologies. When implemented correctly, RASP solutions can detect and block anomalous behavior by the software during execution. While WAFs typically monitor the application perimeter, RASP solutions monitor and block behavior within the application.&rdquo; (PCI DSS v4.0.1, page 151.) The guidance for 6.4.2 itself (page 152) gives only a WAF as its example.</li>
         <li><strong>Some assessors have accepted in-process tools.</strong> Coalfire, a PCI QSA company, evaluated Contrast Security's Assess and Protect tools (Protect is a RASP) and said they &ldquo;may be used to replace some of the traditional approaches to assessing and protecting applications&rdquo; (vendor-published summary, 2019, <a href={COALFIRE}>Contrast Security</a>). GuidePoint Security writes that RASP is a route to meeting requirement 6.6 in PCI DSS 3.2.1 and 6.4.1 in 4.0 (<a href={GUIDEPOINT}>GuidePoint</a>).</li>
         <li><strong>Nothing settles it.</strong> We found no PCI SSC FAQ that rules on in-process enforcement for 6.4.2, either way.</li>
-        <li><strong>Howdah is partly WAF, partly RASP.</strong> Layers 1 and 2 inspect the request the way a WAF does, but after PHP's own parser has decoded it. Layer 3 works like a RASP: it checks <code>system</code>, <code>include</code>, <code>eval</code>, <code>unserialize</code>, <code>phar://</code> and outbound requests at the moment they are called.</li>
+        <li><strong>Howdah is partly WAF, partly RASP.</strong> Layers 1 and 2 inspect the request the way a WAF does, but after PHP's own parser has decoded it. Layer 3 works like a RASP: it checks sinks &mdash; <code>system</code>, <code>include</code>, <code>eval</code>, <code>unserialize</code>, <code>phar://</code>, outbound requests, and (new in 1.5) <code>mail</code>, <code>preg</code>/<code>assert</code>/<code>create_function</code> evaluation, dangerous callbacks and XXE &mdash; at the moment they are called; Layer 4 watches what the code does after a breach. All log-first.</li>
       </ul>
       <p>Howdah complements a network WAF; it does not replace one. Keep or add a WAF, CDN rule or web server rule for:</p>
       <ul class="facts">
@@ -172,11 +172,11 @@ const noJq = String.raw`zcat -f /var/log/howdah/events.log* | awk -F'"rule":"' '
       </ul>
 
       <h3 id="attack-classes">Which attack classes Howdah sees</h3>
-      <p>The 6.4.2 guidance points at the attacks listed in requirement 6.2.4. This is how they line up with Howdah 1.3.</p>
+      <p>The 6.4.2 guidance points at the attacks listed in requirement 6.2.4. This is how they line up with Howdah 1.5.</p>
       <div class="tablewrap map" tabindex="0" role="region" aria-label="PCI DSS 6.2.4 attack classes (scrolls sideways on narrow screens)">
         <table>
-          <caption class="sr-only">PCI DSS 6.2.4 attack classes and Howdah 1.3 coverage</caption>
-          <thead><tr><th scope="col">6.2.4 attack class</th><th scope="col">Howdah 1.3</th></tr></thead>
+          <caption class="sr-only">PCI DSS 6.2.4 attack classes and Howdah 1.5 coverage</caption>
+          <thead><tr><th scope="col">6.2.4 attack class</th><th scope="col">Howdah 1.5</th></tr></thead>
           <tbody>
             <tr><th scope="row">Injection: SQL, LDAP, XPath, command and other injection</th><td>SQL-injection and command-injection shapes in GET, POST, cookie and path values: Layer 2, detection only, best-effort and bypassable. OS command execution: the <code>command_exec</code> sink, which blocks when armed. LDAP and XPath: not inspected.</td></tr>
             <tr><th scope="row">Attacks on data and data structures</th><td>Layer 1 limits on multipart parts and files, input variable count, array nesting, key and header sizes (Critical rules block). Object injection: the <code>unserialize</code> and <code>phar</code> sinks, off by default. Memory-safety bugs in PHP itself are covered only where they need one of these shapes.</td></tr>
@@ -250,7 +250,7 @@ const noJq = String.raw`zcat -f /var/log/howdah/events.log* | awk -F'"rule":"' '
       </ul>
 
       <h3 id="decision-record">5. The decision record</h3>
-      <p>Reviewers look for &ldquo;documented rationales for rule removals&rdquo; and &ldquo;a clear understanding of what's being excluded and why&rdquo; (<a href={CRS_PCI}>OWASP CRS on PCI DSS</a>). Howdah's levers are a rule's mode (<code>block</code>, <code>detect</code>, <code>off</code>) and a sink's allowlist. It has no per-URL or per-parameter exclusions. Record every change from the defaults in one table:</p>
+      <p>Reviewers look for &ldquo;documented rationales for rule removals&rdquo; and &ldquo;a clear understanding of what's being excluded and why&rdquo; (<a href={CRS_PCI}>OWASP CRS on PCI DSS</a>). Howdah's levers are a rule's mode (<code>block</code>, <code>detect</code>, <code>off</code>) and a sink's allowlist. Howdah 1.5 adds scoped <code>[[exceptions]]</code>, matched by executing script, request parameter, URI prefix or client CIDR; each exception's mandatory <code>reason</code> doubles as the decision record. Critical Layer 1 rules take no exception. Record every change from the defaults in one table:</p>
       <div class="tablewrap" tabindex="0" role="region" aria-label="Decision record template (scrolls sideways on narrow screens)">
         <table>
           <caption class="sr-only">Decision record template with example rows</caption>

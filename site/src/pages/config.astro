@@ -543,7 +543,12 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
 </script>
 
 <style>
-  .editor { display: grid; gap: 2rem; padding-block: 2rem; }
+  /* Single column on narrow screens: give it an explicit minmax(0,1fr) track so
+     it stays viewport-width. Without it the implicit grid track sizes to
+     max-content and a wide child (the exceptions table / output panel) blows
+     out the page; min-width:0 on the item lets inner panels scroll inside it. */
+  .editor { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2rem; padding-block: 2rem; }
+  .editor > * { min-width: 0; }
   @media (min-width: 60rem) { .editor { grid-template-columns: minmax(0, 1.25fr) minmax(20rem, 1fr); gap: 2.5rem; } #out { position: sticky; top: 1rem; align-self: start; max-height: calc(100vh - 2rem); overflow: auto; } }
   .presets { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin-bottom: 1rem; }
   .presets-label { font-weight: 600; margin-right: .3rem; }

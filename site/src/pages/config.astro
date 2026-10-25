@@ -133,7 +133,7 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
 
         <fieldset>
           <legend>[rules]: per-rule mode</legend>
-          <p class="small">These set the mode of each <strong>Layer 1</strong> request-shape rule. <strong>Critical</strong> rules block even when the mode is <code>detect</code>; <strong>Standard</strong> rules log in detect and block only in block mode. <code>inherit</code> leaves a rule at the global behaviour; <code>off</code> disables it entirely. <strong>Layers 2, 3 and 4 are enabled and configured in their own sections below</strong> — <code>[inspect]</code> and <code>[sinks]</code> on this page, <code>[behavior]</code> by hand — not in this table.</p>
+          <p class="small">These set the mode of each <strong>Layer 1</strong> request-shape rule. <strong>Critical</strong> rules block even when the mode is <code>detect</code>; <strong>Standard</strong> rules log in detect and block only in block mode. <code>inherit</code> leaves a rule at the global behaviour; <code>off</code> disables it entirely. <strong>Layers 2, 3 and 4 are enabled and configured in their own sections below</strong> — <code>[inspect]</code> and <code>[sinks]</code> on this page, <code>[behavior]</code> by hand — not in this table. The out-of-memory backstop is on by default and switched with the top-level <code>oom_exit</code> key above.</p>
           {ruleGroups.filter((g) => !g.keys[0].noop).map((g) => (
             <div class="group">
               <h3>{g.title}</h3>
@@ -148,8 +148,8 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
             </div>
           ))}
           <details class="noop" id="noop-rules" hidden>
-            <summary>Layer 2, 3 and 4 names found in your file (no effect under <code>[rules]</code>)</summary>
-            <p class="small">The file you loaded puts these names under <code>[rules]</code>, where the extension does not read them. Those layers are set elsewhere: Layer 2 from <code>[inspect.rule_modes]</code>, Layer 3 from each <code>[sinks.&lt;sink&gt;]</code> table, and Layer 4 from <code>[behavior]</code> — all in the sections below. They are kept here so re-saving your file does not silently drop them; to make one take effect, set the matching control below instead.</p>
+            <summary>Names found in your file that have no effect under <code>[rules]</code></summary>
+            <p class="small">The file you loaded puts these names under <code>[rules]</code>, where the extension does not read them — they are set elsewhere: Layer 2 from <code>[inspect.rule_modes]</code>, Layer 3 from each <code>[sinks.&lt;sink&gt;]</code> table, and Layer 4 from <code>[behavior]</code> (all in the sections below); the out-of-memory backstop (<code>out_of_memory</code>, <code>startup_fatal</code>) from the top-level <code>oom_exit</code> key above. They are kept here so re-saving your file does not silently drop them; to make one take effect, set its real control instead.</p>
             {ruleGroups.filter((g) => g.keys[0].noop).map((g) => (
               <div class="group">
                 <h3>{g.title}</h3>
@@ -157,7 +157,7 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
                   {g.keys.map((k) => (
                     <div class="ctl rule">
                       <label for={'r-' + k.key}><code>{k.key}</code> <span class="tag">no effect here</span></label>
-                      <select id={'r-' + k.key} name={'rules.' + k.key} data-type="enum" data-rule={k.key} data-severity={k.severity} data-noop="true">{k.values.map((v) => <option value={v} selected={v === k.default}>{v}</option>)}</select>
+                      <select id={'r-' + k.key} name={'rules.' + k.key} data-type="enum" data-rule={k.key} data-severity={k.severity} data-noop="true" data-layer={g.layer}>{k.values.map((v) => <option value={v} selected={v === k.default}>{v}</option>)}</select>
                     </div>
                   ))}
                 </div>
@@ -463,18 +463,25 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
         }
         writeState(r.state);
         render();
-        var noops = Object.keys(v.config.rules || {}).filter(function (name) {
-          var el = form.querySelector('[data-rule="' + name + '"]');
-          return el && el.getAttribute('data-noop') === 'true';
-        });
+        var noops = Object.keys(v.config.rules || {}).map(function (name) {
+          return form.querySelector('[data-rule="' + name + '"]');
+        }).filter(function (el) { return el && el.getAttribute('data-noop') === 'true'; });
         // Only surface the "no effect" group when the loaded file actually uses
         // one of those names; it stays hidden for everyone else.
         var noopBox = document.getElementById('noop-rules');
         if (noopBox) { noopBox.hidden = noops.length === 0; if (noops.length) noopBox.open = true; }
+        // Layer 2/3/4 names and out-of-memory backstop names (layer "other") are
+        // controlled in different places, so name them separately.
+        var names = function (els) { return els.map(function (el) { return el.getAttribute('data-rule'); }).join(', '); };
+        var oom = noops.filter(function (el) { return el.getAttribute('data-layer') === 'other'; });
+        var lyr = noops.filter(function (el) { return el.getAttribute('data-layer') !== 'other'; });
+        var noopNote = '';
+        if (lyr.length) noopNote += ' Note: [rules] ' + names(lyr) + ' ' + (lyr.length === 1 ? 'is a Layer 2/3/4 name and has' : 'are Layer 2/3/4 names and have') + ' no effect under [rules]; set those layers in [inspect]/[sinks]/[behavior] below.';
+        if (oom.length) noopNote += ' Note: [rules] ' + names(oom) + ' ' + (oom.length === 1 ? 'is an out-of-memory backstop name; the backstop is' : 'are out-of-memory backstop names; the backstop is') + ' switched by the oom_exit key above, not here.';
         var nExc = (r.state.exceptions || []).length;
         loadMsg.textContent = 'Loaded. The form now shows that file; the output is rebuilt from it.' +
           (nExc ? ' ' + nExc + ' [[exceptions]] ' + (nExc === 1 ? 'entry is' : 'entries are') + ' in the exceptions table.' : '') +
-          (noops.length ? ' Note: [rules] ' + noops.join(', ') + ' ' + (noops.length === 1 ? 'is a Layer 2/3/4 name and has' : 'are Layer 2/3/4 names and have') + ' no effect under [rules]; set those layers in [inspect]/[sinks]/[behavior] below (the names are shown under the [rules] section).' : '');
+          noopNote;
       }).catch(function (e) { loadMsg.textContent = 'Could not validate: ' + (e && e.message || e); });
     }
 

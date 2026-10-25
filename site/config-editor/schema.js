@@ -227,7 +227,7 @@
       { id: 'limits', title: 'Limits', keys: LIMITS,
         groups: { multipart: 'Multipart body', input: 'Input shape', headers: 'Request headers' } },
       { id: 'rules', title: 'Per-rule mode', keys: [], rulesKeys: rulesKeys,
-        groups: { multipart: 'Multipart', input: 'Input shape', headers: 'Request headers', inspect: 'Layer 2 names (no effect here)', sinks: 'Layer 3 names (no effect here)', behavior: 'Layer 4 names (no effect here)', other: 'Other' } },
+        groups: { multipart: 'Multipart', input: 'Input shape', headers: 'Request headers', inspect: 'Layer 2 names (no effect here)', sinks: 'Layer 3 names (no effect here)', behavior: 'Layer 4 names (no effect here)', other: 'Out-of-memory backstop (set by oom_exit above)' } },
       { id: 'inspect', title: 'Layer 2: input inspection', keys: INSPECT },
       { id: 'sinks', title: 'Layer 3: sink hardening', keys: SINKS, php7Only: ['include'] }
     ],

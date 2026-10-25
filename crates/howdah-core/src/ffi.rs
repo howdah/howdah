@@ -1634,6 +1634,21 @@ pub unsafe extern "C" fn howdah_exceptions_log(ctx: *mut howdah_ctx) -> i32 {
     catch_unwind(AssertUnwindSafe(|| i32::from((*ctx).exceptions_log))).unwrap_or(0)
 }
 
+/// 1 iff the context's config has `oom_exit = true` (the default); 0 otherwise,
+/// for NULL and on panic. Read by the glue at MINIT to decide whether to install
+/// the out-of-memory backstop (`zend_error_cb` hook). A NULL ctx or a caught
+/// panic yields 0 (do not install: the fail-open direction — no behavior change).
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_oom_exit(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| i32::from((*ctx).config.oom_exit))).unwrap_or(0)
+}
+
 /// 1 iff some exception has a `script_sha256` facet that could apply to
 /// `script` (so the glue should hash the file); else 0. NULL / panic is 0.
 ///
@@ -3426,5 +3441,20 @@ mod tests {
             "an explicit inspect off is absolute; no override re-arms it"
         );
         assert_eq!(unsafe { howdah_inspect_armed(std::ptr::null_mut()) }, 0);
+    }
+
+    // ---- howdah_oom_exit: the out-of-memory backstop toggle -------------------
+
+    #[test]
+    fn oom_exit_getter() {
+        let on = init(""); // defaults -> oom_exit true
+        assert_eq!(unsafe { howdah_oom_exit(on) }, 1);
+        let off = init("oom_exit = false\n");
+        assert_eq!(unsafe { howdah_oom_exit(off) }, 0);
+        assert_eq!(unsafe { howdah_oom_exit(std::ptr::null_mut()) }, 0);
+        unsafe {
+            howdah_free(on);
+            howdah_free(off);
+        }
     }
 }

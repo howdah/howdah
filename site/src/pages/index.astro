@@ -13,7 +13,7 @@ const shortVersion = VERSION.split('.').slice(0, 2).join('.');
 // Layer 3 in 1.2, extended in 1.3, Layer 4 in 1.4 (all 'released', log-only).
 // Non-active layers are dimmed so the page never implies they are in 1.0.
 const layers = [
-  { n: 1, name: 'Request parsing', covers: 'Upload/multipart floods (PHP2Shell), input-variable floods, deeply nested arrays, oversized headers — refused while PHP parses the request.', status: 'active' },
+  { n: 1, name: 'Request parsing', covers: 'Upload/multipart floods (the PHP2Shell shape), input-variable floods and deeply nested arrays — refused while PHP parses the request. Too many or oversized headers are logged, and refused in block mode.', status: 'active' },
   { n: 2, name: 'Request inspection', covers: 'Content inspection of decoded GET/POST/cookie/path values for SQL injection, path traversal and command/code injection. It detects and logs; it does not block by default.', status: 'released' },
   { n: 3, name: 'Runtime checks', covers: 'Sink hardening: guards command execution, unserialize, include and eval with a flat allowlist policy, plus phar:// and an SSRF egress guard (both off by default, new in 1.3). It detects and logs; it does not block by default.', status: 'released' },
   { n: 4, name: 'After a breach', covers: 'Watches PHP run from upload directories, unexpected binaries, unexpected outbound hosts and .php writes. It detects and logs; it does not block by default, and does nothing until you set its lists.', status: 'released' },
@@ -115,7 +115,7 @@ const aptLines = [
         </div></li>
         <li><div class="card">
           <h3>Still runs on end-of-life PHP</h3>
-          <p>One of the very few maintained in-process hardening extensions that still loads on PHP&nbsp;5.4&ndash;7.3 &mdash; roughly a third of live PHP sites (<a href="https://w3techs.com/technologies/details/pl-php" rel="nofollow">W3Techs</a>, Oct&nbsp;2026). Most hardening tools require 7.0+ or newer.</p>
+          <p>One of the very few maintained in-process hardening extensions that still loads on PHP&nbsp;5.x and every 7.x. In August 2026, <a href="https://w3techs.com/technologies/details/pl-php" rel="nofollow">W3Techs</a> counted PHP&nbsp;5 and 7 on over a third of the PHP sites it measured (8.0% and 29.4%). Most hardening tools require 7.0 or newer.</p>
         </div></li>
         <li><div class="card">
           <h3>No agent, no telemetry, no cloud</h3>
@@ -123,7 +123,7 @@ const aptLines = [
         </div></li>
         <li><div class="card">
           <h3>Log-first and honest</h3>
-          <p>Four layers that detect and log by default; you turn on blocking when you are ready. Every &ldquo;blocked&rdquo; claim is backed by the public <a href="/coverage/">coverage table</a>, and releases are signed and SLSA-attested.</p>
+          <p>Four layers that detect and log by default; you turn on blocking when you are ready. Every &ldquo;blocked&rdquo; claim is backed by the public <a href="/coverage/">coverage table</a>, and releases are signed (and, from 1.5.0, SLSA-attested).</p>
         </div></li>
       </ul>
     </div>
@@ -254,7 +254,7 @@ const aptLines = [
   <section id="sinks" class="alt">
     <div class="wrap">
       <h2>Layer 3 — the sinks Howdah guards <span class="pill ok">since 1.2 · log-only</span></h2>
-      <p>Layer 2 looks at request values. Layer 3 looks at what the application does with them: it guards dangerous PHP functions, called <em>sinks</em>, with a flat allowlist policy in the style of Snuffleupagus. Howdah <strong>actively guards six core sinks, plus seven legacy sinks added in 1.5. It detects and logs; it does not block by default.</strong> This is sink hardening, not XSS or output inspection.</p>
+      <p>Layer 2 looks at request values. Layer 3 looks at what the application does with them: it guards dangerous PHP functions, called <em>sinks</em>, with a flat allowlist policy in the style of Snuffleupagus. Howdah <strong>guards six core sinks (three of them off by default), plus seven legacy sinks added in 1.5. It detects and logs; it does not block by default.</strong> This is sink hardening, not XSS or output inspection.</p>
       <div class="cols two" style="margin-top:1.5rem">
         <div>
           <h3>The six core sinks</h3>
@@ -276,12 +276,12 @@ const aptLines = [
               </tbody>
             </table>
           </div>
-          <p class="legend"><span aria-hidden="true">✓</span> = detect and block (when armed). <sup>1</sup>&nbsp;Checked at compile time: a file served from a warm opcache is not re-inspected. <sup>2</sup>&nbsp;Includes phar metadata deserialization through the stream wrapper. <sup>3</sup>&nbsp;Detection and denial of <code>phar://</code> use only; no deserialization claim.</p>
-          <p class="legend">Verified on PHP 5.4, 5.6, 7.4, 8.3 and 8.5; other minors build and are expected to work but are not independently verified. A debug-build leak review is pending. Blocking an include or eval stops it running and the script continues. <strong>PHP 5.x <code>include</code> is checked at compile time, so a file served from a warm opcache is not re-inspected</strong> (<code>eval</code> is unaffected; the 7.0+ opcode handler is not affected by opcache). <strong>Phar:</strong> on PHP 5.x/7.x this covers metadata deserialization via the stream wrapper; on 8.x it is detection and denial of <code>phar://</code> use only. The direct Phar API (<code>new Phar</code>, <code>PharData</code>, <code>Phar::loadPhar</code>, <code>Phar::mapPhar</code>, <code>Phar::getMetadata</code>) is not covered. <strong>SSRF</strong> is best-effort, resolve-at-check-time detection, not a connection-time boundary: DNS rebinding, redirects, <code>curl_multi_*</code>, <code>CURLOPT_RESOLVE</code>/<code>CONNECT_TO</code> and a non-string or absent <code>CURLOPT_URL</code> bypass it, and <code>copy</code>, <code>file</code>, <code>readfile</code>, <code>SoapClient</code>, <code>DOMDocument::load*</code> and <code>simplexml_load_file</code> are not hooked. It adds a DNS lookup per distinct outbound host with no timeout. More detail on the <a href="/coverage/">coverage page</a>.</p>
+          <p class="legend"><span aria-hidden="true">✓</span> = detect and block (when armed). <sup>1</sup>&nbsp;Checked at compile time: a file served from a warm opcache is not re-inspected (on PHP 7.0+ only with <code>hook = "compile"</code>). <sup>2</sup>&nbsp;Includes phar metadata deserialization through the stream wrapper. <sup>3</sup>&nbsp;Detection and denial of <code>phar://</code> use only; no deserialization claim.</p>
+          <p class="legend">Verified on PHP 5.4, 5.6, 7.4, 8.3 and 8.5; other minors build and are expected to work but are not independently verified. A debug-build leak review is pending. Blocking an include or eval stops it running and the script continues. <strong>PHP 5.x <code>include</code> is checked at compile time, so a file served from a warm opcache is not re-inspected</strong> (<code>eval</code> is unaffected; the 7.0+ opcode handler is not affected by opcache, but with <code>[sinks] hook = "compile"</code> PHP 7.0+ has the same warm-opcache limit). <strong>Phar:</strong> on PHP 5.x/7.x this covers metadata deserialization via the stream wrapper; on 8.x it is detection and denial of <code>phar://</code> use only. The direct Phar API (<code>new Phar</code>, <code>PharData</code>, <code>Phar::loadPhar</code>, <code>Phar::mapPhar</code>, <code>Phar::getMetadata</code>) is not covered. <strong>SSRF</strong> is best-effort, resolve-at-check-time detection, not a connection-time boundary: DNS rebinding, redirects, <code>curl_multi_*</code>, <code>CURLOPT_RESOLVE</code>/<code>CONNECT_TO</code> and a non-string or absent <code>CURLOPT_URL</code> bypass it, and <code>copy</code>, <code>file</code>, <code>readfile</code>, <code>SoapClient</code>, <code>DOMDocument::load*</code> and <code>simplexml_load_file</code> are not hooked. It adds a DNS lookup per distinct outbound host with no timeout. More detail on the <a href="/coverage/">coverage page</a>.</p>
         </div>
         <div>
           <h3>Log-first, on purpose</h3>
-          <p>Layer 3 has its own <code>sinks.mode</code>, which defaults to <code>detect</code> (log only). It is independent of the global <code>howdah.mode</code>: setting <code>howdah.mode = block</code> does <strong>not</strong> arm sinks. Any active sink can block, and only when an operator sets that sink to <code>block</code> explicitly, after setting its allowlist. The 1.3 <code>phar</code> and <code>ssrf</code> sinks are off by default and only an explicit per-sink mode arms them.</p>
+          <p>Layer 3 has its own <code>sinks.mode</code>, which defaults to <code>detect</code> (log only). It is independent of the global <code>howdah.mode</code>: setting <code>howdah.mode = block</code> does <strong>not</strong> arm sinks. Every active sink except <code>tls_verify</code> (detect-only) can block, and only when an operator sets that sink to <code>block</code> explicitly, after setting its allowlist. The 1.3 <code>phar</code> and <code>ssrf</code> sinks are off by default and only an explicit per-sink mode arms them.</p>
           <h3 style="margin-top:1.5rem">The argument is never logged</h3>
           <p>An event records the sink and the function name (plus the class name for <code>unserialize</code>). The command line and the serialized payload are never written to the log.</p>
         </div>
@@ -341,7 +341,7 @@ const aptLines = [
   <section id="versions">
     <div class="wrap">
       <h2>Version support: PHP 5.4 to 8.5</h2>
-      <p>Howdah ships one build per PHP minor version. A version marked <strong>Tested</strong> has a passing lab result{ranDate && <> (run {ranDate})</>}; a version marked <strong>Expected</strong> shares a generation's code path with a tested version but has not been independently run, so it is not claimed as a test result. The <a href="/coverage/">coverage page</a> has the full per-server-type detail.</p>
+      <p>Howdah ships one build per PHP minor version. A version marked <strong>Tested</strong> has a passing lab result{ranDate && <> (matrix run {ranDate}{coverage.matrixVersion && <> on Howdah {coverage.matrixVersion}</>})</>}; a version marked <strong>Expected</strong> shares a generation's code path with a tested version but has not been independently run, so it is not claimed as a test result. The <a href="/coverage/">coverage page</a> has the full per-server-type detail.</p>
       <ul class="matrix" aria-label="PHP version support">
         {rows.map((r: any) => (
           <li>

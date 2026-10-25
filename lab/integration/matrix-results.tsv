@@ -1,4 +1,5 @@
 ## Howdah cross-version block matrix -- generated 2026-10-23T16:54:54Z
+## howdah 1.0.0 (added afterwards: Cargo.toml at 684db53, the commit that recorded this file)
 ## columns: phpver\tsapi\tscenario\tresult\tdetail
 5.4.16	cli	shaped_block_files	PASS	http=403 rule=max_files ip=skip
 5.4.16	cli	shaped_block_fields	PASS	http=403 rule=max_parts ip=skip

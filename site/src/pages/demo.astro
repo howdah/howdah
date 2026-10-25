@@ -6,7 +6,6 @@ import Layout from '../layouts/Layout.astro';
 const samples = [
   { id: 'normal', title: 'Normal upload form', shape: 'Three text fields and one small file.', expect: 'Allow' },
   { id: 'flood', title: 'Part flood (PHP2Shell-shaped)', shape: 'About 2,500 tiny empty parts — structure only, no payload.', expect: 'Block · max_parts' },
-  { id: 'malformed', title: 'Malformed multipart', shape: 'A part with no Content-Disposition header.', expect: 'Block · malformed_multipart' },
   { id: 'filename', title: 'Oversized filename', shape: 'A filename 600 characters long (limit: 512 bytes).', expect: 'Block · max_filename_len' },
 ];
 ---
@@ -40,7 +39,7 @@ const samples = [
             </fieldset>
             <p><button type="button" id="run" class="btn primary" disabled hidden>Loading core&hellip;</button></p>
           </form>
-          <p class="legend" id="load-note">The WebAssembly core (~430&nbsp;KB) loads when you first run a sample. This demo runs the core in block mode so you can see the refusal; Howdah's shipped default is detect, where only the critical Layer-1 limits block.</p>
+          <p class="legend" id="load-note">The WebAssembly core (about 860&nbsp;KB, 230&nbsp;KB compressed) loads when you first run a sample. This demo runs the core in block mode so you can see the refusal; Howdah's shipped default is detect, where only the critical Layer-1 limits block.</p>
         </div>
 
         <div>
@@ -57,7 +56,7 @@ const samples = [
         </div>
       </div>
 
-      <p class="legend">The samples recreate only the harmless <em>structure</em> of each request — counts and sizes, never a working exploit. The verdict, rule name and reason come straight from the same core that ships in the extension.</p>
+      <p class="legend">The samples recreate only the harmless <em>structure</em> of each request — counts and sizes, never a working exploit. The verdict, rule name and reason come from the same Rust core and limits that ship in the extension. One difference: here the core reads the raw request body, while the extension gets each part from PHP's own parser.</p>
     </div>
   </section>
 </Layout>

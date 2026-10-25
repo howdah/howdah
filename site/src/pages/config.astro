@@ -81,7 +81,7 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
             <p id="load-msg" class="msg" aria-live="polite"></p>
           </details>
         </div>
-        <p class="js-note" data-nojs>Showing the shipped defaults. With JavaScript, the files on the right update as you change the controls, and each change is validated by the real core. Without it, this page is still the full reference: every setting, its default and what it does.</p>
+        <p class="js-note" data-nojs>Showing the shipped defaults. With JavaScript, the files on the right update as you change the controls, and each change is validated by the real core. Without it, this page is still a reference for every setting it offers, with its default and what it does. The <code>[log]</code> and <code>[behavior]</code> (Layer 4) tables are not offered here; they are in the <a href="/docs/configuration/">configuration reference</a>.</p>
 
         <fieldset>
           <legend>php.ini</legend>
@@ -129,7 +129,7 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
 
         <fieldset>
           <legend>[rules]: per-rule mode</legend>
-          <p class="small"><strong>Critical</strong> rules block even when the mode is <code>detect</code>; <strong>Standard</strong> rules log in detect and block only in block mode. "inherit" leaves the rule at the global behaviour; <code>off</code> disables it entirely. Every rule name the core accepts is listed, so a loaded file never has a rule this form cannot show; the Layer 2 and 3 names are accepted by the core but not read by the extension, so they sit under their own heading.</p>
+          <p class="small"><strong>Critical</strong> rules block even when the mode is <code>detect</code>; <strong>Standard</strong> rules log in detect and block only in block mode. "inherit" leaves the rule at the global behaviour; <code>off</code> disables it entirely. Every rule name the core accepts is listed, so a loaded file never has a rule this form cannot show; the Layer 2, 3 and 4 names are accepted by the core but not read by the extension, so they sit under their own headings.</p>
           {ruleGroups.filter((g) => !g.keys[0].noop).map((g) => (
             <div class="group">
               <h3>{g.title}</h3>
@@ -252,8 +252,8 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
       <h2>What this page does and does not do</h2>
       <ul class="legend-list">
         <li>Validation is the extension's own <code>Config::from_toml</code>, built to WebAssembly from the same source as the release. The error text you see is the core's.</li>
-        <li>Nothing leaves your browser except the URL you copy. The fetch service at <code>cfg.howdah.org</code> keeps no copies and no logs of configs.</li>
-        <li>The <code>[log]</code> TOML table (destination, syslog, the per-event hook) is not offered yet; write it by hand from the <a href="/docs/configuration/#log">event log reference</a>. A file that has one is refused on load, so a round trip never drops it.</li>
+        <li>Nothing leaves your browser except the URL you copy. The fetch service at <code>cfg.howdah.org</code> has no storage and its Workers logging is turned off. The config travels inside that URL, so treat the URL like the file.</li>
+        <li>The <code>[log]</code> table (destination, syslog, the per-event hook) and the <code>[behavior]</code> table (Layer 4) are not offered yet; write them by hand from the <a href="/docs/configuration/#log">event log</a> and <a href="/docs/configuration/#layer-4-behavior">Layer 4</a> references. A file that sets either (a <code>[behavior]</code> that only restates the defaults is fine) is refused on load, so a round trip never drops it.</li>
         <li><code>[[exceptions]]</code> and <code>exceptions_log</code> are loaded into the table above and written back in full, so a round trip keeps every entry and its reason. The validation of each entry (required keys, which facets a layer accepts, Critical rules refused) is the core's, not this page's. The <a href={REPO + '/tree/main/profiles'}>application profiles</a> are starting points for vanilla installs and are never applied on their own.</li>
         <li>A malformed <code>howdah.config</code> on a server makes Howdah fall back to its safe defaults (block mode, or off with <code>on_invalid_config = "off"</code>) and keep serving, with a line in the PHP error log and an INVALID row in <code>php --ri howdah</code>; using this page is how you avoid finding that out in production. Source: <a href={REPO + '/blob/main/docs/config.md'}>docs/config.md</a>.</li>
       </ul>
@@ -452,7 +452,7 @@ const fmtDefault = (k: any) => Array.isArray(k.default) ? (k.default.length ? k.
         if (!v.ok) { loadMsg.textContent = 'Not loaded. The core rejects this file: ' + v.error; return; }
         var r = E.loadFromCanonical(v.config, catalog);
         if (r.unsupported) {
-          loadMsg.textContent = 'Not loaded. This file sets [' + r.unsupported.join('], [') + '], which this editor cannot represent (the extension does not read it); edit that file by hand or remove the table and load again.';
+          loadMsg.textContent = 'Not loaded. This file sets [' + r.unsupported.join('], [') + '], which the extension reads but this editor cannot represent yet; edit that file by hand, or remove the table and load again.';
           return;
         }
         writeState(r.state);

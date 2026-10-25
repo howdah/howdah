@@ -97,7 +97,7 @@
   var INSPECT = [
     { key: 'enabled', type: 'bool', default: true, note: 'Master on/off for Layer 2 (input inspection).' },
     { key: 'mode', type: 'enum', values: MODES, default: 'detect',
-      note: 'Independent of the global mode: a global block does not arm Layer 2. detect logs only (the default). block is enforced after the script has run (see Enforcement timing in the configuration docs).' },
+      note: 'Independent of the global mode: a global block does not arm Layer 2. detect logs only (the default). block refuses the request before the script runs (see Enforcement timing in the configuration docs).' },
     { key: 'sqli', type: 'bool', default: true, note: 'Look for SQL-injection shapes.' },
     { key: 'traversal', type: 'bool', default: true, note: 'Look for path-traversal shapes.' },
     { key: 'cmdi', type: 'bool', default: true, note: 'Look for command-injection shapes.' },
@@ -208,7 +208,7 @@
       { id: 'limits', title: 'Limits', keys: LIMITS,
         groups: { multipart: 'Multipart body', input: 'Input shape', headers: 'Request headers' } },
       { id: 'rules', title: 'Per-rule mode', keys: [], rulesKeys: rulesKeys,
-        groups: { multipart: 'Multipart', input: 'Input shape', headers: 'Request headers', inspect: 'Layer 2 names (no effect here)', sinks: 'Layer 3 names (no effect here)', other: 'Other' } },
+        groups: { multipart: 'Multipart', input: 'Input shape', headers: 'Request headers', inspect: 'Layer 2 names (no effect here)', sinks: 'Layer 3 names (no effect here)', behavior: 'Layer 4 names (no effect here)', other: 'Other' } },
       { id: 'inspect', title: 'Layer 2: input inspection', keys: INSPECT },
       { id: 'sinks', title: 'Layer 3: sink hardening', keys: SINKS, php7Only: ['include'] }
     ],

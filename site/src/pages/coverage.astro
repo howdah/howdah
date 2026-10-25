@@ -36,7 +36,7 @@ function cell(sapi: any) {
     <div class="wrap">
       <p class="crumbs"><a href="/">Home</a> / <span aria-current="page">Coverage</span></p>
       <h1>Coverage: what has actually been tested</h1>
-      <p class="lede">Every cell on this page is generated from the lab test matrix{ranDate && <> (run {ranDate})</>}, never typed by hand. A version is only called &ldquo;blocked&rdquo; where the test for that exact version and server type passed.</p>
+      <p class="lede">Every cell on this page is generated from the lab test matrix{ranDate && <> (run {ranDate}{coverage.matrixVersion && <> on Howdah {coverage.matrixVersion}</>})</>}, never typed by hand. A version is only called &ldquo;blocked&rdquo; where the test for that exact version and server type passed.</p>
     </div>
   </div>
 
@@ -51,6 +51,7 @@ function cell(sapi: any) {
 
       <h2>By PHP version and server type</h2>
       <p>The two flood shapes tested are a <strong>file-part flood</strong> (<code>max_files</code>) and a <strong>field/part flood</strong> (<code>max_parts</code>). &ldquo;Blocked&rdquo; means the shaped request got HTTP 403 and a log entry at the default limits, on a server with raised caps (the exposed setup). The same runs also sent seven ordinary uploads; none was blocked.</p>
+      {coverage.matrixVersion && <p class="legend"><strong>Which release this is.</strong> The matrix ran on Howdah {coverage.matrixVersion}. Later releases changed the multipart glue (1.2.1) and the refusal path (1.5.0) and were checked by narrower runs: on every pull request, CI runs the block-shaped and self-test scripts on PHP 5.6, 7.3 and 8.4 (tags and a weekly run add 5.4, 7.4 and 8.1), the 1.5.0 Docker images passed a smoke test on all twelve Debian bases (<a href="#runtimes">below</a>), and the refusal lab checks php-fpm behind nginx and Apache on 5.6, 7.4 and 8.3. A re-run of this matrix on the current release is pending.</p>}
       <div class="tablewrap" tabindex="0" role="region" aria-label="Coverage by PHP version and server type (scrolls sideways on narrow screens)">
         <table>
           <caption class="sr-only">Per-version, per-server-type coverage</caption>
@@ -122,7 +123,7 @@ function cell(sapi: any) {
         <li><strong>Apache and php-fpm: PHP 5.6 to 8.5.</strong> <p>Both were tested on every minor whose row shows a result: 5.6 and 7.0 to 8.5.</p></li>
         <li><strong>PHP 5.4: the CLI server only.</strong> <p>Its stock image has no <code>cgi-fcgi</code>, so php-fpm was skipped, and there is no <code>php:5.4-apache</code> image.</p></li>
         <li><strong>Not run: PHP {coverage.notRunMinors.join(', ')}.</strong> <p>{oneNotRun ? 'It shares' : 'They share'} a code path with a version that passed. That is a reason to expect {oneNotRun ? 'it works' : 'they work'}, not a test result, and {oneNotRun ? 'it is' : 'they are'} <strong>not</strong> claimed as passing.</p></li>
-        <li><strong>Linux x86_64 only.</strong> <p>aarch64 is build-verified for all 14 minors (PHP 5.4 since the 1.2.2 build fix). On arm64 only the self-test and block-shaped scripts have run (<a href="#runtimes">other runtimes</a>), not the matrix.</p></li>
+        <li><strong>Linux x86_64 only.</strong> <p>aarch64 is build-verified for all 14 minors (PHP 5.4 since the 1.3.0 build fix). On arm64 only the self-test and block-shaped scripts have run (<a href="#runtimes">other runtimes</a>), not the matrix.</p></li>
         <li><strong>CVE-2026-109618's upload-progress path was not reproduced.</strong> <p>The tests recreate only the shape of a flood, not the CVE's <code>session.upload_progress</code> header-parsing path, so Howdah is not claimed to block that CVE on a stock configuration. Upload progress on and off were both tested, to confirm Howdah works either way.</p></li>
         <li><strong>Request-header limits can act after the script.</strong> <p>The multipart and input-shape limits refuse before the script runs. The header count and size limits act at request shutdown when the script builds <code>$_SERVER</code> lazily and Layer 2 is not armed; there the log line is the signal. See <a href="/docs/configuration/#enforcement-timing">enforcement timing</a>.</p></li>
       </ul>
@@ -141,7 +142,7 @@ function cell(sapi: any) {
           <details><summary>Details</summary><p>It guards command execution, <code>unserialize</code>, <code>include</code>/<code>require</code> and <code>eval</code> (the last two on PHP 5.x too since 1.3), plus <code>phar://</code> and SSRF (1.3, both off by default). 1.5 added seven legacy sinks (<code>mail_injection</code>, <code>preg_eval</code>, <code>create_function</code>, <code>assert_string</code>, <code>dangerous_callback</code>, <code>xxe</code>, <code>tls_verify</code>; all log-first) and the JIT-safe <code>[sinks] hook</code>. The 1.3 mechanisms were verified on PHP 5.4, 5.6, 7.4, 8.3 and 8.5; other minors build and are expected to work but are not independently verified. A debug-build leak review is pending.</p></details></li>
         <li><strong>Layer 4, after a breach (1.4).</strong> <p>Its lab script (27 checks) passed on PHP 5.4, 5.6, 7.4, 8.3, 8.4 and 8.5; other minors are not independently verified. Every list ships empty, and it blocks only with <code>behavior.mode = "block"</code>.</p>
           <details><summary>Details</summary><p>It watches PHP run from denied directories, exec-family calls to unlisted programs, outbound connections to unlisted hosts, and PHP files written into denied directories.</p></details></li>
-        <li><strong>Performance.</strong> <p>Latency with and without Howdah, the OPcache JIT result and what Layer 2 flags of the GoTestWAF corpus are on the <a href="/docs/performance/">performance page</a>. They were measured on Howdah 1.3.0, before the JIT change in 1.5; a re-measure is pending.</p></li>
+        <li><strong>Performance.</strong> <p>Latency with and without Howdah, the OPcache JIT result and what Layer 2 flags of the GoTestWAF corpus are on the <a href="/docs/performance/">performance page</a>. They were measured before the 1.5 changes (latency on Howdah 1.4.0, the JIT and corpus runs on 1.3.0); a re-measure is pending.</p></li>
       </ul>
 
       <h3 class="lim-group">Best-effort mechanisms</h3>

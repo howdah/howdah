@@ -57,7 +57,7 @@ sudo cscli decisions list`;
         <h3 id="scope-heading">Before you start</h3>
         <ul>
           <li><strong>Only refusals lead to a ban.</strong> A line counts when Howdah refused the request or denied the call (<code>"action":"block"</code>). Detect-mode lines, observe's <code>proposed:</code> lines and <code>excepted</code> lines never count.</li>
-          <li><strong>Howdah never touches the firewall</strong> and sends nothing over the network. The tool that reads the log bans, with its own privileges.</li>
+          <li><strong>Howdah never touches the firewall</strong> and ships no events off the host itself. The tool that reads the log bans, with its own privileges.</li>
           <li><strong>Behind a proxy, fix the client address first</strong>, or you ban the proxy and with it every visitor.</li>
           <li><strong>The log is only as trustworthy as the PHP worker.</strong> Howdah writes the log from the worker, so code that runs as the worker user after a compromise can add lines and get any address banned. Keep the addresses you must never lose, such as your office and your monitoring, in <code>ignoreip</code> or a CrowdSec allowlist, and keep ban times bounded.</li>
         </ul>

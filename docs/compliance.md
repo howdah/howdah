@@ -56,15 +56,15 @@ The same bullet text is reproduced at
 | Installed in front of public-facing web applications and configured to detect and prevent web-based attacks | Loads into every PHP worker as an extension. Checks the request as PHP parses it, which for most inputs is before the application's first line runs (Layers 1 and 2; see the timing note below). Checks dangerous function calls while the application runs (Layer 3). | `php --ri howdah` for each PHP build; `howdah-check web` output against the live site; the `howdah.ini` and `howdah.toml` files in use. | It is not on the network. It never sees requests that do not reach PHP: static files, non-PHP applications, and bugs that fire before PHP extensions load. It does not cover XSS, CSRF, authentication, access control or business logic. See [the 6.2.4 table](#which-attack-classes-howdah-sees). |
 | Actively running and up to date as applicable | Runs on every request while loaded. Its rules are compiled into the extension; there is no separate signature feed. "Up to date" means the latest release for your PHP minor and a reviewed config. | Installed package version and `php --ri howdah` "Version" row, compared with the [latest release](https://github.com/howdah/howdah/releases); a daily `howdah-check web` run and the `self_test` log line it leaves. | It does not update itself. It does not alert you if it stops loading: PHP starts without an extension it cannot load, and a malformed TOML falls back to built-in defaults. Watch for the daily `self_test` line. |
 | Generating audit logs | Writes one JSON line per security event to a log file (`howdah.log`, or `[log] path`) or to the local syslog socket (`[log] destination = "syslog"`): `schema`, `version`, `ts`, `request_id`, `layer`, `rule`, `action`, `client_ip`, `method`, `uri`, `reason`. | The `php --ri howdah` "Log destination" row, sample lines, the rotation config and the off-host shipping config ([below](#3-the-audit-log)). | No network transport of its own: it writes a file, the local syslog socket or stderr, and shipping off the host is your collector's job. Lines are not signed or chained. A log file is writable by the PHP user. It logs security events, not every request. It never logs bodies, cookies, `Authorization` headers, query strings, matched values or sink arguments. |
-| Configured to either block web-based attacks or generate an alert that is immediately investigated | Layer 1 Critical rules block (403/413) in both `block` and `detect` mode. Standard rules block in `block` mode. Layer 2 and the Layer 3 sinks only log (and `unserialize`, `phar` and `ssrf` are off) until you arm a class or sink with `mode = "block"`. | `howdah.toml` with each mode and the reason for it ([decision record](#5-the-decision-record)); for log-only rules, the alert rule in your log system (or the `[log] exec` program) and records of alerts being investigated. | It has no built-in email, webhook or pager integration. Alerts come from your log pipeline, or from a program you write that Howdah runs once per event (`[log] exec`, at most 10 starts per second per PHP process by default; beyond that events are logged but not passed on). An armed Layer 2 class refuses the request before the script runs on php-fpm, Apache mod_php, php-cgi and the CLI server (lab-verified on 5.6, 7.4 and 8.3; see "Enforcement timing"), but its signatures are best-effort and bypassable, so treat Layer 2 as detection with an optional block, not as a boundary. |
+| Configured to either block web-based attacks or generate an alert that is immediately investigated | Layer 1 Critical rules block (403/413) in both `block` and `detect` mode. Standard rules block in `block` mode. Layer 2, the Layer 3 sinks (including the legacy sinks added in 1.5) and Layer 4 (shipped in 1.4, with empty lists, plus `observe` to propose allowlists) only log (and `unserialize`, `phar` and `ssrf` are off) until you arm a class or sink with `mode = "block"`. | `howdah.toml` with each mode and the reason for it ([decision record](#5-the-decision-record)); for log-only rules, the alert rule in your log system (or the `[log] exec` program) and records of alerts being investigated. | It has no built-in email, webhook or pager integration. Alerts come from your log pipeline, or from a program you write that Howdah runs once per event (`[log] exec`, at most 10 starts per second per PHP process by default; beyond that events are logged but not passed on). An armed Layer 2 class refuses the request before the script runs (lab-verified on php-fpm and Apache mod_php, PHP 5.6, 7.4 and 8.3; php-cgi and the CLI server use the same mechanism but were not lab-run; see "Enforcement timing"), but its signatures are best-effort and bypassable, so treat Layer 2 as detection with an optional block, not as a boundary. |
 
 Enforcement timing differs by layer. The multipart limits, the input-shape
 limits, an armed Layer 2 class and the Layer 4 `deny_exec_dirs` check refuse
 the request before the script runs (the 403/413 with the request id goes out
 at the end of request startup and the script is not compiled; the PHP worker
-survives). The request-header limits drop the offending variable and log, and
-their 403 is post-hoc (set at request shutdown) when the script builds
-`$_SERVER` lazily. An armed Layer 3 sink refuses the call and the script
+survives). The request-header limits drop nothing and log, and their 403 is
+post-hoc (set at request shutdown) when the script builds `$_SERVER` lazily
+and Layer 2 is not armed. An armed Layer 3 sink refuses the call and the script
 continues. Details:
 [`docs/config.md`, "Enforcement timing"](config.md#enforcement-timing-honest-caveat).
 
@@ -97,8 +97,11 @@ applications" is your assessor's call. These are the points to put to them:
   enforcement for 6.4.2, either way.
 - **Howdah is partly WAF, partly RASP.** Layers 1 and 2 inspect the request
   the way a WAF does, but after PHP's own parser has decoded it. Layer 3 works
-  like a RASP: it checks `system`, `include`, `eval`, `unserialize`, `phar://`
-  and outbound requests at the moment they are called.
+  like a RASP: it checks sinks (`system`, `include`, `eval`, `unserialize`,
+  `phar://`, outbound requests, and, new in 1.5, `mail`,
+  `preg`/`assert`/`create_function` evaluation, dangerous callbacks and XXE)
+  at the moment they are called; Layer 4 watches what the code does after a
+  breach. All log-first.
 
 Howdah complements a network WAF; it does not replace one. Keep or add a WAF,
 CDN rule or web server rule for:
@@ -117,11 +120,11 @@ CDN rule or web server rule for:
 ### Which attack classes Howdah sees
 
 The 6.4.2 guidance points at the attacks listed in requirement 6.2.4. This is
-how they line up with Howdah 1.3.
+how they line up with Howdah 1.5.
 
-| 6.2.4 attack class | Howdah 1.3 |
+| 6.2.4 attack class | Howdah 1.5 |
 |---|---|
-| Injection: SQL, LDAP, XPath, command and other injection | SQL-injection and command-injection shapes in GET, POST, cookie and path values: Layer 2, detection only, best-effort and bypassable. OS command execution: the `command_exec` sink, which blocks when armed. LDAP and XPath: not inspected. |
+| Injection: SQL, LDAP, XPath, command and other injection | SQL-injection and command-injection shapes in GET, POST, cookie and path values: Layer 2, detection by default (an armed class refuses the request), best-effort and bypassable. OS command execution: the `command_exec` sink, which blocks when armed. LDAP and XPath: not inspected. |
 | Attacks on data and data structures | Layer 1 limits on multipart parts and files, input variable count, array nesting, key and header sizes (Critical rules block). Object injection: the `unserialize` and `phar` sinks, off by default. Memory-safety bugs in PHP itself are covered only where they need one of these shapes. |
 | Attacks on cryptography | Not covered. |
 | Attacks on business logic, including XSS and CSRF | Not covered. Howdah does not inspect responses or output. |
@@ -209,7 +212,7 @@ Each line is one JSON object with exactly these fields (from
 | `request_id` | An id for the request. The block response body prints it, so a user's report maps to one line. | (correlation) |
 | `layer` | Which protection layer the rule belongs to: 1 request-shape limits, 2 input inspection, 3 sinks, 4 after-breach behaviour. | Type of event |
 | `rule` | The rule or sink that fired, for example `max_parts`, `sql_injection`, `command_exec`. | Type of event |
-| `action` | `block` (refused) or `log` (allowed and recorded). | Success and failure indication |
+| `action` | `block` (refused), `log` (allowed and recorded), or `excepted` (a finding an `[[exceptions]]` entry turned off; written only with `exceptions_log = true`). | Success and failure indication |
 | `client_ip` | `REMOTE_ADDR` as PHP sees it. Behind a proxy or CDN this is the proxy's address. | Origination of event |
 | `method` | The HTTP method. | Identity of affected resource |
 | `uri` | The request path. The query string is removed. | Identity of affected resource |
@@ -303,7 +306,7 @@ every other change from the defaults in one table:
 |---|---|---|---|---|
 | `max_request_headers` | `detect` | Our SSO proxy adds about 40 headers. Watching for 30 days before `block`. | J. Doe, web ops | 2026-10-24 |
 | `command_exec` | `block`, allow `/usr/bin/convert *` | The thumbnailer is the only legitimate shell call. | J. Doe, web ops | 2026-10-24 |
-| `sql_injection` | `detect` (default) | Layer 2 is bypassable and does not stop the script. Used as a SIEM detection feed; alerts go to on-call. | A. Smith, security | 2026-10-24 |
+| `sql_injection` | `detect` (default) | Layer 2 signatures are bypassable, so it stays in detect and is used as a SIEM detection feed; alerts go to on-call. (Arming a class would refuse before the script runs, but a bypass would still reach the app.) | A. Smith, security | 2026-10-24 |
 | `unserialize` | `off` (default) | Not opted in. The app unserializes only its own session data. Review at next release. | A. Smith, security | 2026-10-24 |
 
 Then make the config file carry the same record, so the rationale lives next

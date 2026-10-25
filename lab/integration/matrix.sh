@@ -49,6 +49,8 @@ spec() {
 if [ "${APPEND:-0}" != 1 ]; then
   : > "$RESULTS"
   printf '## Howdah cross-version block matrix -- generated %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$RESULTS"
+  # The extension version the matrix ran (site/scripts/gen-coverage.mjs shows it).
+  printf '## howdah %s\n' "$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)" >> "$RESULTS"
   printf '## columns: phpver\\tsapi\\tscenario\\tresult\\tdetail\n' >> "$RESULTS"
 fi
 

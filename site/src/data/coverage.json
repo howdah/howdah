@@ -1,5 +1,6 @@
 {
   "generated": "2026-10-23T16:54:54Z",
+  "matrixVersion": "1.0.0",
   "source": "lab/integration/matrix-results.tsv",
   "totals": {
     "pass": 973,

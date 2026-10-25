@@ -46,7 +46,14 @@ test('the coverage page shows the same runs, failures as failed', () => {
     assert.ok(sect.includes(r.runtime), `page has no row for ${r.runtime}`);
     assert.ok(sect.includes(r.php), `page has no PHP ${r.php} for ${r.runtime}`);
   }
-  const zts = sect.slice(sect.indexOf('FrankenPHP'));
-  assert.match(zts.slice(0, zts.indexOf('</tr>')), /class="pill no"[^>]*>failed</, 'the ZTS run is shown as failed');
+  // One card per run: the ZTS card carries the "failed" pill, and every card's
+  // pill matches its recorded result.
+  const cards = sect.split(/<li class="run /).slice(1).map((c) => c.slice(0, c.indexOf('</li>')));
+  assert.equal(cards.length, new Set(runs.map((r) => `${r.runtime}|${r.arch}|${r.script}|${r.result}`)).size, 'one card per distinct run');
+  const zts = cards.find((c) => c.includes('FrankenPHP'));
+  assert.match(zts ?? '', /class="pill no"[^>]*>failed</, 'the ZTS run is shown as failed');
+  for (const c of cards) {
+    assert.match(c, c.startsWith('run-ok') ? /class="pill ok"[^>]*>passed</ : /class="pill no"[^>]*>failed</, 'card pill matches its result');
+  }
   assert.ok(page.includes('docs/zts.md'), 'the page links the ZTS findings');
 });

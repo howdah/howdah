@@ -1,12 +1,12 @@
 # Install Howdah with Docker
 
-> **Status:** the 1.5.0 images are on GHCR: `-php5.6` to `-php8.5` for
-> amd64 and arm64, and `-php7.2-alpine` to `-php8.5-alpine` for amd64
-> (docker run 40142348967, a manual re-run after the fix for run
-> 40140181320, which published nothing because its smoke test still expected
-> 1.4.0's php-fpm refusal behaviour). The 1.4.0 Debian images are there too.
-> You can always build the same image yourself (see "Build the image
-> yourself").
+> **Status:** the 1.6.1 images are on GHCR: `-php5.6` to `-php8.5` for
+> amd64 and arm64, and `-php7.2-alpine` to `-php8.5-alpine` for amd64 — the
+> first release published automatically, when the `release` workflow for the
+> tag completed (docker run 40209382156, all 22 jobs green). The floating
+> `php<minor>` tags are published now too (see the tag table). The 1.4.0 and
+> 1.5.0 images are still on GHCR. You can always build the same image
+> yourself (see "Build the image yourself").
 
 The image is the official `php:<minor>-fpm` image with the signed `howdah.so`
 from a GitHub release installed and enabled. Nothing is compiled when the
@@ -23,9 +23,9 @@ multipart limits still block, everything else only logs.
 
 | Tag | Base image | Platforms |
 |---|---|---|
-| `ghcr.io/howdah/howdah:<version>-php<minor>` | `php:<minor>-fpm` (Debian) | `linux/amd64`, and `linux/arm64` when the release has that minor's aarch64 tarball (1.4.0 has all of them) |
+| `ghcr.io/howdah/howdah:<version>-php<minor>` | `php:<minor>-fpm` (Debian) | `linux/amd64`, and `linux/arm64` when the release has that minor's aarch64 tarball (1.6.1 has all of them) |
 | `ghcr.io/howdah/howdah:<version>-php<minor>-alpine` | `php:<minor>-fpm-alpine` | `linux/amd64` only; PHP 7.2 to 8.5 only (see "Alpine"); from 1.5.0, the first release with `*-linux-x86_64-musl.tar.gz` tarballs |
-| `ghcr.io/howdah/howdah:php<minor>` and `php<minor>-alpine` | as above | moves to the newest release; pushed by the automatic release run, or a manual run with `floating: true`. **Not published for 1.5.0** (its images came from a manual run without it), so use the versioned tag for now |
+| `ghcr.io/howdah/howdah:php<minor>` and `php<minor>-alpine` | as above | moves to the newest release; pushed by the automatic release run, or a manual run with `floating: true`. Published from 1.6.1 on (the 1.4.0 and 1.5.0 images came from manual runs without it), so they currently point at 1.6.1 |
 
 `<minor>` is one of 5.6, 7.0, 7.1, 7.2, 7.3, 7.4, 8.0, 8.1, 8.2, 8.3, 8.4,
 8.5 (`-alpine`: 7.2 and later). There is no image for 5.4 or 5.5: `php:5.4-fpm` is a schema-1 manifest
@@ -75,7 +75,7 @@ at all, but it also means the rest of the image is as old as its base.
 ## Use the image
 
 ```dockerfile
-FROM ghcr.io/howdah/howdah:1.4.0-php8.3
+FROM ghcr.io/howdah/howdah:1.6.1-php8.3
 COPY . /var/www/html
 ```
 
@@ -91,7 +91,7 @@ minor and C library:
 
 ```dockerfile
 FROM php:8.3-apache
-COPY --from=ghcr.io/howdah/howdah:1.4.0-php8.3 /howdah/ /
+COPY --from=ghcr.io/howdah/howdah:1.6.1-php8.3 /howdah/ /
 ```
 
 That one line is the whole install, the way `docker-php-ext-enable` would do
@@ -141,9 +141,9 @@ config editor at https://howdah.org/config/ writes both files.
 ## Check that it works
 
 ```sh
-docker run --rm ghcr.io/howdah/howdah:1.4.0-php8.3 php --ri howdah
-# Howdah => enabled, Version => 1.4.0, Mode => detect ...
-docker run --rm --network <your network> ghcr.io/howdah/howdah:1.4.0-php8.3 \
+docker run --rm ghcr.io/howdah/howdah:1.6.1-php8.3 php --ri howdah
+# Howdah => enabled, Version => 1.6.1, Mode => detect ...
+docker run --rm --network <your network> ghcr.io/howdah/howdah:1.6.1-php8.3 \
   howdah-check web http://<your web container>/
 ```
 
@@ -161,7 +161,7 @@ The image keeps the tarball it was built from, and the signed `SHA256SUMS`,
 in `/howdah/usr/share/doc/howdah/`. On a machine with gpg:
 
 ```sh
-img=ghcr.io/howdah/howdah:1.4.0-php8.3
+img=ghcr.io/howdah/howdah:1.6.1-php8.3
 id=$(docker create "$img")
 docker cp "$id:/howdah/usr/share/doc/howdah" howdah-doc
 docker cp "$id:/howdah/usr/local/lib/php/extensions" howdah-ext
@@ -171,7 +171,7 @@ cat PROVENANCE                                    # tarball, sha256s, key finger
 gpg --import howdah-release-signing.asc           # check the fingerprint above
 gpg --verify SHA256SUMS.asc SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS          # the tarball in the image
-tar -xOzf howdah-1.4.0-php8.3-*.tar.gz howdah-1.4.0-php8.3/howdah.so | cmp - ../howdah-ext/*/howdah.so && echo "same .so"
+tar -xOzf howdah-1.6.1-php8.3-*.tar.gz howdah-1.6.1-php8.3/howdah.so | cmp - ../howdah-ext/*/howdah.so && echo "same .so"
 ```
 
 Compare the key with the one in the repository rather than trusting the copy
@@ -182,9 +182,9 @@ attestations (`docker buildx imagetools inspect --format '{{json .Provenance}}' 
 
 ```sh
 docker buildx build -f docker/Dockerfile \
-  --build-arg HOWDAH_VERSION=1.4.0 --build-arg PHP_MINOR=8.3 \
-  -t howdah:1.4.0-php8.3 .
-sh docker/smoke.sh howdah:1.4.0-php8.3
+  --build-arg HOWDAH_VERSION=1.6.1 --build-arg PHP_MINOR=8.3 \
+  -t howdah:1.6.1-php8.3 .
+sh docker/smoke.sh howdah:1.6.1-php8.3
 ```
 
 Run it from the repository root (the build needs the committed key). Add

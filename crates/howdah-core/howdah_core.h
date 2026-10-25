@@ -188,6 +188,29 @@ void howdah_request_begin(struct howdah_ctx *ctx,
 int32_t howdah_feed(struct howdah_ctx *ctx, const char *chunk, size_t len);
 
 /**
+ * §4.2: arm the byte-stream scanner from the request's `Content-Type` (the real
+ * boundary is extracted here). Call once per request before `howdah_scan_post`,
+ * when the SAPI reports a `multipart/form-data` body. A non-multipart type or an
+ * absent boundary leaves the scanner off. NULL ctx / panic is a no-op.
+ *
+ * # Safety
+ * `ctx` NULL or live; `content_type` NULL or valid for `ct_len` bytes.
+ */
+void howdah_scan_post_begin(struct howdah_ctx *ctx, const char *content_type, size_t ct_len);
+
+/**
+ * §4.2: feed `len` raw body bytes (as the `read_post` wrapper reads them) to the
+ * byte-stream scanner. Returns the most severe action so far (0 Allow, 1 Log,
+ * 2 Block); `Block` tells the wrapper to stop reading. The bytes are scanned for
+ * framing only, never logged. NULL ctx, a scanner that was never armed, or a
+ * panic returns 0 (fail open).
+ *
+ * # Safety
+ * `ctx` NULL or live; `buf` NULL or valid for `len` bytes.
+ */
+int32_t howdah_scan_post(struct howdah_ctx *ctx, const char *buf, size_t len);
+
+/**
  * Signal end of body: detects a truncated body (MalformedMultipart) and
  * returns the final action code. Panic or NULL ctx returns 0.
  *

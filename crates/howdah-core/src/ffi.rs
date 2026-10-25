@@ -137,6 +137,12 @@ struct Meta {
 pub struct howdah_ctx {
     config: Config,
     state: Option<MultipartState>,
+    /// The §4.2 byte-stream scanner, fed the RAW body by the read_post wrapper
+    /// and framed on the request's real boundary. Independent of `state` (the
+    /// parsed-event counter): it only ever ADDS blocks, so a desync here can
+    /// never switch the structural limits off (design §4.2, fail closed).
+    /// `None` until `howdah_scan_post_begin` sees a multipart boundary.
+    post_scan: Option<MultipartState>,
     request_id: String,
     meta: Meta,
     worst: Action,
@@ -236,6 +242,7 @@ impl howdah_ctx {
         howdah_ctx {
             config,
             state: None,
+            post_scan: None,
             request_id: new_request_id(),
             meta: Meta::default(),
             worst: Action::Allow,
@@ -773,6 +780,54 @@ impl howdah_ctx {
         self.worst
     }
 
+    /// §4.2: arm the byte-stream scanner on the request's real boundary, taken
+    /// from `content_type`. A non-multipart type or an absent boundary leaves the
+    /// scanner off (fail open; the parsed-event counter still enforces the
+    /// structural limits).
+    fn scan_post_begin(&mut self, content_type: &[u8]) {
+        self.post_scan = crate::boundary::extract(content_type).map(|b| MultipartState::new(&b));
+    }
+
+    /// §4.2: feed `chunk` raw body bytes to the byte-stream scanner and fold any
+    /// limit hit into the sticky worst. Mirrors `feed`, but on `self.post_scan`,
+    /// so the exact per-part header counts (and, later, byte/estimate checks) run
+    /// independently of the parsed-event counter. A feed error is a malformed
+    /// body (over-counts, never under-counts).
+    fn scan_post(&mut self, chunk: &[u8]) -> Action {
+        #[cfg(test)]
+        if tests::FORCE_PANIC.with(|f| f.get()) {
+            panic!("injected test panic");
+        }
+        if self.worst == Action::Block {
+            return self.worst;
+        }
+        let Some(state) = self.post_scan.as_mut() else {
+            return self.worst; // not multipart / no boundary: fail open
+        };
+        let res = state.feed(chunk);
+        let limits = &self.config.limits;
+        let mut hits: Vec<Option<LimitHit>> = Vec::new();
+        match &res {
+            Ok(events) => {
+                for ev in events {
+                    hits.push(limits.check(state, ev));
+                }
+                if events.is_empty() {
+                    hits.push(limits.check(state, &Event::PartEnd));
+                }
+            }
+            Err(_) => hits.push(limits.check(state, &Event::PartEnd)),
+        }
+        hits.push(limits.check_fed_bytes(state.total_fed_bytes()));
+        for h in hits {
+            self.apply(h.as_ref());
+        }
+        if res.is_err() {
+            self.malformed();
+        }
+        self.worst
+    }
+
     /// One already-parsed multipart part (the PHP glue's `FORMDATA` /
     /// `FILE_START`). Counting happens in `MultipartState::note_part` and does
     /// not depend on any byte parsing, so part data can never suppress it.
@@ -908,6 +963,7 @@ pub unsafe extern "C" fn howdah_request_begin(
             std::slice::from_raw_parts(boundary as *const u8, len).to_vec()
         };
         c.state = Some(MultipartState::new(&b));
+        c.post_scan = None; // set by howdah_scan_post_begin once the boundary is known
         c.request_id = new_request_id();
         c.worst = Action::Allow;
         c.log = None;
@@ -947,6 +1003,55 @@ pub unsafe extern "C" fn howdah_feed(ctx: *mut howdah_ctx, chunk: *const c_char,
             std::slice::from_raw_parts(chunk as *const u8, len)
         };
         code((*ctx).feed(data))
+    }));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// §4.2: arm the byte-stream scanner from the request's `Content-Type` (the real
+/// boundary is extracted here). Call once per request before `howdah_scan_post`,
+/// when the SAPI reports a `multipart/form-data` body. A non-multipart type or an
+/// absent boundary leaves the scanner off. NULL ctx / panic is a no-op.
+///
+/// # Safety
+/// `ctx` NULL or live; `content_type` NULL or valid for `ct_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_scan_post_begin(ctx: *mut howdah_ctx, content_type: *const c_char, ct_len: usize) {
+    if ctx.is_null() {
+        return;
+    }
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        let ct: &[u8] = if content_type.is_null() || ct_len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(content_type as *const u8, ct_len)
+        };
+        (*ctx).scan_post_begin(ct);
+    }));
+}
+
+/// §4.2: feed `len` raw body bytes (as the `read_post` wrapper reads them) to the
+/// byte-stream scanner. Returns the most severe action so far (0 Allow / 1 Log /
+/// 2 Block); `Block` tells the wrapper to stop reading. The bytes are scanned for
+/// framing only, never logged. NULL ctx, a scanner that was never armed, or a
+/// panic returns 0 (fail open).
+///
+/// # Safety
+/// `ctx` NULL or live; `buf` NULL or valid for `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_scan_post(ctx: *mut howdah_ctx, buf: *const c_char, len: usize) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let data: &[u8] = if buf.is_null() || len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(buf as *const u8, len)
+        };
+        code((*ctx).scan_post(data))
     }));
     r.unwrap_or_else(|_| {
         report_panic(ctx);
@@ -3500,6 +3605,83 @@ mod tests {
             howdah_free(d);
             howdah_free(off);
             howdah_free(no);
+        }
+    }
+
+    // ---- howdah_scan_post: the §4.2 byte-stream scanner (gap A exact) --------
+
+    unsafe fn scan_line(ctx: *mut howdah_ctx) -> String {
+        let p = howdah_take_log_line(ctx);
+        if p.is_null() {
+            return String::new();
+        }
+        let s = std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned();
+        howdah_free_str(p);
+        s
+    }
+
+    fn header_flood_body() -> String {
+        let mut body = String::from("--B\r\nContent-Disposition: form-data; name=\"a\"\r\n");
+        for i in 0..50 {
+            body.push_str(&format!("X-{i}: v\r\n"));
+        }
+        body.push_str("\r\nvalue\r\n--B--\r\n");
+        body
+    }
+
+    #[test]
+    fn scan_post_counts_every_header_from_bytes() {
+        // The parsed-event path sees only PHP's one Content-Disposition; the byte
+        // scanner sees all 50 header lines and trips max_part_headers (gap A).
+        let ctx = init(""); // defaults: mode block, max_part_headers = 16
+        let ct = b"multipart/form-data; boundary=B";
+        let body = header_flood_body();
+        unsafe {
+            howdah_scan_post_begin(ctx, ct.as_ptr() as *const c_char, ct.len());
+            let a = howdah_scan_post(ctx, body.as_ptr() as *const c_char, body.len());
+            assert_eq!(a, HOWDAH_BLOCK);
+            assert!(scan_line(ctx).contains("max_part_headers"));
+            howdah_free(ctx);
+        }
+    }
+
+    #[test]
+    fn scan_post_allows_a_benign_part_with_extra_headers() {
+        let ctx = init("");
+        let ct = b"multipart/form-data; boundary=B";
+        let body = "--B\r\nContent-Disposition: form-data; name=\"a\"\r\nContent-Type: text/plain\r\nContent-Transfer-Encoding: binary\r\n\r\nvalue\r\n--B--\r\n";
+        unsafe {
+            howdah_scan_post_begin(ctx, ct.as_ptr() as *const c_char, ct.len());
+            assert_eq!(howdah_scan_post(ctx, body.as_ptr() as *const c_char, body.len()), HOWDAH_ALLOW);
+            howdah_free(ctx);
+        }
+    }
+
+    #[test]
+    fn scan_post_is_resumable_across_arbitrary_chunk_splits() {
+        let ctx = init("");
+        let ct = b"multipart/form-data; boundary=B";
+        let body = header_flood_body();
+        unsafe {
+            howdah_scan_post_begin(ctx, ct.as_ptr() as *const c_char, ct.len());
+            let mut worst = HOWDAH_ALLOW;
+            for ch in body.as_bytes().chunks(7) {
+                worst = worst.max(howdah_scan_post(ctx, ch.as_ptr() as *const c_char, ch.len()));
+            }
+            assert_eq!(worst, HOWDAH_BLOCK);
+            howdah_free(ctx);
+        }
+    }
+
+    #[test]
+    fn scan_post_off_when_not_multipart() {
+        let ctx = init("");
+        let ct = b"application/x-www-form-urlencoded";
+        let body = header_flood_body();
+        unsafe {
+            howdah_scan_post_begin(ctx, ct.as_ptr() as *const c_char, ct.len());
+            assert_eq!(howdah_scan_post(ctx, body.as_ptr() as *const c_char, body.len()), HOWDAH_ALLOW);
+            howdah_free(ctx);
         }
     }
 }

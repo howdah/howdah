@@ -98,10 +98,10 @@ See the `[sinks]` section of [docs/config.md](docs/config.md) and the
 ## Layer 4: after a breach (1.4)
 
 Layer 4 watches what PHP does once something has gone wrong, such as a webshell
-dropped in an upload directory. It **detects and logs; it does not block by
-default**, and it does nothing until you fill in its lists. It has its own
-`behavior.mode` (default `detect`), independent of the global `howdah.mode`.
-Four facets, each driven by its own setting:
+dropped in an upload directory. Its four list-driven facets **detect and log;
+they do not block by default**, and do nothing until you fill in their lists.
+They share `behavior.mode` (default `detect`), independent of the global
+`howdah.mode`. Each facet has its own setting:
 
 - **Execution origin** (`deny_exec_dirs`): PHP run from a denied directory,
   either as the requested script or `require`d by another script.

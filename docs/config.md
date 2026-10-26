@@ -301,10 +301,12 @@ facet exempts a scanner or a path.
 
 **Sinks log by default; they do not block.** Layer 3 watches dangerous PHP
 functions ("sinks") and writes an event when one is called with something your
-allowlist does not cover. The one exception is `xxe` (XML external entities,
-under "Legacy-era sinks" below): it is enforced by default, but only when a
-dangerous libxml parse flag and an external entity meet in the same XML string. It **actively guards six sinks** (four since 1.2;
-`phar` and `ssrf` were added in 1.3):
+allowlist does not cover. Two checks are enforced by default instead: `xxe`
+(XML external entities, under "Legacy-era sinks" below), but only when a
+dangerous libxml parse flag and an external entity meet in the same XML string;
+and the include/open stream-wrapper firewall (`wrapper` and `poison`, under
+"`include` / `require` and `eval`" below). Layer 3 **actively guards six sinks**
+(four since 1.2; `phar` and `ssrf` were added in 1.3):
 
 - `command_exec` — `system`, `exec`, `shell_exec`, `passthru`, `popen` and
   `proc_open`.
@@ -413,9 +415,9 @@ running and the script continues. As always, the argument is never logged.
 #### `wrapper` / `poison`: the include/open stream-wrapper firewall
 
 Separate from the `allow_paths` allowlist above, and **enforced by default**,
-is a firewall that classifies the fully resolved target — the string after
+is a firewall that classifies the fully resolved target (the string after
 concatenation, variables and decoding, which an in-process hook sees but a
-network WAF cannot. It governs both `include`/`require` and the file-open sinks
+network WAF cannot). It governs both `include`/`require` and the file-open sinks
 `fopen`, `file_get_contents` and `readfile`, through two keys under
 `[sinks.include]`:
 
@@ -440,9 +442,9 @@ network WAF cannot. It governs both `include`/`require` and the file-open sinks
 Both keys are **independent of the global `howdah.mode` and of `sinks.mode`**,
 like `xxe` and `cgi_arg_injection`: `block` (the default) refuses, `detect`
 logs only, `off` disables. A global `howdah.mode = off` or `[sinks] enabled =
-false` silences them. A block is a clean sink neutralization — the `include` is
-skipped (returns `false`) or the open returns `false`, and the **script
-continues; the worker survives** — never a request-level refusal. Rules:
+false` silences them. A block is a clean sink neutralization, not a
+request-level refusal: the `include` is skipped (returns `false`) or the open
+returns `false`, and the **script continues and the worker survives**. Rules:
 `include_wrapper` (the include path) and `file_open` (the open sinks), both
 Layer 3, Standard. Only a scheme/category label (`php://filter`, `data://`,
 `proc_environ`, `session`, `log`, …) and the guarded function name are logged;
@@ -911,7 +913,7 @@ do not follow the log-only `behavior.mode`):
 
 | Guard | Setting (default) | What it does | Rule |
 |---|---|---|---|
-| Delete guard | `delete_guard = "block"` | refuses `unlink`, `rmdir` and the SOURCE of `rename` for a sensitive file, or `unlink`/`rmdir` through a `..` traversal that lands in a system directory | `file_delete` |
+| Delete guard | `delete_guard = "block"` | refuses `unlink`, `rmdir` and the source of `rename` for a sensitive file, or `unlink`/`rmdir` through a `..` traversal that lands in a system directory | `file_delete` |
 | Upload-write guard | `upload_write = "block"` | refuses `move_uploaded_file` into a PHP-executable or handler-config file name (the durable upload bypass) | `php_write` |
 | Secret-read guard | `secret_read = "off"` | with `"detect"` observes, with `"block"` refuses, a read of `.env`, `wp-config.php`, key material and `/etc/passwd`-class files | `secret_read` |
 
@@ -929,8 +931,8 @@ usually exploited exactly that way. The sensitive set is deliberately tight:
 `wp-config.php`; `.env` and `.env.*` (except the templates `.env.example`,
 `.sample`, `.dist`, `.template`); private-key material (`id_rsa`, `id_dsa`,
 `id_ecdsa`, `id_ed25519`; a `.pem` named *private*/*privkey*/*secret*; a `.key`
-named exactly `private`, `privkey`, `server`, `ssl`, `tls` or `oauth-private` --
-a bare `.key` is not enough, Keynote files end in `.key`). The name is tested on
+named exactly `private`, `privkey`, `server`, `ssl`, `tls` or `oauth-private`;
+a bare `.key` is not enough, because Keynote files end in `.key`). The name is tested on
 the lexically normalized path, so `uploads/../wp-config.php` is caught. A `..`
 traversal that resolves into `/etc`, `/root`, `/proc`, `/sys`, `/boot`, `/bin`,
 `/sbin`, `/usr` or `/lib*` is refused too. For `rename` only the live files
@@ -968,7 +970,7 @@ traversal into `/etc`, `/root`, `/proc`, `/sys` or `/var/log`. Start with
 **What is logged.** Only the rule, a path *category* (`wp-config`, `dotenv`,
 `private-key`, `htpasswd`, `system-account`, `ssh`, `credentials`, `system
 directory`; for writes `php`, `phtml`, `phar`, `htaccess`, `user-ini`,
-`web-config`), the guarded function and the calling script as `file:line` -- never
+`web-config`), the guarded function and the calling script as `file:line`, never
 the target path, its name or any content. For example:
 `unlink deletes a wp-config file at /var/www/html/wp-content/plugins/x/x.php:42`.
 
@@ -1037,8 +1039,8 @@ the app's own config) producing zero blocks.
   An application that compiles templates or caches PHP into a denied directory
   will be flagged, and one that rewrites `.htaccess` there (WooCommerce
   protecting a downloads directory) too. Scope `deny_exec_dirs` before you ever
-  use `block`. Detection is by file extension and by the three handler-config
-  names, and by the destination as written (a relative path outside a denied
+  use `block`. Detection is by file extension and the three handler-config
+  names, applied to the destination as written (a relative path outside a denied
   directory is only caught through the calling script), so a write to a harmless
   name that is renamed later is caught only if the rename target is dangerous.
   It was widened from `.php`/`.php5`/`.phtml`/`.phar` to the full set in 1.7;

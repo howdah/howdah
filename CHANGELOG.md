@@ -59,7 +59,7 @@ All notable changes to Howdah are documented here. The format follows
     ftp refused, 301/302/303/307/308 to loopback, `[::1]`, decimal, scheme-relative,
     metadata and RFC1918 not followed, a rebinding name refused by pin (5.5+) or
     after the fact (5.4) and by the peer check on the socket openers, benign egress
-    to `allow_hosts` hosts (incl. HTTPS and same-host redirects) untouched with zero
+    to `allow_hosts` hosts (including HTTPS and same-host redirects) untouched with zero
     events, and the four known gaps pinned by checks that fail if they close.
     `sinks_fastfollow.sh` now takes the PHP minors as arguments (like the other
     lab drivers) and prints a per-version table. Its misfire guard (C7) had been
@@ -75,7 +75,7 @@ All notable changes to Howdah are documented here. The format follows
   `block` into a `proposed` line). New rules `file_delete` and `secret_read`
   (Layer 4, Standard); the rule catalog goes from 44 to 46.
   - **Delete guard** (`delete_guard`, default `block`, rule `file_delete`):
-    `unlink`, `rmdir` and the SOURCE of `rename` are refused for `wp-config.php`
+    `unlink`, `rmdir` and the source of `rename` are refused for `wp-config.php`
     (deleting it drops WordPress back to its installer: delete-to-takeover),
     `.env` and `.env.*` (not the `.example`/`.sample`/`.dist` templates), private-key
     files (`id_rsa`/`id_dsa`/`id_ecdsa`/`id_ed25519`, a `.pem` named
@@ -94,7 +94,7 @@ All notable changes to Howdah are documented here. The format follows
     `behavior.file_delete`.
   - **Dangerous-write facet widened** (rule `php_write`, same id). The extension
     set grows from `.php`/`.php5`/`.phtml`/`.phar` to `.php`, `.php3`-`.php8`, `.phtml`,
-    `.pht`, `.phar`, `.inc` PLUS the handler-config names `.htaccess`, `.user.ini` and
+    `.pht`, `.phar` and `.inc`, plus the handler-config names `.htaccess`, `.user.ini` and
     `web.config` (an uploaded `.htaccess`/`.user.ini` re-enables PHP for the next
     `.jpg`, the most durable upload bypass). Two tiers: the new **upload-write
     guard** (`upload_write`, default `block`, needs no `deny_exec_dirs`) refuses
@@ -102,7 +102,7 @@ All notable changes to Howdah are documented here. The format follows
     HTTP upload to one; and the existing opt-in `deny_php_writes` tier, which now
     also hooks `copy()` and covers the whole set across `file_put_contents`,
     `fopen` (write mode), `copy`, `rename` and `move_uploaded_file` under
-    `deny_exec_dirs`. The plain write sinks are NOT blocked by default, because
+    `deny_exec_dirs`. The plain write sinks are not blocked by default, because
     WordPress rewrites `.htaccess`, Blade/Twig compile `.php` and WooCommerce
     protects downloads with an `.htaccess`. An existing `deny_php_writes = true`
     config now flags the wider set under its `deny_exec_dirs`.
@@ -123,15 +123,15 @@ All notable changes to Howdah are documented here. The format follows
     `.log`/`.zip`/`.pdf` uploads, reads of the app's own config) producing zero
     blocks. See `docs/config.md`.
 - **Include/open wrapper-scheme firewall, on and enforcing by default.** A new
-  Layer 3 control classifies the FULLY RESOLVED target of an include/require and
-  of the file-open sinks (`fopen`, `file_get_contents`, `readfile`) in-process —
-  the string after concatenation, variables and decoding, which a network WAF
-  never sees — and refuses dangerous stream wrappers and poisonable local
+  Layer 3 control classifies the fully resolved target of an include/require and
+  of the file-open sinks (`fopen`, `file_get_contents`, `readfile`) in-process
+  (the string after concatenation, variables and decoding, which a network WAF
+  never sees) and refuses dangerous stream wrappers and poisonable local
   targets. For `include`/`require` every non-`file` wrapper is refused
   (`php://filter` chains, `php://input`, any other `php://*`, `data:`,
   `expect://`, remote `http(s)`/`ftp(s)`, `zip://`…); `phar://` is left to the
   existing phar sink. For the file-open sinks only the near-zero-benign-use
-  wrappers are refused (`php://filter`, `data:`, `expect://`) — `php://input`,
+  wrappers are refused (`php://filter`, `data:`, `expect://`); `php://input`,
   `php://temp`/`memory` and remote fetches (the SSRF sink's job) stay allowed. A
   separate poison check refuses include/open of `/proc/self/environ` and other
   `/proc/*`, a file under the runtime `session.save_path`, and PHP's configured
@@ -140,9 +140,9 @@ All notable changes to Howdah are documented here. The format follows
   **enforced by default** (`[sinks.include] wrapper` / `poison`, default
   `block`), independent of the global mode and `sinks.mode` like the `xxe` and
   `cgi_arg_injection` rules; a global `off` or `[sinks] enabled = false` silences
-  them, `detect` logs only. A block is a clean sink neutralization — the include
-  is skipped / the open returns `false` and the script continues, the worker
-  survives — never a mid-VM bailout. Only a scheme/category label
+  them, `detect` logs only. A block is a clean sink neutralization (the include
+  is skipped or the open returns `false`, the script continues and the worker
+  survives), never a mid-VM bailout. Only a scheme/category label
   (e.g. `php://filter`, `proc_environ`) and the guarded function name are logged;
   the target content, which carries user data, is not. Enforced on PHP 5.4–8.5:
   the include path uses the `ZEND_INCLUDE_OR_EVAL` opcode handler on 7.0+ (full
@@ -151,7 +151,7 @@ All notable changes to Howdah are documented here. The format follows
   (compile-swap only) an include served from a warm opcache is not re-compiled
   and so is not re-inspected; an attack include of a wrapper/poison target is a
   dynamic cache-miss and is compiled and seen. The file-op foundation
-  (`file_hook.c`) is built to be reused by the delete/read guards planned next.
+  (`file_hook.c`) is the hub the Layer 4 file guards above build on.
 - XXE flag-awareness, **on and enforcing by default**. The Layer 3 `xxe` rule
   (the `xml` legacy sink) used to log any XML string that declared an external
   entity and, when armed, refuse it whatever the parse flags said. It now reads
@@ -214,8 +214,8 @@ All notable changes to Howdah are documented here. The format follows
   php-cgi directive name (`auto_prepend_file`, `allow_url_include`, ...), or a
   stray `0xAD` byte that is not a UTF-8 continuation byte (a plain `0xAD`
   test would block the accented `i` and many CJK characters). Ordinary
-  queries -- search words, ids, dates, negative numbers, base64/JWT tokens,
-  framework route paths, UTF-8 text -- stay clean. Unlike the other Layer 2
+  queries (search words, ids, dates, negative numbers, base64/JWT tokens,
+  framework route paths, UTF-8 text) stay clean. Unlike the other Layer 2
   classes it blocks by default under every global mode but `off` (a shipped
   `howdah.mode = detect` install still refuses it); new key `[inspect]
   cgi_arg = "block" | "detect" | "off"` (default `"block"`) observes or
@@ -228,30 +228,30 @@ All notable changes to Howdah are documented here. The format follows
   57-request benign corpus (the on-by-default false-positive gate) through
   nginx in front of php-fpm.
 - An opt-in Layer 1 facet that recycles the PHP worker after a poisoning-class
-  bailout fatal during the script — an uncaught `Error`, a parse/compile error,
-  a failed `require`, `max_execution_time` — the last CVE-2026-109619 producer
-  the §4.6 out-of-memory backstop deliberately leaves running (design §4.7).
-  The out-of-memory fatal's consumer runs on a *later* request on the same
-  worker, so ending that worker before it serves another fully closes the
+  bailout fatal during the script (an uncaught `Error`, a parse/compile error,
+  a failed `require`, `max_execution_time`). It targets the last CVE-2026-109619
+  producer the §4.6 out-of-memory backstop deliberately leaves running (design
+  §4.7). The out-of-memory fatal's consumer runs on a *later* request on the
+  same worker, so ending that worker before it serves another fully closes the
   window. Howdah's `zend_error_cb` handler now classifies three outcomes:
-  exit-now (out-of-memory any phase, or any fatal during request startup —
+  exit-now (out-of-memory any phase, or any fatal during request startup;
   unchanged §4.6 behaviour), recycle-after (a script-phase bailout fatal, when
   the facet is armed), or none. A new Critical Layer 1 rule, `fatal_recycle`,
   and two new top-level keys beside `oom_exit`: `recycle_on_fatal` (default
-  `false` — an operator opt-in for unpatched, long-lived-worker deployments) and
+  `false`: an operator opt-in for unpatched, long-lived-worker deployments) and
   `recycle_observe` (default `false`; when on, logs a "would-recycle" event
   without ending the worker, so the uncaught-fatal rate can be sized before
   enforcing). Same gates as the backstop: web SAPIs only, NTS, off on patched
   engines (runtime `memory_hard_limit_percent` probe); off entirely under
   `mode = off`. The event line carries only the rule, a fixed reason and the
-  error's `file:line` — never request content. `php --ri howdah` shows a
+  error's `file:line`, never request content. `php --ri howdah` shows a
   "Recycle after fatal" row. Verified on PHP 5.4–8.5 under php-fpm behind nginx
   and Apache mod_php.
   - Lab flush-ordering finding (design §4.7, §5.6): both tested web SAPIs
     finalize the response *after* `post_deactivate`, so neither preserves the
     producing request's 500 under recycle-after (fpm/nginx answers 502; Apache
     resets the connection). Per §4.7 both therefore take the immediate `_exit`
-    from the error handler — the worker is still recycled and the CVE window
+    from the error handler. The worker is still recycled and the CVE window
     still fully closed; only the producing request's error page is dropped (as
     it would be under any immediate fail-stop). The recycle-after-teardown path
     is retained for any SAPI that flushes earlier.

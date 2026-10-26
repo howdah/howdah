@@ -51,7 +51,7 @@ order.
 | 1 | Request-shape limits: multipart, input shape, request headers, the self-test marker, and the out-of-memory backstop | `max_parts`, `max_files`, `max_part_headers`, `max_part_header_bytes`, `max_field_name_len`, `max_filename_len`, `parse_memory_budget`, `malformed_multipart`, `upload_progress_abuse`, `self_test`, `max_input_vars`, `max_input_nesting_depth`, `max_input_key_bytes`, `max_request_headers`, `max_request_header_bytes`, `out_of_memory`, `startup_fatal`, `post_too_large`, `nesting_budget`, `parse_memory_estimate` |
 | 2 | Input inspection (the content classes are log-only by default; `cgi_arg_injection` blocks by default) | `sql_injection`, `path_traversal`, `command_injection`, `cgi_arg_injection` |
 | 3 | Sink hardening (log-only by default; `xxe` and the include/open wrapper firewall `include_wrapper`/`file_open` block by default) | `command_exec`, `include`, `eval`, `unserialize`, `phar`, `ssrf`, `include_wrapper`, `file_open`, and the legacy-era sinks `mail_injection`, `preg_eval`, `create_function`, `assert_string`, `dangerous_callback`, `xxe`, `tls_verify` |
-| 4 | After-breach behaviour (log-only by default; inert until its lists are set) | `upload_exec`, `unexpected_binary`, `unexpected_egress`, `php_write` |
+| 4 | After-breach behaviour (log-only by default; inert until its lists are set; the file guards `file_delete` and the upload tier of `php_write` block by default, `secret_read` is opt-in) | `upload_exec`, `unexpected_binary`, `unexpected_egress`, `php_write`, `file_delete`, `secret_read` |
 
 The layer is computed from the rule by `rule_layer` in
 `crates/howdah-core/src/log.rs`, an exhaustive match: a new rule does not
@@ -84,6 +84,15 @@ operator's locus, since PHP never gets to write its own message). In the rare
 genuine host out-of-memory (an `mmap` failure, not `memory_limit`), the system
 allocator the log writer uses may itself fail, so the line can be lost — the
 worker still exits (fail-stop).
+
+The Layer 4 file guards (`file_delete`, `secret_read`, and the upload tier of
+`php_write`) write a `reason` that names the guarded function, a path
+*category* (`wp-config`, `dotenv`, `private-key`, `htpasswd`, `system-account`,
+`ssh`, `credentials`, `system directory`; for writes `php`, `phtml`, `phar`,
+`htaccess`, `user-ini`, `web-config`) and the calling script as `file:line`,
+for example `unlink deletes a wp-config file at
+/var/www/html/wp-content/plugins/x/x.php:42`. They never carry the target path,
+its file name or any content.
 
 Layer 4 in observe mode (`[behavior] observe = true`) writes its proposals
 as ordinary `action: "log"` lines whose `reason` starts with `proposed: `.

@@ -73,6 +73,17 @@ printf '%s\n' "$l3" | grep -q 'xxe.*enforced by default'
 check "Layer-3 line names the one enforced-by-default rule, xxe" $?
 printf '%s\n' "$l3" | grep -q 'never blocks a bare DOCTYPE'
 check "Layer-3 line says a bare DOCTYPE is never blocked" $?
+l4=$(printf '%s\n' "$out" | grep '^note: layer 4')
+printf '%s\n' "$l4" | grep -q 'log-only by default'
+check "Layer-4 line says the behaviour facets are log-only by default" $?
+printf '%s\n' "$l4" | grep -q 'does not arm it'
+check "Layer-4 line states global mode does not arm it" $?
+printf '%s\n' "$l4" | grep -q 'file_delete.*enforced by default\|enforced by default.*file_delete'
+check "Layer-4 line names the enforced-by-default delete guard, file_delete" $?
+printf '%s\n' "$l4" | grep -q 'php_write.*move_uploaded_file'
+check "Layer-4 line names the enforced-by-default upload tier of php_write" $?
+printf '%s\n' "$l4" | grep -q 'secret_read.*opt-in'
+check "Layer-4 line says secret_read is opt-in" $?
 
 # --- ini: risky php.ini settings report ---------------------------------------
 # fake php whose `-i` prints $T/ini/<name>.txt; its php.ini is $T/ini/php.ini

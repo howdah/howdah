@@ -747,19 +747,19 @@ sinks` row naming which ones installed on your PHP.
   fixing the application. The `phar`, `ssrf` and legacy-sink limits are listed
   in their sections above.
 
-## `[behavior]` — Layer 4 after-breach behaviour (log-only by default)
+## `[behavior]` — Layer 4 after-breach behaviour (log-only by default, plus two enforced file guards)
 
-**Layer 4 logs by default; it does not block, and it does nothing until you set
-its lists.** It watches what PHP does once something has gone wrong, such as a
-webshell dropped in an upload directory. It has four facets, each switched on by
-its own setting:
+**The four list-driven facets below log by default; they do not block, and they
+do nothing until you set their lists.** They watch what PHP does once something
+has gone wrong, such as a webshell dropped in an upload directory. Each is
+switched on by its own setting:
 
 | Facet | Setting | Flags |
 |---|---|---|
 | Execution origin | `deny_exec_dirs` | a PHP file under a listed directory that runs as the requested script, or is `require`d/`include`d (rule `upload_exec`) |
 | Expected binaries | `allow_exec_binaries` | `exec`/`system`/`popen`/`proc_open`/`shell_exec`/`passthru` to a program not on the list (rule `unexpected_binary`) |
 | Expected egress | `allow_egress_hosts` | an outbound connection to a host not on the list (rule `unexpected_egress`) |
-| `.php` writes | `deny_php_writes` | writing a PHP file into a denied directory, or from a script that lives in one (rule `php_write`) |
+| Executable / handler-config writes | `deny_php_writes` | writing a PHP-executable or handler-config file name (`.php`, `.phtml`, `.pht`, `.php3`-`.php8`, `.phar`, `.inc`, `.htaccess`, `.user.ini`, `web.config`) into a denied directory, or from a script that lives in one (rule `php_write`) |
 
 `behavior.mode` defaults to `detect` (log only) and is **independent of the
 global `howdah.mode`**: `howdah.mode = block` does **not** arm Layer 4. As with
@@ -768,6 +768,72 @@ nothing is expected, so under `detect` every matching call is logged and under
 `block` it is refused. Layer 4 adds **no new php.ini directives**. Events name
 the script that made the call, so a finding points at the webshell even when a
 legitimate script `require`d it.
+
+**Three file guards sit beside those facets and carry their own mode** (so they
+do not follow the log-only `behavior.mode`):
+
+| Guard | Setting (default) | What it does | Rule |
+|---|---|---|---|
+| Delete guard | `delete_guard = "block"` | refuses `unlink`, `rmdir` and the SOURCE of `rename` for a sensitive file, or `unlink`/`rmdir` through a `..` traversal that lands in a system directory | `file_delete` |
+| Upload-write guard | `upload_write = "block"` | refuses `move_uploaded_file` into a PHP-executable or handler-config file name (the durable upload bypass) | `php_write` |
+| Secret-read guard | `secret_read = "off"` | with `"detect"` observes, with `"block"` refuses, a read of `.env`, `wp-config.php`, key material and `/etc/passwd`-class files | `secret_read` |
+
+Each takes `"off"`, `"detect"` or `"block"`. The delete and upload-write guards
+are **enforced by default**, like `xxe` and the include/open wrapper firewall,
+under every mode but `off`: a global `off`, `[behavior] enabled = false` and
+`[behavior] mode = "off"` silence all of Layer 4, and `observe = true` turns a
+guard `block` into a `proposed` line. They need no list. A blocked call is a
+clean neutralization like the Layer 3 sinks: the function returns `false`, the
+file is untouched, the script continues, the worker survives.
+
+*Delete guard (`file_delete`).* Deleting `wp-config.php` makes WordPress fall
+back to its installer, a takeover; arbitrary-file-delete bugs in plugins are
+usually exploited exactly that way. The sensitive set is deliberately tight:
+`wp-config.php`; `.env` and `.env.*` (except the templates `.env.example`,
+`.sample`, `.dist`, `.template`); private-key material (`id_rsa`, `id_dsa`,
+`id_ecdsa`, `id_ed25519`; a `.pem` named *private*/*privkey*/*secret*; a `.key`
+named exactly `private`, `privkey`, `server`, `ssl`, `tls` or `oauth-private` --
+a bare `.key` is not enough, Keynote files end in `.key`). The name is tested on
+the lexically normalized path, so `uploads/../wp-config.php` is caught. A `..`
+traversal that resolves into `/etc`, `/root`, `/proc`, `/sys`, `/boot`, `/bin`,
+`/sbin`, `/usr` or `/lib*` is refused too. For `rename` only the live files
+`wp-config.php` and `.env` count as a source (moving them away is a delete;
+`.env.production` -> `.env` is an ordinary deploy step). Cache, temp, session, log,
+thumbnail and upload deletes, `.htaccess`, `.maintenance`, `wp-config-sample.php`
+and `cacert.pem` are never touched. Migration and restore tools (Duplicator's
+`installer.php`, restore plugins) legitimately move `wp-config.php`: add an
+`[[exceptions]]` entry with `rule = "behavior.file_delete"` and the tool's
+`script`.
+
+*Upload-write guard (`php_write`, upload tier).* An uploaded `.htaccess` or
+`.user.ini` re-enables PHP for the next `.jpg`, so it outlives any file-extension
+filter on the upload itself. `move_uploaded_file` is refused when the destination
+name ends in `.php`, `.php3`-`.php8`, `.phtml`, `.pht`, `.phar` or is
+`.htaccess`, `.user.ini` or `web.config` (case-insensitive). Nothing legitimate
+moves an HTTP upload to such a name; admin file managers that do (elFinder-class
+plugins) need an `[[exceptions]]` entry with `rule = "behavior.php_write"`. The
+other write sinks are **not** blocked by default, because applications legitimately
+write `.php` (Blade/Twig/Smarty caches, WordPress updates) and `.htaccess`
+(WordPress permalinks, WooCommerce download protection). They are covered by the
+scoped `deny_php_writes` tier below. `.inc` and double extensions
+(`shell.php.jpg`, which Apache's `AddHandler` runs) are not part of the upload
+tier.
+
+*Secret-read guard (`secret_read`).* Off by default because applications read
+their own `.env` and `wp-config.php` constantly. Armed, it covers
+`file_get_contents`, `readfile`, `file` and `fopen` in read mode: the delete
+guard's sensitive set plus `.htpasswd`, `/etc/passwd`/`shadow`/`gshadow`/`sudoers`,
+anything under a `.ssh` directory, `.pgpass`/`.my.cnf`/`.netrc`, and a `..`
+traversal into `/etc`, `/root`, `/proc`, `/sys` or `/var/log`. Start with
+`"detect"`, read the log, add `[[exceptions]]` for the scripts that own those files
+(your framework's config loader), and only then consider `"block"`.
+
+**What is logged.** Only the rule, a path *category* (`wp-config`, `dotenv`,
+`private-key`, `htpasswd`, `system-account`, `ssh`, `credentials`, `system
+directory`; for writes `php`, `phtml`, `phar`, `htaccess`, `user-ini`,
+`web-config`), the guarded function and the calling script as `file:line` -- never
+the target path, its name or any content. For example:
+`unlink deletes a wp-config file at /var/www/html/wp-content/plugins/x/x.php:42`.
 
 ```toml
 [behavior]
@@ -778,8 +844,16 @@ observe = false             # true -> log would-be findings as `proposed`; never
 deny_exec_dirs = []         # e.g. ["/var/www/uploads", "/var/www/storage", "/tmp"]
 allow_exec_binaries = []    # e.g. ["/usr/bin/gs", "convert"]  (empty = none expected)
 allow_egress_hosts = []     # e.g. ["api.stripe.com"]          (empty under detect = log all egress)
-deny_php_writes = false     # true -> flag writing a *.php/.phar/.phtml file into a denied
-                            # directory or from a script under one (origin-scoped; NOT any .php write)
+deny_php_writes = false     # true -> flag writing a PHP-executable or handler-config name
+                            # (.php .phtml .pht .php3-8 .phar .inc .htaccess .user.ini web.config)
+                            # via file_put_contents / fopen('w') / copy / rename / move_uploaded_file
+                            # into a denied directory or from a script under one (origin-scoped;
+                            # NOT any such write)
+
+# The file guards: their own modes, "off" | "detect" | "block".
+delete_guard = "block"      # enforced by default: wp-config.php, .env, key files, '..' into /etc...
+upload_write = "block"      # enforced by default: move_uploaded_file to .php/.phtml/.phar/.htaccess/...
+secret_read  = "off"        # opt-in: "detect" observes reads of .env / wp-config.php / keys
 ```
 
 **Observe mode.** `observe = true` logs the binary that was run, the host
@@ -794,6 +868,16 @@ The Layer 4 lab script (27 checks) passed on PHP 5.4, 5.6, 7.4, 8.3, 8.4 and
 `detect` and `block`, that a framework-style view write and a plain read of a
 `.php` file are not flagged, that the default and empty configs are inert, and
 that observe proposes without blocking.
+
+The file guards have their own lab, `lab/integration/file_guard.sh`, run on PHP
+5.4, 5.6, 7.0, 7.4, 8.0, 8.1, 8.3 and 8.5: wp-config.php, `.env`, key-file and
+`..`-traversal deletes and renames refused (target survives, script continues,
+origin `file:line` logged, name never logged); real multipart uploads to twelve
+dangerous names refused with no configuration; the scoped tier across
+`file_put_contents`, `fopen`, `copy` and `rename`; secret reads logged but not
+blocked under `detect`; and a benign corpus (cache, tmp, session, upload and
+thumbnail deletes, `.jpg`/`.txt`/`.json`/`.log`/`.zip`/`.pdf` uploads and writes, reads of
+the app's own config) producing zero blocks.
 
 ### Known limitations
 
@@ -814,9 +898,30 @@ that observe proposes without blocking.
   redirects, `curl_multi_*`, a non-string URL).
 - **`deny_php_writes` is origin-scoped and can still flag legitimate writes.**
   An application that compiles templates or caches PHP into a denied directory
-  will be flagged. Scope `deny_exec_dirs` before you ever use `block`. Detection
-  is by file extension, so a write to a non-`.php` name that is renamed later is
-  not caught.
+  will be flagged, and one that rewrites `.htaccess` there (WooCommerce
+  protecting a downloads directory) too. Scope `deny_exec_dirs` before you ever
+  use `block`. Detection is by file extension and by the three handler-config
+  names, and by the destination as written (a relative path outside a denied
+  directory is only caught through the calling script), so a write to a harmless
+  name that is renamed later is caught only if the rename target is dangerous.
+  It was widened from `.php`/`.php5`/`.phtml`/`.phar` to the full set in 1.7;
+  an existing `deny_php_writes = true` now also flags `.pht`, `.php3`/`4`/`7`/`8`,
+  `.inc`, `.htaccess`, `.user.ini` and `web.config` under `deny_exec_dirs`, and
+  also sees `copy()` targets.
+- **The file guards classify the path argument as written, lexically.** They
+  never touch the filesystem: a symlink named innocently that points at
+  `wp-config.php` is not seen, nor is a deletion through an open handle, a
+  Stringable passed to `unlink`, `SplFileObject`, `ZipArchive::extractTo`,
+  `fwrite` on an already-open handle, or a `rename` whose destination is the
+  sensitive name. `highlight_file`, `show_source`, `parse_ini_file` and
+  `SplFileObject` are not hooked by the secret-read guard (`readfile`,
+  `file_get_contents`, `file` and `fopen` are). The delete guard does not treat
+  `.htaccess` as sensitive (cache plugins delete their own), and the
+  `..`-traversal rule only fires when the path lands in a system directory,
+  because Howdah does not know your document root and apps legitimately delete
+  outside it (`/tmp`, `/var/cache`). Verified on PHP 5.4, 5.6, 7.0, 7.4, 8.0,
+  8.1, 8.3 and 8.5; the same function-table swaps as the Layer 3 sinks, so other
+  minors are expected to work but are not independently verified.
 - **Observe only proposes.** On a box that is already breached, the observed
   set may include attacker behaviour; do not accept it unreviewed.
 - Setting `deny_exec_dirs` arms the include/eval hook (its `require`d-file

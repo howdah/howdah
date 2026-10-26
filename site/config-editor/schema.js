@@ -76,6 +76,8 @@
     // wrapper/poison, not by a per-rule [rules] mode).
     include_wrapper: 'sinks', file_open: 'sinks',
     upload_exec: 'behavior', unexpected_binary: 'behavior', unexpected_egress: 'behavior', php_write: 'behavior',
+    // T5 file guards (governed by [behavior] delete_guard / secret_read / upload_write).
+    file_delete: 'behavior', secret_read: 'behavior',
     // 1.5 legacy-era sinks: modes come from [sinks.<sink>] mode, as for the others.
     mail_injection: 'sinks', preg_eval: 'sinks', create_function: 'sinks', assert_string: 'sinks',
     dangerous_callback: 'sinks', xxe: 'sinks', tls_verify: 'sinks',

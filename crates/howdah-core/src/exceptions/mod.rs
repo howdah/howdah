@@ -72,7 +72,9 @@ impl Layer {
             RuleId::UploadExec
             | RuleId::UnexpectedBinary
             | RuleId::UnexpectedEgress
-            | RuleId::PhpWrite => Layer::Behavior,
+            | RuleId::PhpWrite
+            | RuleId::FileDelete
+            | RuleId::SecretRead => Layer::Behavior,
         }
     }
 

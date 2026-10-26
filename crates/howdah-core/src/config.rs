@@ -639,6 +639,23 @@ impl SinkConfig {
 
 /// Layer-4 post-breach behavior settings. Its `mode` is independent of the
 /// global mode: a global `block` never arms behavior enforcement.
+///
+/// Three file guards sit beside the scoped facets and carry their own mode, so
+/// they do NOT inherit the (log-only by default) section `mode`:
+///
+/// * `delete_guard` (default `block`): `unlink`/`rmdir`/`rename`-away of
+///   `wp-config.php`, `.env`, private keys, or a `..` traversal into a system
+///   directory. Delete-to-takeover.
+/// * `upload_write` (default `block`): `move_uploaded_file` into an executable
+///   (`.php`, `.phtml`, `.phar`, ...) or handler-config (`.htaccess`,
+///   `.user.ini`, `web.config`) file name. The durable upload bypass.
+/// * `secret_read` (default `off`, opt-in): a read of `.env`, `wp-config.php`,
+///   private keys or system account files. Higher false-positive rate (apps read
+///   their own config), so it ships off; `detect` observes, `block` refuses.
+///
+/// Each is silenced by a global `off`, `enabled = false` or the section
+/// `mode = "off"` (see [`BehaviorConfig::delete_guard_mode`]), and the
+/// `observe` flag downgrades a guard `block` to a proposal like every Layer-4 facet.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct BehaviorConfig {
@@ -651,6 +668,12 @@ pub struct BehaviorConfig {
     /// Exact hostnames, literal IPs, or CIDRs.
     pub allow_egress_hosts: Vec<String>,
     pub deny_php_writes: bool,
+    /// `delete_guard`: `block` (default) | `detect` | `off`.
+    pub delete_guard: Mode,
+    /// `upload_write`: `block` (default) | `detect` | `off`.
+    pub upload_write: Mode,
+    /// `secret_read`: `off` (default) | `detect` | `block`.
+    pub secret_read: Mode,
 }
 
 impl Default for BehaviorConfig {
@@ -663,11 +686,41 @@ impl Default for BehaviorConfig {
             allow_exec_binaries: Vec::new(),
             allow_egress_hosts: Vec::new(),
             deny_php_writes: false,
+            delete_guard: Mode::Block,
+            upload_write: Mode::Block,
+            secret_read: Mode::Off,
         }
     }
 }
 
 impl BehaviorConfig {
+    /// A guard's effective mode: Off whenever Layer 4 as a whole is off (global
+    /// `off`, `enabled = false` or the section `mode = "off"`), else the guard's
+    /// own mode. Independent of the global `detect`/`block` and of the section's
+    /// `detect`/`block` (the guards are enforced by default, like `xxe`).
+    fn guard_mode(&self, own: Mode, global: Mode) -> Mode {
+        if self.effective_mode(global) == Mode::Off {
+            Mode::Off
+        } else {
+            own
+        }
+    }
+
+    /// Effective mode of the delete guard (`file_delete`).
+    pub fn delete_guard_mode(&self, global: Mode) -> Mode {
+        self.guard_mode(self.delete_guard, global)
+    }
+
+    /// Effective mode of the upload-write guard (`php_write`, upload tier).
+    pub fn upload_write_mode(&self, global: Mode) -> Mode {
+        self.guard_mode(self.upload_write, global)
+    }
+
+    /// Effective mode of the secret-read guard (`secret_read`).
+    pub fn secret_read_mode(&self, global: Mode) -> Mode {
+        self.guard_mode(self.secret_read, global)
+    }
+
     /// Off if the global mode is off or behavior is disabled; otherwise the
     /// section's own mode (the global `block` is deliberately ignored).
     pub fn effective_mode(&self, global: Mode) -> Mode {
@@ -957,6 +1010,10 @@ self_test = "off"
         assert!(!c.behavior.observe);
         assert!(c.behavior.deny_exec_dirs.is_empty());
         assert!(!c.behavior.deny_php_writes);
+        // The T5 file guards: delete + upload-write enforced, secret-read off.
+        assert_eq!(c.behavior.delete_guard, Mode::Block);
+        assert_eq!(c.behavior.upload_write, Mode::Block);
+        assert_eq!(c.behavior.secret_read, Mode::Off);
     }
 
     #[test]
@@ -964,6 +1021,33 @@ self_test = "off"
         let c = Config::from_toml("mode=\"detect\"\n[behavior]\nmode=\"detect\"").unwrap();
         assert_eq!(c.behavior.effective_mode(Mode::Block), Mode::Detect);
         assert_eq!(c.behavior.effective_mode(Mode::Off), Mode::Off);
+    }
+
+    #[test]
+    fn behavior_file_guard_modes() {
+        let c = Config::safe_defaults();
+        for g in [Mode::Off, Mode::Detect, Mode::Block] {
+            // Independent of the global detect/block; only global off silences them.
+            let want = |m: Mode| if g == Mode::Off { Mode::Off } else { m };
+            assert_eq!(c.behavior.delete_guard_mode(g), want(Mode::Block), "{g:?}");
+            assert_eq!(c.behavior.upload_write_mode(g), want(Mode::Block), "{g:?}");
+            assert_eq!(c.behavior.secret_read_mode(g), Mode::Off, "{g:?}");
+        }
+        let c = Config::from_toml("[behavior]\ndelete_guard=\"detect\"\nupload_write=\"off\"\nsecret_read=\"detect\"").unwrap();
+        assert_eq!(c.behavior.delete_guard_mode(Mode::Detect), Mode::Detect);
+        assert_eq!(c.behavior.upload_write_mode(Mode::Detect), Mode::Off);
+        assert_eq!(c.behavior.secret_read_mode(Mode::Detect), Mode::Detect);
+        // The section mode="off" is the Layer-4 master switch; enabled=false likewise.
+        let c = Config::from_toml("[behavior]\nmode=\"off\"").unwrap();
+        assert_eq!(c.behavior.delete_guard_mode(Mode::Detect), Mode::Off);
+        let c = Config::from_toml("[behavior]\nenabled=false\nsecret_read=\"block\"").unwrap();
+        assert_eq!(c.behavior.secret_read_mode(Mode::Detect), Mode::Off);
+        // A section detect/block does not change the guards' own mode.
+        let c = Config::from_toml("[behavior]\nmode=\"block\"\nsecret_read=\"detect\"").unwrap();
+        assert_eq!(c.behavior.secret_read_mode(Mode::Detect), Mode::Detect);
+        let c = Config::from_toml("[behavior]\nmode=\"detect\"").unwrap();
+        assert_eq!(c.behavior.delete_guard_mode(Mode::Detect), Mode::Block);
+        assert!(Config::from_toml("[behavior]\ndelete_guard=\"banana\"").is_err());
     }
 
     #[test]

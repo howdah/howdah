@@ -65,7 +65,10 @@ pub fn rule_layer(r: RuleId) -> u8 {
         | RuleId::DangerousCallback
         | RuleId::Xxe
         | RuleId::TlsVerify => 3,
-        RuleId::UploadExec | RuleId::UnexpectedBinary | RuleId::UnexpectedEgress | RuleId::PhpWrite => 4,
+        RuleId::UploadExec | RuleId::UnexpectedBinary | RuleId::UnexpectedEgress
+        | RuleId::PhpWrite
+        | RuleId::FileDelete
+        | RuleId::SecretRead => 4,
     }
 }
 
@@ -119,6 +122,8 @@ fn rule_name(r: RuleId) -> &'static str {
         RuleId::UnexpectedBinary => "unexpected_binary",
         RuleId::UnexpectedEgress => "unexpected_egress",
         RuleId::PhpWrite => "php_write",
+        RuleId::FileDelete => "file_delete",
+        RuleId::SecretRead => "secret_read",
         RuleId::MailInjection => "mail_injection",
         RuleId::PregEval => "preg_eval",
         RuleId::CreateFunction => "create_function",
@@ -303,6 +308,8 @@ mod tests {
             (RuleId::UnexpectedBinary, 4),
             (RuleId::UnexpectedEgress, 4),
             (RuleId::PhpWrite, 4),
+            (RuleId::FileDelete, 4),
+            (RuleId::SecretRead, 4),
             (RuleId::MailInjection, 3),
             (RuleId::PregEval, 3),
             (RuleId::CreateFunction, 3),
@@ -317,7 +324,7 @@ mod tests {
             (RuleId::NestingBudget, 1),
             (RuleId::ParseMemoryEstimate, 1),
         ];
-        assert_eq!(rule_catalog().len(), 44);
+        assert_eq!(rule_catalog().len(), 46);
         assert_eq!(want.len(), rule_catalog().len(), "layer table and rule_catalog differ");
         for r in rule_catalog() {
             let w = want.iter().find(|(x, _)| x == r).unwrap_or_else(|| panic!("{r:?} has no layer in this table")).1;

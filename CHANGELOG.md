@@ -6,6 +6,62 @@ All notable changes to Howdah are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Layer 4 file guards: a delete guard and a widened dangerous-write facet
+  (both enforced by default) and an opt-in secret-read guard.** Three
+  origin-attributed guards on the file-op hub the include/open firewall
+  introduced, each with its own `[behavior]` mode that does not follow the
+  log-only `behavior.mode` (a global `off`, `[behavior] enabled = false` and
+  `[behavior] mode = "off"` silence all of Layer 4; `observe = true` turns a
+  `block` into a `proposed` line). New rules `file_delete` and `secret_read`
+  (Layer 4, Standard); the rule catalog goes from 44 to 46.
+  - **Delete guard** (`delete_guard`, default `block`, rule `file_delete`):
+    `unlink`, `rmdir` and the SOURCE of `rename` are refused for `wp-config.php`
+    (deleting it drops WordPress back to its installer: delete-to-takeover),
+    `.env` and `.env.*` (not the `.example`/`.sample`/`.dist` templates), private-key
+    files (`id_rsa`/`id_dsa`/`id_ecdsa`/`id_ed25519`, a `.pem` named
+    private/privkey/secret, a `.key` named private/privkey/server/ssl/tls/
+    oauth-private; a bare `.key` is not enough because Keynote files end in it),
+    and for an `unlink`/`rmdir` whose `..` traversal lands in `/etc`, `/root`,
+    `/proc`, `/sys`, `/boot`, `/bin`, `/sbin`, `/usr` or `/lib*`. For a rename
+    source only the live `wp-config.php` and `.env` count, so a deploy step
+    `.env.production` -> `.env` is untouched. The name is tested on the lexically
+    normalized path (`uploads/../wp-config.php` is caught). The list is tight on
+    purpose: cache, temp, session, log, thumbnail and upload deletes, `.htaccess`,
+    `.maintenance`, `wp-config-sample.php` and `cacert.pem` are never touched, and
+    a `..` that stays in the web tree or in `/tmp` / `/var/cache` is not "outside the
+    document root" (Howdah does not know yours). Migration and restore tools that
+    legitimately move `wp-config.php` need an `[[exceptions]]` entry on
+    `behavior.file_delete`.
+  - **Dangerous-write facet widened** (rule `php_write`, same id). The extension
+    set grows from `.php`/`.php5`/`.phtml`/`.phar` to `.php`, `.php3`-`.php8`, `.phtml`,
+    `.pht`, `.phar`, `.inc` PLUS the handler-config names `.htaccess`, `.user.ini` and
+    `web.config` (an uploaded `.htaccess`/`.user.ini` re-enables PHP for the next
+    `.jpg`, the most durable upload bypass). Two tiers: the new **upload-write
+    guard** (`upload_write`, default `block`, needs no `deny_exec_dirs`) refuses
+    `move_uploaded_file` into any such name, because nothing legitimate moves an
+    HTTP upload to one; and the existing opt-in `deny_php_writes` tier, which now
+    also hooks `copy()` and covers the whole set across `file_put_contents`,
+    `fopen` (write mode), `copy`, `rename` and `move_uploaded_file` under
+    `deny_exec_dirs`. The plain write sinks are NOT blocked by default, because
+    WordPress rewrites `.htaccess`, Blade/Twig compile `.php` and WooCommerce
+    protects downloads with an `.htaccess`. An existing `deny_php_writes = true`
+    config now flags the wider set under its `deny_exec_dirs`.
+  - **Secret-read guard** (`secret_read`, default `off`, rule `secret_read`):
+    `file_get_contents`, `readfile`, `file` and `fopen` in read mode of `.env`,
+    `wp-config.php`, key material, `.htpasswd`, `/etc/passwd`-class files,
+    anything under `.ssh`, DB/netrc credential files, or a `..` traversal into a
+    system directory. Off by default because applications read their own config;
+    `"detect"` observes, `"block"` refuses.
+  - A blocked call is a clean neutralization (the function returns `false`, the
+    file is untouched, the script continues, the worker survives). Only the rule,
+    a path category (`wp-config`, `dotenv`, `private-key`, `htaccess`, ...), the
+    guarded function and the calling script as `file:line` are logged, never the
+    target path, name or content. `unlink`/`rmdir` are swapped only when the delete
+    guard is armed; `file_put_contents`/`copy` only when `deny_php_writes` is. Verified on
+    PHP 5.4, 5.6, 7.0, 7.4, 8.0, 8.1, 8.3 and 8.5 by `lab/integration/file_guard.sh`,
+    with a benign corpus (cache/tmp/session/upload deletes, `.jpg`/`.txt`/`.json`/
+    `.log`/`.zip`/`.pdf` uploads, reads of the app's own config) producing zero
+    blocks. See `docs/config.md`.
 - **Include/open wrapper-scheme firewall, on and enforcing by default.** A new
   Layer 3 control classifies the FULLY RESOLVED target of an include/require and
   of the file-open sinks (`fopen`, `file_get_contents`, `readfile`) in-process —

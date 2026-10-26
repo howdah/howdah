@@ -81,6 +81,18 @@ const char *howdah_sys_current_script(void) {
     return howdah_current_script();
 }
 
+/* The line of the call being made in that script, for the T5 file guards' log
+ * line (`file:line`). zend_get_executed_lineno() has the same walk-to-the-user-
+ * frame semantics as zend_get_executed_filename(); 5.x threads TSRMLS. */
+unsigned int howdah_sys_current_line(void) {
+#if PHP_VERSION_ID >= 70000
+    return (unsigned int)zend_get_executed_lineno();
+#else
+    TSRMLS_FETCH();
+    return (unsigned int)zend_get_executed_lineno(TSRMLS_C);
+#endif
+}
+
 typedef void (*howdah_zif)(INTERNAL_FUNCTION_PARAMETERS);
 
 /* Read the call's first argument as a string into (p,len); ok=1 on success.

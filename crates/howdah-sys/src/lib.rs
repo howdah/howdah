@@ -30,6 +30,11 @@ extern "C" {
     /// when nothing is executing.
     pub fn howdah_sys_current_script() -> *const ::std::ffi::c_char;
 
+    /// The line of the call being made in the script `howdah_sys_current_script`
+    /// names (0 when nothing is executing). Same origin walk, for the T5 file
+    /// guards' `file:line` log text.
+    pub fn howdah_sys_current_line() -> u32;
+
     /// Install the Layer-3 function-table sink hooks (see `sink_hook.c`). Call
     /// once at MINIT. `cb` decides each intercepted call, returning the action
     /// code (0 ALLOW / 1 LOG / 2 BLOCK); on BLOCK the C trampoline neutralizes
@@ -94,7 +99,7 @@ extern "C" {
     /// is set, so a file-firewall-armed config must ALSO reach
     /// `howdah_install_ssrf_hooks`. Call once at first RINIT when the firewall is
     /// armed. Idempotent; a NULL callback leaves the firewall disarmed.
-    pub fn howdah_install_file_hooks(decide: HowdahFileDecide);
+    pub fn howdah_install_file_hooks(decide: HowdahFileDecide, ops: ::std::ffi::c_int);
 
     /// Install the Layer-4 behavior glue: set the five behavior callbacks AND
     /// swap `file_put_contents`/`move_uploaded_file`/`rename` onto their
@@ -110,6 +115,7 @@ extern "C" {
         binary: HowdahBehaviorBinary,
         egress: HowdahBehaviorEgress,
         php_write: HowdahBehaviorPhpWrite,
+        swap: ::std::ffi::c_int,
     );
 
     /// Deferred refusal (see `refuse_hook.c`): swap `zend_compile_file` for
@@ -201,6 +207,17 @@ extern "C" {
     /// by `ssrf_hook.c`. Implemented in howdah-core. 0 allow / 1 log / 2 block.
     pub fn howdah_sink_ssrf_oversize(ctx: *mut ::std::ffi::c_void) -> ::std::ffi::c_int;
 }
+
+/// `howdah_install_file_hooks` `ops` bit: also swap `unlink`/`rmdir` (the delete
+/// guard is armed). Mirrors `HOWDAH_FILE_HOOK_DELETE` in `howdah_sink.h`.
+pub const HOWDAH_FILE_HOOK_DELETE: ::std::ffi::c_int = 1;
+
+/// `howdah_install_behavior_hooks` `swap` mask bits (mirror `HOWDAH_BHV_SWAP_*`
+/// in `howdah_sink.h`): the scoped `deny_php_writes` tier, the upload-write
+/// guard (`move_uploaded_file`), and rename's delete-guard source check.
+pub const HOWDAH_BHV_SWAP_GENERIC: ::std::ffi::c_int = 1;
+pub const HOWDAH_BHV_SWAP_UPLOAD: ::std::ffi::c_int = 2;
+pub const HOWDAH_BHV_SWAP_RENAME_SRC: ::std::ffi::c_int = 4;
 
 /// Legacy sink install mask bits (mirror `HOWDAH_LEGACY_*` in `howdah_sink.h`).
 pub const HOWDAH_LEGACY_MAIL: ::std::ffi::c_int = 1;

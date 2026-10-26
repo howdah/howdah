@@ -355,6 +355,62 @@ Verified on PHP 5.4, 5.6, 7.4, 8.3 and 8.5 (the wrapper firewall on 5.4, 5.6,
 7.0, 7.4, 8.0, 8.1, 8.3, 8.5). Other minors build and are expected to work but
 are **not independently verified**. A debug-build leak review is still pending.
 
+### Layer 4 file guards (delete, dangerous write, secret read)
+
+Three origin-attributed guards on the file-op hub (`[behavior] delete_guard`,
+`upload_write`, `secret_read`; see `docs/config.md`). The first two are **on by
+default and block**, the third is **opt-in** (`off` by default). Results come
+from `lab/integration/file_guard.sh` (33 checks per version, real extension, CLI
+and the built-in server with real multipart uploads), verified on PHP 5.4, 5.6,
+7.0, 7.4, 8.0, 8.1, 8.3 and 8.5. The C is also compiled with
+`-Wall -Wextra -Werror` against each image's headers.
+
+| guard / sink | PHP 5.4-5.6 | PHP 7.0-7.4 | PHP 8.0-8.5 |
+|---|---|---|---|
+| delete guard: `unlink`, `rmdir`, `rename` source (**on by default, block**) | yes | yes | yes |
+| upload-write guard: `move_uploaded_file` to an executable / handler-config name (**on by default, block**) | yes | yes | yes |
+| scoped dangerous-write tier (`deny_php_writes`): `file_put_contents`, `fopen` (write), `copy`, `rename`, `move_uploaded_file` (opt-in) | yes | yes | yes |
+| secret-read guard: `file_get_contents`, `readfile`, `file`, `fopen` (read) (**opt-in; off by default**) | yes | yes | yes |
+
+Per-version lab result, identical on all eight versions (cells are *attacks
+refused (or logged, for secret read) | benign operations performed | benign false
+blocks*):
+
+| php | delete guard | upload-write | scoped write | secret read (detect) |
+|---|---|---|---|---|
+| 5.4.16 / 5.6.40 | 12 \| 18 \| 0 | 12 \| 10 \| 0 | 52 \| 32 \| 0 | 16 \| 32 \| 0 |
+| 7.0.33 / 7.4.33 | 12 \| 18 \| 0 | 12 \| 10 \| 0 | 52 \| 32 \| 0 | 16 \| 32 \| 0 |
+| 8.0.30 / 8.1.34 | 12 \| 18 \| 0 | 12 \| 10 \| 0 | 52 \| 32 \| 0 | 16 \| 32 \| 0 |
+| 8.3.36 / 8.5.12 | 12 \| 18 \| 0 | 12 \| 10 \| 0 | 52 \| 32 \| 0 | 16 \| 32 \| 0 |
+
+Delete attacks: `unlink` of `wp-config.php`, `.env`, `.env.production`, `id_rsa`,
+`privkey.pem`, `server.key`, an `uploads/../` traversal to `wp-config.php`,
+`call_user_func('unlink', ...)`, `rename` of `wp-config.php` and `.env` away,
+and `unlink`/`rmdir` through nine `..` segments into `/etc`; every one returned
+`false`, left the target in place, let the script continue and logged
+`file_delete`/`block` with the calling `file:line` and no file name. Upload
+attacks: twelve real multipart uploads to `.php`, `.phtml`, `.pht`, `.php3`,
+`.php4`, `.php5`, `.php7`, `.PHAR`, `.Php`, `.htaccess`, `.user.ini` and
+`web.config` with no configuration at all; none created, worker alive after each.
+The scoped tier refused all 13 names (the above plus `.inc`) through all four
+write sinks. Benign corpus, zero blocks: cache, tmp, session, upload, thumbnail,
+compiled-view, `.env.example`, `wp-config-sample.php`, `.htaccess`, `cacert.pem`
+and Keynote `.key` deletes, an internal `..`, `array_map('unlink', glob())`,
+`rmdir`, the deploy rename `.env.production` -> `.env`; `.jpg`/`.txt`/`.json`/`.log`/
+`.zip`/`.pdf`/`.csv`/`.inc`/`.png`/`.css` uploads; plain writes of `.php`/`.htaccess`
+with the scoped tier off; reads of the app's own config, data, `cacert.pem` and
+`/etc/hosts` under `secret_read = "detect"`.
+
+Not claimed: the delete guard does not treat `.htaccess` as sensitive, does not
+test "outside the document root" (Howdah does not know yours; `/tmp` and
+`/var/cache` are legitimate), and does not see a Stringable passed to
+`unlink`, `SplFileObject`, `ZipArchive::extractTo`, `fwrite` on an open handle,
+or a symlink with an innocent name. Double extensions (`shell.php.jpg`) and
+`.inc` are outside the upload tier. Migration and restore tools that move
+`wp-config.php`, and admin file managers that upload `.php`, need an
+`[[exceptions]]` entry. PHP-FPM and Apache were not run for this lab (the sinks
+are the same function-table swaps the Layer 3 sinks use under those SAPIs).
+
 ### Legacy-era sinks (1.5 additions)
 
 Seven cheaper sinks for functions and behaviours that mostly matter on the PHP

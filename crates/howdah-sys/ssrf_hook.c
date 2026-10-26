@@ -297,6 +297,14 @@ static void howdah_hook_file_get_contents(INTERNAL_FUNCTION_PARAMETERS) {
     howdah_orig_file_get_contents(INTERNAL_FUNCTION_PARAM_PASSTHRU);
 }
 
+/* Set by howdah_install_behavior_hooks from its `swap` mask: the scoped
+ * deny_php_writes tier is armed (fopen's write branch, and the generic-write
+ * sinks, consult the php-write callback), and the delete guard is armed (rename's
+ * SOURCE goes to the file-op hub). Config is process-static, so this is a pure
+ * perf gate: the Rust side re-checks the config on every call. */
+static int howdah_g_bhv_generic = 0;
+static int howdah_g_bhv_rename_src = 0;
+
 /* 1 iff a fopen mode string selects a write (any of w/a/x/c/+). Read-only ("r"
  * / "rb") yields 0. Scanned, never logged. */
 static int howdah_mode_is_write(const char *mode, size_t len) {
@@ -326,13 +334,13 @@ static void howdah_hook_fopen(INTERNAL_FUNCTION_PARAMETERS) {
         if (ssrf_should_block(Z_STRVAL_P(a), Z_STRLEN_P(a), 1, org, orglen)) {
             block = 1;
         }
-        if (!block && howdah_g_behavior_php_write && howdah_g_behavior_armed
-            && howdah_g_behavior_armed(NULL, HOWDAH_BEHAVIOR_PHP_WRITE)) {
+        if (!block && howdah_g_behavior_php_write && howdah_g_bhv_generic) {
             zval *m;
-            int is_write = 0;
+            int is_write = HOWDAH_WRITE_READ;
             HOWDAH_ARG(2, m);
-            if (HOWDAH_IS_STR(m)) {
-                is_write = howdah_mode_is_write(Z_STRVAL_P(m), Z_STRLEN_P(m));
+            if (HOWDAH_IS_STR(m)
+                && howdah_mode_is_write(Z_STRVAL_P(m), Z_STRLEN_P(m))) {
+                is_write = HOWDAH_WRITE_PLAIN;
             }
             if (howdah_g_behavior_php_write(NULL, org, orglen, Z_STRVAL_P(a),
                     Z_STRLEN_P(a), is_write) == HOWDAH_ACTION_BLOCK) {
@@ -362,34 +370,63 @@ static void howdah_hook_fopen(INTERNAL_FUNCTION_PARAMETERS) {
     howdah_orig_fopen(INTERNAL_FUNCTION_PARAM_PASSTHRU);
 }
 
-/* ---- Layer-4 php-write-only sinks ---------------------------------------- */
+/* ---- Layer-4 write sinks ------------------------------------------------- */
 /* These are NOT SSRF sinks: each writes a file to disk, so Layer-4 swaps them
  * (via howdah_install_behavior_hooks) to check the written target. `argn` is the
- * 1-based target argument; is_write_mode is always 1 (these are inherently
- * writes). Fail-open on a NULL callback / disarmed facet / non-string target. */
-#define HOWDAH_DEFINE_PHP_WRITE_SINK(cname, argn)                              \
+ * 1-based target argument; `wmode` the HOWDAH_WRITE_* class the Rust php_write
+ * callback tiers on (UPLOAD for move_uploaded_file: the always-on upload-write
+ * guard; PLAIN for the rest: the scoped deny_php_writes tier). Fail-open on a
+ * NULL callback / non-string target. */
+static int howdah_write_blocked(zval *t, int wmode) {
+    const char *org;
+    if (!howdah_g_behavior_php_write || !HOWDAH_IS_STR(t)) return 0;
+    org = howdah_current_script();
+    return howdah_g_behavior_php_write(NULL, org, org ? strlen(org) : 0,
+               Z_STRVAL_P(t), Z_STRLEN_P(t), wmode) == HOWDAH_ACTION_BLOCK;
+}
+
+#define HOWDAH_DEFINE_PHP_WRITE_SINK(cname, argn, wmode)                       \
     static howdah_zif howdah_orig_##cname = NULL;                              \
     static void howdah_hook_##cname(INTERNAL_FUNCTION_PARAMETERS) {            \
-        if (howdah_g_behavior_php_write && howdah_g_behavior_armed             \
-            && howdah_g_behavior_armed(NULL, HOWDAH_BEHAVIOR_PHP_WRITE)) {     \
-            zval *t;                                                           \
-            HOWDAH_ARG((argn), t);                                             \
-            if (HOWDAH_IS_STR(t)) {                                            \
-                const char *_org = howdah_current_script();                    \
-                if (howdah_g_behavior_php_write(NULL, _org,                    \
-                        _org ? strlen(_org) : 0, Z_STRVAL_P(t), Z_STRLEN_P(t), \
-                        1) == HOWDAH_ACTION_BLOCK) {                           \
-                    RETVAL_FALSE;                                              \
-                    return;                                                    \
-                }                                                              \
-            }                                                                  \
+        zval *t;                                                               \
+        HOWDAH_ARG((argn), t);                                                 \
+        if (howdah_write_blocked(t, (wmode))) {                                \
+            RETVAL_FALSE;                                                      \
+            return; /* neutralize: do not call the original */                 \
         }                                                                      \
         howdah_orig_##cname(INTERNAL_FUNCTION_PARAM_PASSTHRU);                 \
     }
 
-HOWDAH_DEFINE_PHP_WRITE_SINK(file_put_contents, 1)
-HOWDAH_DEFINE_PHP_WRITE_SINK(move_uploaded_file, 2)
-HOWDAH_DEFINE_PHP_WRITE_SINK(rename, 2)
+HOWDAH_DEFINE_PHP_WRITE_SINK(file_put_contents, 1, HOWDAH_WRITE_PLAIN)
+HOWDAH_DEFINE_PHP_WRITE_SINK(copy, 2, HOWDAH_WRITE_PLAIN)
+HOWDAH_DEFINE_PHP_WRITE_SINK(move_uploaded_file, 2, HOWDAH_WRITE_UPLOAD)
+
+/* rename has two operands that matter. Its SOURCE (arg1) is a delete in effect
+ * (moving wp-config.php away resets the app): it goes to the file-op hub as
+ * HOWDAH_FILE_OP_MOVE_SRC when the delete guard is armed. Its TARGET (arg2) is a
+ * write: the scoped deny_php_writes tier. Either neutralizes the call. */
+static howdah_zif howdah_orig_rename = NULL;
+static void howdah_hook_rename(INTERNAL_FUNCTION_PARAMETERS) {
+    zval *a;
+    if (howdah_g_bhv_rename_src) {
+        HOWDAH_ARG(1, a);
+        if (HOWDAH_IS_STR(a)
+            && howdah_file_firewall_check("rename", sizeof("rename") - 1,
+                                          Z_STRVAL_P(a), Z_STRLEN_P(a),
+                                          HOWDAH_FILE_OP_MOVE_SRC)) {
+            RETVAL_FALSE;
+            return;
+        }
+    }
+    if (howdah_g_bhv_generic) {
+        HOWDAH_ARG(2, a);
+        if (howdah_write_blocked(a, HOWDAH_WRITE_PLAIN)) {
+            RETVAL_FALSE;
+            return;
+        }
+    }
+    howdah_orig_rename(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
 
 /* ---- curl handle -> URL map ---------------------------------------------- */
 #define HOWDAH_CURLOPT_URL 10002
@@ -614,26 +651,39 @@ void howdah_install_ssrf_hooks(howdah_ssrf_decide_t decide, howdah_ssrf_armed_t 
 }
 
 /* Install the Layer-4 behavior hooks. Sets the shared behavior callback pointers
- * (used by both sink_hook.c and here) AND function-table-swaps the php-write
- * sinks file_put_contents / move_uploaded_file / rename. fopen is deliberately
- * NOT swapped here — howdah_install_ssrf_hooks already swapped it, and its
- * bespoke trampoline's php-write branch goes live as soon as these callbacks are
- * set. Call once at first RINIT, after howdah_install_ssrf_hooks, so fopen's original
- * handler is this file's SSRF trampoline (not re-captured). A NULL callback
- * leaves that facet unguarded (fail-open). */
+ * (used by both sink_hook.c and here) AND function-table-swaps the write sinks
+ * selected by `swap` (HOWDAH_BHV_SWAP_*): file_put_contents / copy (GENERIC),
+ * move_uploaded_file (GENERIC or UPLOAD), rename (GENERIC or RENAME_SRC). fopen is
+ * deliberately NOT swapped here — howdah_install_ssrf_hooks already swapped it,
+ * and its bespoke trampoline's php-write branch goes live once these callbacks
+ * are set and GENERIC is requested. Call once at first RINIT, after
+ * howdah_install_ssrf_hooks, so fopen's original handler is this file's SSRF
+ * trampoline (not re-captured). A NULL callback leaves that facet unguarded
+ * (fail-open). Swapping only what an armed facet needs keeps a default install
+ * (upload-write + delete guards) off the hot file_put_contents / copy paths. */
 void howdah_install_behavior_hooks(howdah_behavior_armed_t armed,
                                    howdah_behavior_exec_dir_t exec_dir,
                                    howdah_behavior_binary_t binary,
                                    howdah_behavior_egress_t egress,
-                                   howdah_behavior_php_write_t php_write) {
+                                   howdah_behavior_php_write_t php_write,
+                                   int swap) {
     howdah_g_behavior_armed = armed;
     howdah_g_behavior_exec_dir = exec_dir;
     howdah_g_behavior_binary = binary;
     howdah_g_behavior_egress = egress;
     howdah_g_behavior_php_write = php_write;
-    HOWDAH_SSRF_SWAP(file_put_contents, "file_put_contents");
-    HOWDAH_SSRF_SWAP(move_uploaded_file, "move_uploaded_file");
-    HOWDAH_SSRF_SWAP(rename, "rename");
+    howdah_g_bhv_generic = (swap & HOWDAH_BHV_SWAP_GENERIC) ? 1 : 0;
+    howdah_g_bhv_rename_src = (swap & HOWDAH_BHV_SWAP_RENAME_SRC) ? 1 : 0;
+    if (swap & HOWDAH_BHV_SWAP_GENERIC) {
+        HOWDAH_SSRF_SWAP(file_put_contents, "file_put_contents");
+        HOWDAH_SSRF_SWAP(copy, "copy");
+    }
+    if (swap & (HOWDAH_BHV_SWAP_GENERIC | HOWDAH_BHV_SWAP_UPLOAD)) {
+        HOWDAH_SSRF_SWAP(move_uploaded_file, "move_uploaded_file");
+    }
+    if (swap & (HOWDAH_BHV_SWAP_GENERIC | HOWDAH_BHV_SWAP_RENAME_SRC)) {
+        HOWDAH_SSRF_SWAP(rename, "rename");
+    }
 }
 
 /* Clear all per-request state: the curl handle->URL map, the resolution cache

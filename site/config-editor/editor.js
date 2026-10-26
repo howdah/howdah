@@ -172,7 +172,10 @@
   // are carried through verbatim.
   var BEHAVIOR_DEFAULTS = {
     enabled: true, mode: 'detect', observe: false, deny_php_writes: false,
-    deny_exec_dirs: [], allow_exec_binaries: [], allow_egress_hosts: []
+    deny_exec_dirs: [], allow_exec_binaries: [], allow_egress_hosts: [],
+    // The T5 file guards: delete + upload-write are enforced by default, secret
+    // reads are off. The form cannot write them, so any other value is refused.
+    delete_guard: 'block', upload_write: 'block', secret_read: 'off'
   };
   function behaviorIsDefault(b) {
     return Object.keys(b || {}).every(function (k) {

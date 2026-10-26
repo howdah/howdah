@@ -443,3 +443,65 @@ minor, 96 are the detect-only `log` line for a bare external DTD parsed with
   not accidental. `[sinks.xml] external_entities = "deny"` covers them.
 - A quadratic blow-up (one large entity referenced many times in the body, past
   the scanned prologue) and `LIBXML_XINCLUDE` file reads are not matched.
+
+# Layer 4 file guards (delete, dangerous write, secret read)
+
+Lab: `lab/integration/file_guard.sh` (driver) and `file_guard_container.sh` (one
+`howdah-dev-php<ver>` image per run: builds the real extension, harmless-shape
+fixtures only, no payload). No config beyond the shipped global `detect` unless a
+check says otherwise. 33 checks per version; run on PHP 5.4.16, 5.6.40, 7.0.33,
+7.4.33, 8.0.30, 8.1.34, 8.3.36 and 8.5.12RC1, all PASS with identical counts.
+
+| php | delete guard (refused \| benign performed \| benign false blocks) | upload-write | scoped write | secret read (detect: logged \| benign \| false positives) |
+|---|---|---|---|---|
+| 5.4.16 | 12 \| 18 \| 0 | 12 \| 10 \| 0 | 52 \| 32 \| 0 | 16 \| 32 \| 0 |
+| 5.6.40 | 12 \| 18 \| 0 | 12 \| 10 \| 0 | 52 \| 32 \| 0 | 16 \| 32 \| 0 |
+| 7.0.33 | 12 \| 18 \| 0 | 12 \| 10 \| 0 | 52 \| 32 \| 0 | 16 \| 32 \| 0 |
+| 7.4.33 | 12 \| 18 \| 0 | 12 \| 10 \| 0 | 52 \| 32 \| 0 | 16 \| 32 \| 0 |
+| 8.0.30 | 12 \| 18 \| 0 | 12 \| 10 \| 0 | 52 \| 32 \| 0 | 16 \| 32 \| 0 |
+| 8.1.34 | 12 \| 18 \| 0 | 12 \| 10 \| 0 | 52 \| 32 \| 0 | 16 \| 32 \| 0 |
+| 8.3.36 | 12 \| 18 \| 0 | 12 \| 10 \| 0 | 52 \| 32 \| 0 | 16 \| 32 \| 0 |
+| 8.5.12RC1 | 12 \| 18 \| 0 | 12 \| 10 \| 0 | 52 \| 32 \| 0 | 16 \| 32 \| 0 |
+
+What each column counts:
+
+- **delete guard** (on by default): 12 refusals (`unlink` of `wp-config.php`,
+  `.env`, `.env.production`, `id_rsa`, `privkey.pem`, `server.key`; an
+  `uploads/../` traversal to `wp-config.php`; `call_user_func('unlink', ...)`;
+  `rename` of `wp-config.php` and of `.env` away; `unlink` and `rmdir` through
+  nine `..` segments into `/etc`). Each returned `false`, the target survived,
+  the script continued, the line was `file_delete`/`block`/layer 4 carrying the
+  calling `file:line` and neither the file name nor the directory. 18 benign
+  deletes/renames all happened with zero events.
+- **upload-write** (on by default, no config): 12 real multipart uploads whose
+  destination is `.php`, `.phtml`, `.pht`, `.php3`, `.php4`, `.php5`, `.php7`,
+  `.PHAR`, `.Php`, `.htaccess`, `.user.ini` or `web.config` were refused
+  (`MOVE[false]`, nothing created, `php_write`/`block` at `up.php:4`, built-in
+  server alive for the next request). 10 benign uploads (`.jpg .txt .json .log
+  .zip .pdf .csv .inc .png .css`) moved into place with zero events.
+- **scoped write** (`deny_php_writes` + `deny_exec_dirs`, opt-in): 13 names
+  (`.php`, `.PHP`, `.phtml`, `.pht`, `.php3`/`4`/`5`/`7`, `.phar`, `.inc`,
+  `.htaccess`, `.user.ini`, `web.config`) across `file_put_contents`,
+  `fopen('w')`, `copy` and `rename` = 52 refusals; 8 benign names x 4 sinks = 32
+  writes performed; `.htaccess` outside the denied directory stays allowed. With
+  the tier off the same plain writes of `.php`/`.htaccess`/`.user.ini` are not
+  touched (zero events), which is why only `move_uploaded_file` is enforced
+  without configuration.
+- **secret read** (`secret_read = "detect"`): 4 functions x 4 secrets = 16 reads
+  logged as `secret_read`/`log` with the origin `file:line`, data still returned,
+  zero blocks. 32 benign reads (own config, data, CSS, `cacert.pem`, `id_rsa.pub`,
+  `.env.example`, an internal `..`, `/etc/hosts`) raised zero events. With the
+  default config (guard off) the same reads raise nothing. `"block"` refuses all
+  four functions; `observe = true` downgrades it to a proposal.
+
+Control checks in the same run: `delete_guard`/`upload_write` = `detect` log and
+proceed, `off`, a global `off`, `[behavior] mode = "off"` and `observe = true` each
+behave as documented, and an `[[exceptions]]` entry on `behavior.file_delete`
+scoped to a script lets only that script through. The log never contained a
+fixture marker. Every changed C file was also compiled with
+`gcc -fsyntax-only -Wall -Wextra -Werror` against each of the eight images'
+`php-config --includes` (clean).
+
+Not covered by this lab: php-fpm and Apache (same function-table swaps as the
+Layer 3 sinks), PHP 8.2 and 8.4 (not run), Windows. Known misses are listed in `docs/config.md` under `[behavior]` "Known
+limitations".

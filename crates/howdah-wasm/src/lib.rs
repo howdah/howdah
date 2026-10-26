@@ -281,12 +281,14 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&rule_catalog_json()).unwrap();
         let rules = v.as_array().unwrap();
         let names: Vec<&str> = rules.iter().map(|r| r["name"].as_str().unwrap()).collect();
-        assert_eq!(names.len(), 44, "{names:?}");
+        assert_eq!(names.len(), 46, "{names:?}");
         assert!(names.contains(&"max_parts") && names.contains(&"unserialize") && names.contains(&"ssrf"));
         // The T4 include/open wrapper-scheme firewall rules.
         assert!(names.contains(&"include_wrapper") && names.contains(&"file_open"));
         // Layer 4 (1.4) rule ids must reach the wasm catalog the config editor reads.
         assert!(names.contains(&"upload_exec") && names.contains(&"php_write"));
+        // The T5 delete and secret-read guards (Layer 4).
+        assert!(names.contains(&"file_delete") && names.contains(&"secret_read"));
         // The out-of-memory backstop's Layer-1 rules, plus the §4.7 recycle rule.
         assert!(names.contains(&"out_of_memory") && names.contains(&"startup_fatal"));
         assert!(names.contains(&"fatal_recycle"));

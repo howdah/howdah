@@ -304,12 +304,18 @@ unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
                     crate::ssrf_filter::armed,
                 );
             }
-            // File-op foundation: swap readfile and set the shared file decide
-            // callback (which lights up the fopen / file_get_contents branches).
+            // File-op hub: swap readfile/file (and unlink/rmdir when the T5
+            // delete guard is armed) and set the shared file decide callback
+            // (which lights up the fopen / file_get_contents / rename branches).
+            // `open_armed` already covers the delete and secret-read guards.
             // Stash the runtime session.save_path / error_log for the poison
             // check; empty values simply leave that category inert.
+            let delete_armed = core::howdah_behavior_armed(CTX, core::HOWDAH_BEHAVIOR_DELETE) != 0;
             if open_armed {
-                sys::howdah_install_file_hooks(crate::file_filter::decide);
+                sys::howdah_install_file_hooks(
+                    crate::file_filter::decide,
+                    if delete_armed { sys::HOWDAH_FILE_HOOK_DELETE } else { 0 },
+                );
                 let session = ini_string(b"session.save_path\0").unwrap_or_default();
                 let error_log = ini_string(b"error_log\0").unwrap_or_default();
                 core::howdah_set_runtime_paths(
@@ -321,21 +327,39 @@ unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
                 );
             }
             // Layer-4 behavior glue: install once if ANY facet is armed. This
-            // sets the five callbacks and swaps the php-write sinks
-            // (file_put_contents/move_uploaded_file/rename); the exec-dir and
-            // binary in-hook checks live in the command-exec / compile-file /
-            // opcode-handler hooks already installed at MINIT.
+            // sets the five callbacks and swaps only the write/rename sinks an
+            // armed facet needs: file_put_contents/copy for the scoped
+            // deny_php_writes tier, move_uploaded_file for it or the (default-on)
+            // upload-write guard, rename for it or the delete guard's source
+            // check. The exec-dir and binary in-hook checks live in the
+            // command-exec / compile-file / opcode-handler hooks already
+            // installed at MINIT.
+            let write_armed = core::howdah_behavior_armed(CTX, core::HOWDAH_BEHAVIOR_PHP_WRITE) != 0;
+            let upload_armed = core::howdah_behavior_armed(CTX, core::HOWDAH_BEHAVIOR_UPLOAD_WRITE) != 0;
             if core::howdah_behavior_armed(CTX, core::HOWDAH_BEHAVIOR_EXEC_DIR) != 0
                 || core::howdah_behavior_armed(CTX, core::HOWDAH_BEHAVIOR_BINARY) != 0
                 || core::howdah_behavior_armed(CTX, core::HOWDAH_BEHAVIOR_EGRESS) != 0
-                || core::howdah_behavior_armed(CTX, core::HOWDAH_BEHAVIOR_PHP_WRITE) != 0
+                || write_armed
+                || upload_armed
+                || delete_armed
             {
+                let mut swap = 0;
+                if write_armed {
+                    swap |= sys::HOWDAH_BHV_SWAP_GENERIC;
+                }
+                if upload_armed {
+                    swap |= sys::HOWDAH_BHV_SWAP_UPLOAD;
+                }
+                if delete_armed {
+                    swap |= sys::HOWDAH_BHV_SWAP_RENAME_SRC;
+                }
                 sys::howdah_install_behavior_hooks(
                     crate::behavior_filter::armed,
                     crate::behavior_filter::exec_dir,
                     crate::behavior_filter::binary,
                     crate::behavior_filter::egress,
                     crate::behavior_filter::php_write,
+                    swap,
                 );
             }
             // Legacy-era sinks (mail, preg_eval, create_function, assert,

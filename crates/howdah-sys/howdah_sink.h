@@ -41,11 +41,29 @@
 #define HOWDAH_LEGACY_XML             32
 #define HOWDAH_LEGACY_TLS             64
 
-/* File-op classes for the T4 file-open firewall (howdah_sink_check_open_at).
- * Values MUST mirror HOWDAH_FILE_OP_* in howdah-core/src/ffi.rs. The reusable
- * foundation (file_hook.c) that T5 extends adds further op codes here. */
-#define HOWDAH_FILE_OP_READ  0
-#define HOWDAH_FILE_OP_WRITE 1
+/* File-op classes for the file-op hub (howdah_sink_check_open_at): the T4 file-open
+ * firewall plus the T5 delete / secret-read guards. Values MUST mirror
+ * HOWDAH_FILE_OP_* in howdah-core/src/ffi.rs.
+ *   READ     fopen (read mode) / file_get_contents / readfile / file
+ *   WRITE    fopen (write mode)
+ *   DELETE   unlink / rmdir                      (T5 delete guard)
+ *   MOVE_SRC the SOURCE operand of rename        (T5 delete guard) */
+#define HOWDAH_FILE_OP_READ     0
+#define HOWDAH_FILE_OP_WRITE    1
+#define HOWDAH_FILE_OP_DELETE   2
+#define HOWDAH_FILE_OP_MOVE_SRC 3
+
+/* `is_write_mode` codes for the Layer-4 php-write callback (howdah_behavior_php_
+ * write_t). Mirror HOWDAH_WRITE_* in howdah-core/src/ffi.rs. UPLOAD is
+ * move_uploaded_file (the always-on upload tier); PLAIN is every other write
+ * sink (file_put_contents, write-mode fopen, rename, copy). */
+#define HOWDAH_WRITE_READ   0
+#define HOWDAH_WRITE_PLAIN  1
+#define HOWDAH_WRITE_UPLOAD 2
+
+/* howdah_install_file_hooks `ops` mask: which file-op sinks BESIDES the always-
+ * swapped read sinks (readfile, file) to swap. Mirrored in howdah-sys/src/lib.rs. */
+#define HOWDAH_FILE_HOOK_DELETE 1 /* unlink, rmdir (the delete guard is armed) */
 
 /* ---- T4 file-open firewall glue (file_hook.c) ---------------------------
  * The decision callback the file-op trampolines invoke per intercepted call:
@@ -55,13 +73,14 @@
 typedef int (*howdah_file_decide_t)(const char *name, size_t name_len,
                                     const char *target, size_t target_len, int op);
 
-/* Install the file-op foundation: set the shared decide callback and swap the
- * read-open sinks file_hook.c owns (readfile today; T5 extends this with
- * delete/rename/write-target trampolines on the SAME callback). The fopen /
+/* Install the file-op hub: set the shared decide callback and swap the sinks
+ * file_hook.c owns: the read sinks (readfile, file) always, and per `ops`
+ * (HOWDAH_FILE_HOOK_*) the delete sinks unlink / rmdir. The fopen /
  * file_get_contents trampolines live in ssrf_hook.c (already swapped there) and
- * call howdah_file_firewall_check directly. Call once at first RINIT when the
- * firewall is armed. A NULL callback leaves the firewall disarmed (fail-open). */
-void howdah_install_file_hooks(howdah_file_decide_t decide);
+ * call howdah_file_firewall_check directly; so does rename's SOURCE check. Call
+ * once at first RINIT when the hub is armed. A NULL callback leaves the hub
+ * disarmed (fail-open). */
+void howdah_install_file_hooks(howdah_file_decide_t decide, int ops);
 
 /* Shared file-open firewall check, exported for ssrf_hook.c's fopen /
  * file_get_contents trampolines (which are swapped there for SSRF/php-write).
@@ -77,6 +96,9 @@ int howdah_file_firewall_check(const char *name, size_t name_len,
 #define HOWDAH_BEHAVIOR_BINARY    1
 #define HOWDAH_BEHAVIOR_EGRESS    2
 #define HOWDAH_BEHAVIOR_PHP_WRITE 3
+#define HOWDAH_BEHAVIOR_UPLOAD_WRITE 4
+#define HOWDAH_BEHAVIOR_DELETE       5
+#define HOWDAH_BEHAVIOR_SECRET_READ  6
 
 /* ---- Layer-4 behavior glue callbacks ------------------------------------
  * Set by howdah_install_behavior_hooks(); reachable from both sink_hook.c and
@@ -101,9 +123,25 @@ extern howdah_behavior_binary_t    howdah_g_behavior_binary;
 extern howdah_behavior_egress_t    howdah_g_behavior_egress;
 extern howdah_behavior_php_write_t howdah_g_behavior_php_write;
 
-/* Set the five behavior callbacks AND swap file_put_contents / move_uploaded_file
- * / rename onto their php-write trampolines (fopen is already swapped by the SSRF
- * install, so its php-write branch goes live as soon as the callbacks are set).
+/* howdah_install_behavior_hooks `swap` mask: which write/rename sinks to swap.
+ * Mirrored in howdah-sys/src/lib.rs. Purely a perf gate (the Rust side
+ * re-checks the config on every call): a sink no armed facet needs is left
+ * alone, so a default install pays nothing on file_put_contents / copy.
+ *   GENERIC  the scoped deny_php_writes tier is armed: file_put_contents, copy,
+ *            rename's target, fopen's write branch and move_uploaded_file all
+ *            consult the php-write callback (PLAIN / UPLOAD).
+ *   UPLOAD   the upload-write guard is armed: move_uploaded_file only.
+ *   RENAME_SRC the delete guard is armed: rename's SOURCE goes to the file-op
+ *            hub (needs howdah_install_file_hooks for the callback). */
+#define HOWDAH_BHV_SWAP_GENERIC    1
+#define HOWDAH_BHV_SWAP_UPLOAD     2
+#define HOWDAH_BHV_SWAP_RENAME_SRC 4
+
+/* Set the five behavior callbacks AND swap the write/rename sinks selected by
+ * `swap` (HOWDAH_BHV_SWAP_*) onto their php-write trampolines: file_put_contents
+ * / copy (GENERIC), move_uploaded_file (GENERIC or UPLOAD), rename (GENERIC or
+ * RENAME_SRC). fopen is already swapped by the SSRF install, so its php-write
+ * branch goes live as soon as the callbacks are set and GENERIC is requested.
  * Call once at first RINIT, after howdah_install_ssrf_hooks (same first-RINIT
  * install as the phar/ssrf hooks, for shared-extension load order). Implemented
  * in ssrf_hook.c. A NULL callback leaves that facet unguarded (fail-open). */
@@ -111,6 +149,7 @@ void howdah_install_behavior_hooks(howdah_behavior_armed_t armed,
                                    howdah_behavior_exec_dir_t exec_dir,
                                    howdah_behavior_binary_t binary,
                                    howdah_behavior_egress_t egress,
-                                   howdah_behavior_php_write_t php_write);
+                                   howdah_behavior_php_write_t php_write,
+                                   int swap);
 
 #endif

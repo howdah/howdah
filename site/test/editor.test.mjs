@@ -155,6 +155,9 @@ test('load refuses any non-default [behavior] key: the form cannot write Layer 4
     '[behavior]\ndeny_exec_dirs = ["/var/www/uploads"]',
     '[behavior]\nallow_exec_binaries = ["/usr/bin/gs"]',
     '[behavior]\nallow_egress_hosts = ["api.example.com"]',
+    '[behavior]\ndelete_guard = "off"',
+    '[behavior]\nupload_write = "detect"',
+    '[behavior]\nsecret_read = "detect"',
   ]) {
     const v = validate(toml);
     assert.equal(v.ok, true, toml + ': ' + v.error);
@@ -162,6 +165,10 @@ test('load refuses any non-default [behavior] key: the form cannot write Layer 4
   }
   // Restating the defaults (as every shipped profile does) loses nothing.
   assert.ok(E.loadFromCanonical(validate('[behavior]\nmode = "detect"\n').config, catalog).state);
+  // ... including the T5 guard defaults (delete/upload-write block, secret-read off).
+  assert.ok(E.loadFromCanonical(
+    validate('[behavior]\ndelete_guard = "block"\nupload_write = "block"\nsecret_read = "off"\n').config, catalog).state);
+  assert.ok(E.loadFromCanonical(validate('').config, catalog).state);
   assert.deepEqual(E.loadFromCanonical(validate('[log]\npath = "/x"\n[behavior]\nobserve = true').config, catalog),
     { unsupported: ['log', 'behavior'] });
 });

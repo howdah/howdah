@@ -102,8 +102,20 @@ Four facets, each driven by its own setting:
   `proc_open`/`shell_exec`/`passthru` to a program not on the list.
 - **Expected egress** (`allow_egress_hosts`): an outbound connection to a host
   not on the list.
-- **`.php` writes** (`deny_php_writes`): writing a PHP file into a denied
-  directory, or from a script that lives in one.
+- **Executable and handler-config writes** (`deny_php_writes`): writing a
+  `.php`/`.phtml`/`.pht`/`.php3`-`.php8`/`.phar`/`.inc` file, or an
+  `.htaccess`, `.user.ini` or `web.config`, into a denied directory, or from a
+  script that lives in one.
+
+Three **file guards** carry their own mode and, unlike the facets above, two of
+them are **enforced by default**: the **delete guard** (`delete_guard`) refuses
+`unlink`/`rmdir`/`rename`-away of `wp-config.php`, `.env`, private keys, or a
+`..` traversal into a system directory (deleting `wp-config.php` resets
+WordPress to its installer); the **upload-write guard** (`upload_write`) refuses
+`move_uploaded_file` into a PHP-executable or handler-config name (the
+`.htaccess`/`.user.ini` re-enable trick). The **secret-read guard**
+(`secret_read`) is opt-in: off by default, `detect` observes reads of `.env`,
+`wp-config.php` and key files. See [docs/config.md](docs/config.md).
 
 `behavior.observe = true` logs what would have been flagged as `proposed` lines
 to help you build the lists; it never blocks and never edits config.

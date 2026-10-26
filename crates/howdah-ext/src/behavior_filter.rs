@@ -14,6 +14,7 @@ use std::ffi::{c_char, c_int, c_void, CStr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use howdah_core::ffi as core;
+use howdah_sys as sys;
 
 use crate::{module, origin, response};
 
@@ -135,8 +136,9 @@ pub(crate) unsafe extern "C" fn egress(
     .unwrap_or(core::HOWDAH_ALLOW)
 }
 
-/// `howdah_behavior_php_write_t`: `caller` is opening `target`; `is_write_mode`
-/// non-zero for write modes. 0 ALLOW / 1 LOG / 2 BLOCK; fail-open ALLOW.
+/// `howdah_behavior_php_write_t`: `caller` is opening `target`; `is_write_mode` is
+/// a `HOWDAH_WRITE_*` code (0 read, 1 plain write, 2 `move_uploaded_file`).
+/// 0 ALLOW / 1 LOG / 2 BLOCK; fail-open ALLOW.
 ///
 /// # Safety
 /// Invoked by the C trampolines; pointers valid for their lengths.
@@ -155,6 +157,9 @@ pub(crate) unsafe extern "C" fn php_write(
         module::maybe_begin();
         let sha = origin::sha_for(bytes(caller, caller_len));
         let (sp, sl) = origin::sha_args(&sha);
+        // The line of the write call in `caller` (same engine walk as the
+        // filename the C passed), for the `file:line` in the log.
+        let line = sys::howdah_sys_current_line();
         let action = core::howdah_behavior_check_php_write_at(
             module::CTX,
             caller,
@@ -164,6 +169,7 @@ pub(crate) unsafe extern "C" fn php_write(
             is_write_mode,
             sp,
             sl,
+            line,
         );
         flush_log_line();
         action

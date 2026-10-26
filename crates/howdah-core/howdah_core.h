@@ -97,6 +97,31 @@
 #define HOWDAH_FILE_OP_WRITE 1
 
 /**
+ * A delete: unlink / rmdir (T5 delete guard).
+ */
+#define HOWDAH_FILE_OP_DELETE 2
+
+/**
+ * The SOURCE operand of rename (T5 delete guard: moving wp-config.php away).
+ */
+#define HOWDAH_FILE_OP_MOVE_SRC 3
+
+/**
+ * A read-mode open: never a php_write finding.
+ */
+#define HOWDAH_WRITE_READ 0
+
+/**
+ * file_put_contents / write-mode fopen / rename / copy target.
+ */
+#define HOWDAH_WRITE_PLAIN 1
+
+/**
+ * move_uploaded_file target (the always-on upload tier).
+ */
+#define HOWDAH_WRITE_UPLOAD 2
+
+/**
  * Action code from `howdah_sink_check_xml`: the dangerous call is neutralized
  * by removing the dangerous libxml flags from its options argument (the glue
  * then runs the original call with the rewritten flags) instead of refusing
@@ -129,6 +154,21 @@
 #define HOWDAH_BEHAVIOR_EGRESS 2
 
 #define HOWDAH_BEHAVIOR_PHP_WRITE 3
+
+/**
+ * The enforced-by-default upload-write guard (`move_uploaded_file` only).
+ */
+#define HOWDAH_BEHAVIOR_UPLOAD_WRITE 4
+
+/**
+ * The enforced-by-default delete guard (`unlink`/`rmdir`/`rename` source).
+ */
+#define HOWDAH_BEHAVIOR_DELETE 5
+
+/**
+ * The opt-in secret-read guard (read-open sinks).
+ */
+#define HOWDAH_BEHAVIOR_SECRET_READ 6
 
 /**
  * Install nothing (nothing armed needs the hook; JIT stays on).
@@ -746,9 +786,10 @@ void howdah_set_runtime_paths(struct howdah_ctx *ctx,
                               size_t error_log_len);
 
 /**
- * 1 iff the include/open wrapper-or-poison firewall is armed (either mode is
- * not off). The glue reads this once per process to decide whether to install
- * the file-open trampolines; NULL ctx or panic is 0.
+ * 1 iff the file-op hub is armed: the include/open wrapper-or-poison firewall
+ * (either mode not off), or a T5 guard that shares it (the delete guard or the
+ * secret-read guard). The glue reads this once per process to decide whether to
+ * install the file-op trampolines; NULL ctx or panic is 0.
  *
  * # Safety
  * `ctx` NULL or live.
@@ -756,11 +797,14 @@ void howdah_set_runtime_paths(struct howdah_ctx *ctx,
 int32_t howdah_sink_open_armed(struct howdah_ctx *ctx);
 
 /**
- * File-open firewall check (T4) for fopen / file_get_contents / readfile.
- * `name` is the guarded function, `target` the resolved path/URL (scanned,
- * never logged), `op` a `HOWDAH_FILE_OP_*` class, `script`/`sha256` as the
- * other `_at` entry points. Returns 0 Allow / 1 Log / 2 Block; NULL ctx or
- * panic is 0 (fail-open). A hit is retrievable with `howdah_take_sink_log_line`.
+ * File-op hub check: the T4 file-open firewall for fopen / file_get_contents /
+ * readfile, plus the T5 Layer-4 guards (delete for unlink/rmdir/rename-source,
+ * secret-read for read opens). `name` is the guarded function, `target` the
+ * path/URL argument (scanned, never logged), `op` a `HOWDAH_FILE_OP_*` class,
+ * `script`/`line` the calling PHP script and line (logged on a Layer-4 hit and
+ * matched by `[[exceptions]]` `script` facets), `sha256` as the other `_at`
+ * entry points. Returns 0 Allow / 1 Log / 2 Block; NULL ctx or panic is 0
+ * (fail-open). A hit is retrievable with `howdah_take_sink_log_line`.
  *
  * # Safety
  * `ctx` NULL or live; every pointer NULL or valid for its length.
@@ -774,7 +818,8 @@ int32_t howdah_sink_check_open_at(struct howdah_ctx *ctx,
                                   const char *script,
                                   size_t script_len,
                                   const uint8_t *sha256,
-                                  size_t sha256_len);
+                                  size_t sha256_len,
+                                  uint32_t line);
 
 /**
  * `howdah_sink_check_ssrf` plus the executing script and optional SHA-256.
@@ -849,7 +894,8 @@ int32_t howdah_behavior_check_egress_at(struct howdah_ctx *ctx,
                                         size_t sha256_len);
 
 /**
- * `howdah_behavior_check_php_write` plus an optional SHA-256 of `caller`.
+ * `howdah_behavior_check_php_write` plus an optional SHA-256 of `caller` and the
+ * `line` of the call in `caller` (0 = unknown; logged as `file:line`).
  *
  * # Safety
  * `ctx` NULL or live; pointers NULL or valid for their lengths.
@@ -861,7 +907,8 @@ int32_t howdah_behavior_check_php_write_at(struct howdah_ctx *ctx,
                                            size_t target_len,
                                            int32_t is_write_mode,
                                            const uint8_t *sha256,
-                                           size_t sha256_len);
+                                           size_t sha256_len,
+                                           uint32_t line);
 
 /**
  * The startup plan for the include/eval hook: `mechanism | (reason << 4)`

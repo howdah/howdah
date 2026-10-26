@@ -437,7 +437,25 @@ pub enum RuleId {
     UploadExec,
     UnexpectedBinary,
     UnexpectedEgress,
+    /// An executable or handler-config file written to disk: a PHP-executable
+    /// extension (`.php`, `.phtml`, `.pht`, `.php3`..`.php8`, `.phar`, `.inc`) or
+    /// the handler-config set (`.htaccess`, `.user.ini`, `web.config`), the
+    /// durable upload bypass. Standard, Layer 4. Two tiers: the scoped
+    /// `deny_php_writes` facet (any write sink, under `deny_exec_dirs`) and the
+    /// enforced-by-default `[behavior] upload_write` guard (`move_uploaded_file`
+    /// into such a name). See `crate::behavior`.
     PhpWrite,
+    /// A sensitive file deleted (or renamed away): `wp-config.php`, `.env`,
+    /// `.env.*`, private-key material, or a `..` traversal that lands in a
+    /// system directory. Delete-to-takeover (WordPress falls back to its
+    /// installer without `wp-config.php`). Standard, Layer 4; enforced by default
+    /// (`[behavior] delete_guard`). See `crate::behavior`.
+    FileDelete,
+    /// A read of secret material (`.env`, `wp-config.php`, private keys, system
+    /// account files, or a `..` traversal into a system directory). Standard,
+    /// Layer 4; OFF by default (`[behavior] secret_read`, opt-in detect/block)
+    /// because apps legitimately read their own config. See `crate::behavior`.
+    SecretRead,
     MailInjection,
     PregEval,
     CreateFunction,
@@ -502,6 +520,8 @@ impl RuleId {
             | RuleId::UnexpectedBinary
             | RuleId::UnexpectedEgress
             | RuleId::PhpWrite
+            | RuleId::FileDelete
+            | RuleId::SecretRead
             | RuleId::MailInjection
             | RuleId::PregEval
             | RuleId::CreateFunction
@@ -520,7 +540,7 @@ impl RuleId {
 /// or miss one it accepts. `rule_catalog_covers_every_variant` fails to
 /// compile when a variant is added here but not to the list.
 pub fn rule_catalog() -> &'static [RuleId] {
-    const ALL: [RuleId; 44] = [
+    const ALL: [RuleId; 46] = [
         RuleId::MaxParts,
         RuleId::MaxFiles,
         RuleId::MaxPartHeaders,
@@ -552,6 +572,8 @@ pub fn rule_catalog() -> &'static [RuleId] {
         RuleId::UnexpectedBinary,
         RuleId::UnexpectedEgress,
         RuleId::PhpWrite,
+        RuleId::FileDelete,
+        RuleId::SecretRead,
         RuleId::MailInjection,
         RuleId::PregEval,
         RuleId::CreateFunction,
@@ -817,6 +839,8 @@ mod tests {
                 | RuleId::UnexpectedBinary
                 | RuleId::UnexpectedEgress
                 | RuleId::PhpWrite
+                | RuleId::FileDelete
+                | RuleId::SecretRead
                 | RuleId::MailInjection
                 | RuleId::PregEval
                 | RuleId::CreateFunction
@@ -832,7 +856,7 @@ mod tests {
                 | RuleId::FatalRecycle => {}
             }
         }
-        assert_eq!(rule_catalog().len(), 44);
+        assert_eq!(rule_catalog().len(), 46);
         let mut sorted = all.to_vec();
         sorted.sort();
         sorted.dedup();
@@ -862,6 +886,10 @@ mod tests {
         assert_eq!(RuleId::UnexpectedBinary.severity(), Severity::Standard);
         assert_eq!(RuleId::UnexpectedEgress.severity(), Severity::Standard);
         assert_eq!(RuleId::PhpWrite.severity(), Severity::Standard);
+        assert_eq!(RuleId::FileDelete.severity(), Severity::Standard);
+        assert_eq!(RuleId::SecretRead.severity(), Severity::Standard);
+        assert_eq!(serde_json::to_string(&RuleId::FileDelete).unwrap(), "\"file_delete\"");
+        assert_eq!(serde_json::to_string(&RuleId::SecretRead).unwrap(), "\"secret_read\"");
         for r in [
             RuleId::MailInjection,
             RuleId::PregEval,

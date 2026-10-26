@@ -98,6 +98,18 @@ pub const HOWDAH_SINK_TLS: i32 = 12;
 pub const HOWDAH_FILE_OP_READ: i32 = 0;
 /// A write-open: fopen (write/append/create mode).
 pub const HOWDAH_FILE_OP_WRITE: i32 = 1;
+/// A delete: unlink / rmdir (T5 delete guard).
+pub const HOWDAH_FILE_OP_DELETE: i32 = 2;
+/// The SOURCE operand of rename (T5 delete guard: moving wp-config.php away).
+pub const HOWDAH_FILE_OP_MOVE_SRC: i32 = 3;
+
+// `is_write_mode` codes for `howdah_behavior_check_php_write(_at)`.
+/// A read-mode open: never a php_write finding.
+pub const HOWDAH_WRITE_READ: i32 = 0;
+/// file_put_contents / write-mode fopen / rename / copy target.
+pub const HOWDAH_WRITE_PLAIN: i32 = 1;
+/// move_uploaded_file target (the always-on upload tier).
+pub const HOWDAH_WRITE_UPLOAD: i32 = 2;
 
 /// Action code from `howdah_sink_check_xml`: the dangerous call is neutralized
 /// by removing the dangerous libxml flags from its options argument (the glue
@@ -119,6 +131,12 @@ pub const HOWDAH_BEHAVIOR_EXEC_DIR: i32 = 0;
 pub const HOWDAH_BEHAVIOR_BINARY: i32 = 1;
 pub const HOWDAH_BEHAVIOR_EGRESS: i32 = 2;
 pub const HOWDAH_BEHAVIOR_PHP_WRITE: i32 = 3;
+/// The enforced-by-default upload-write guard (`move_uploaded_file` only).
+pub const HOWDAH_BEHAVIOR_UPLOAD_WRITE: i32 = 4;
+/// The enforced-by-default delete guard (`unlink`/`rmdir`/`rename` source).
+pub const HOWDAH_BEHAVIOR_DELETE: i32 = 5;
+/// The opt-in secret-read guard (read-open sinks).
+pub const HOWDAH_BEHAVIOR_SECRET_READ: i32 = 6;
 
 fn code(a: Action) -> i32 {
     match a {
@@ -264,7 +282,9 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::UploadExec => "possible executable or server-side code in an uploaded file",
         RuleId::UnexpectedBinary => "unexpected binary executed following an upload",
         RuleId::UnexpectedEgress => "possible unexpected outbound connection",
-        RuleId::PhpWrite => "PHP file written to disk",
+        RuleId::PhpWrite => "executable or handler-config file written to disk",
+        RuleId::FileDelete => "sensitive file deleted or moved away",
+        RuleId::SecretRead => "secret file read",
         RuleId::MailInjection => "mail() called with an unsafe sendmail option or header injection",
         RuleId::PregEval => "preg pattern with the /e modifier",
         RuleId::CreateFunction => "create_function invoked",
@@ -605,17 +625,85 @@ impl howdah_ctx {
         }
     }
 
-    /// Layer-3 file-open firewall (T4): a file-open sink (fopen/
-    /// file_get_contents/readfile) called with a dangerous wrapper
-    /// (`php://filter`/`data:`/`expect://`; remote is the SSRF sink's job) or a
-    /// poisonable local target. `op` is the operation class (read/write) for
-    /// future use; the verdict does not depend on it today. Target scanned,
-    /// never logged.
+    /// The file-op hub (T4 firewall + T5 guards). `op` is a `HOWDAH_FILE_OP_*`
+    /// class:
+    ///
+    /// * `DELETE` (unlink/rmdir) and `MOVE_SRC` (rename's source): the Layer-4
+    ///   delete guard only (`file_delete`).
+    /// * `READ`/`WRITE` opens (fopen/file_get_contents/readfile/file): the T3/T4
+    ///   Layer-3 firewall (dangerous wrapper, poisonable local target; remote is
+    ///   the SSRF sink's job), then for `READ` the Layer-4 secret-read guard.
+    ///
+    /// `script_raw`/`line` are the calling PHP script and line (origin; empty/0
+    /// when unknown); they are only turned into text on a hit. The target is
+    /// scanned, never logged; a Layer-4 line names a path CATEGORY and the origin.
     fn open_check(
         &mut self,
         name: &[u8],
         target: &[u8],
-        _op: i32,
+        op: i32,
+        script_raw: &[u8],
+        line: u32,
+        sha: Option<&[u8; 32]>,
+    ) -> Action {
+        let script_str = std::str::from_utf8(script_raw).unwrap_or("");
+        let script = (!script_str.is_empty()).then_some(script_str);
+        if op == HOWDAH_FILE_OP_DELETE || op == HOWDAH_FILE_OP_MOVE_SRC {
+            return self.file_guard(name, target, op, script_str, line, script, sha);
+        }
+        let act = self.open_firewall(name, target, script, sha);
+        if act != Action::Allow || op != HOWDAH_FILE_OP_READ {
+            return act;
+        }
+        self.file_guard(name, target, op, script_str, line, script, sha)
+    }
+
+    /// The Layer-4 file guards that classify a path argument: the delete guard
+    /// (`DELETE`/`MOVE_SRC`) and the secret-read guard (`READ`). Cheap early-out
+    /// when the guard's own mode is off.
+    #[allow(clippy::too_many_arguments)]
+    fn file_guard(
+        &mut self,
+        name: &[u8],
+        target: &[u8],
+        op: i32,
+        file: &str,
+        line: u32,
+        script: Option<&str>,
+        sha: Option<&[u8; 32]>,
+    ) -> Action {
+        let b = &self.config.behavior;
+        let armed = if op == HOWDAH_FILE_OP_READ {
+            b.secret_read != Mode::Off
+        } else {
+            b.delete_guard != Mode::Off
+        };
+        if !armed {
+            return Action::Allow;
+        }
+        let Ok(t) = std::str::from_utf8(target) else {
+            return Action::Allow; // a non-UTF-8 path is never one of the named secrets
+        };
+        // The guarded function's name (a short ASCII constant); no allocation.
+        let n = std::str::from_utf8(&name[..name.len().min(32)]).unwrap_or("?");
+        let origin = crate::behavior::Origin { file, line };
+        if op == HOWDAH_FILE_OP_READ {
+            self.behavior_check(|cfg| crate::behavior::secret_read_hit(origin, n, t, cfg), script, sha)
+        } else {
+            let is_move = op == HOWDAH_FILE_OP_MOVE_SRC;
+            self.behavior_check(|cfg| crate::behavior::delete_hit(origin, n, t, is_move, cfg), script, sha)
+        }
+    }
+
+    /// Layer-3 file-open firewall (T4): a file-open sink (fopen/
+    /// file_get_contents/readfile) called with a dangerous wrapper
+    /// (`php://filter`/`data:`/`expect://`; remote is the SSRF sink's job) or a
+    /// poisonable local target. The verdict does not depend on the read/write
+    /// class. Target scanned, never logged.
+    fn open_firewall(
+        &mut self,
+        name: &[u8],
+        target: &[u8],
         script: Option<&str>,
         sha: Option<&[u8; 32]>,
     ) -> Action {
@@ -853,9 +941,12 @@ impl howdah_ctx {
         if mode == Mode::Off {
             return Action::Allow;
         }
-        let Some(crate::behavior::BehaviorHit { rule, detail }) = hit(&self.config.behavior) else {
+        let Some(crate::behavior::BehaviorHit { rule, detail, mode: own }) = hit(&self.config.behavior) else {
             return Action::Allow;
         };
+        // The file guards carry their own mode (enforced by default); the other
+        // facets follow the section mode. The section mode already gated Off above.
+        let mode = own.unwrap_or(mode);
         if let Some(m) = self.excepted(rule, script, sha, None) {
             self.note_excepted_sink(rule, &m);
             return Action::Allow;
@@ -1696,6 +1787,9 @@ pub unsafe extern "C" fn howdah_behavior_armed(ctx: *mut howdah_ctx, facet: i32)
             HOWDAH_BEHAVIOR_BINARY => scoped || !b.allow_exec_binaries.is_empty(),
             HOWDAH_BEHAVIOR_EGRESS => scoped || !b.allow_egress_hosts.is_empty(),
             HOWDAH_BEHAVIOR_PHP_WRITE => b.deny_php_writes,
+            HOWDAH_BEHAVIOR_UPLOAD_WRITE => b.upload_write != Mode::Off,
+            HOWDAH_BEHAVIOR_DELETE => b.delete_guard != Mode::Off,
+            HOWDAH_BEHAVIOR_SECRET_READ => b.secret_read != Mode::Off,
             _ => false,
         })
     }))
@@ -1806,7 +1900,9 @@ pub unsafe extern "C" fn howdah_behavior_check_php_write(
     catch_unwind(AssertUnwindSafe(|| {
         let c = copy_str(caller, caller_len);
         let t = copy_str(target, target_len);
-        code((*ctx).behavior_check(|cfg| crate::behavior::php_write_hit(&c, &t, is_write_mode != 0, cfg), None, None))
+        let op = crate::behavior::WriteOp::from_code(is_write_mode);
+        let org = crate::behavior::Origin { file: &c, line: 0 };
+        code((*ctx).behavior_check(|cfg| crate::behavior::php_write_hit(org, &t, op, cfg), None, None))
     }))
     .unwrap_or_else(|_| {
         report_panic(ctx);
@@ -2321,9 +2417,10 @@ pub unsafe extern "C" fn howdah_set_runtime_paths(
     }));
 }
 
-/// 1 iff the include/open wrapper-or-poison firewall is armed (either mode is
-/// not off). The glue reads this once per process to decide whether to install
-/// the file-open trampolines; NULL ctx or panic is 0.
+/// 1 iff the file-op hub is armed: the include/open wrapper-or-poison firewall
+/// (either mode not off), or a T5 guard that shares it (the delete guard or the
+/// secret-read guard). The glue reads this once per process to decide whether to
+/// install the file-op trampolines; NULL ctx or panic is 0.
 ///
 /// # Safety
 /// `ctx` NULL or live.
@@ -2335,19 +2432,27 @@ pub unsafe extern "C" fn howdah_sink_open_armed(ctx: *mut howdah_ctx) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let c = &*ctx;
         let g = c.config.mode;
+        let b = &c.config.behavior;
         i32::from(
             c.config.sinks.include_wrapper_mode(g) != Mode::Off
-                || c.config.sinks.include_poison_mode(g) != Mode::Off,
+                || c.config.sinks.include_poison_mode(g) != Mode::Off
+                // T5: the delete (unlink/rmdir) and secret-read guards share the
+                // file-op hub, so arming either arms the hub.
+                || b.delete_guard_mode(g) != Mode::Off
+                || b.secret_read_mode(g) != Mode::Off,
         )
     }))
     .unwrap_or(0)
 }
 
-/// File-open firewall check (T4) for fopen / file_get_contents / readfile.
-/// `name` is the guarded function, `target` the resolved path/URL (scanned,
-/// never logged), `op` a `HOWDAH_FILE_OP_*` class, `script`/`sha256` as the
-/// other `_at` entry points. Returns 0 Allow / 1 Log / 2 Block; NULL ctx or
-/// panic is 0 (fail-open). A hit is retrievable with `howdah_take_sink_log_line`.
+/// File-op hub check: the T4 file-open firewall for fopen / file_get_contents /
+/// readfile, plus the T5 Layer-4 guards (delete for unlink/rmdir/rename-source,
+/// secret-read for read opens). `name` is the guarded function, `target` the
+/// path/URL argument (scanned, never logged), `op` a `HOWDAH_FILE_OP_*` class,
+/// `script`/`line` the calling PHP script and line (logged on a Layer-4 hit and
+/// matched by `[[exceptions]]` `script` facets), `sha256` as the other `_at`
+/// entry points. Returns 0 Allow / 1 Log / 2 Block; NULL ctx or panic is 0
+/// (fail-open). A hit is retrievable with `howdah_take_sink_log_line`.
 ///
 /// # Safety
 /// `ctx` NULL or live; every pointer NULL or valid for its length.
@@ -2364,24 +2469,28 @@ pub unsafe extern "C" fn howdah_sink_check_open_at(
     script_len: usize,
     sha256: *const u8,
     sha256_len: usize,
+    line: u32,
 ) -> i32 {
     if ctx.is_null() {
         return HOWDAH_ALLOW;
     }
     let r = catch_unwind(AssertUnwindSafe(|| {
-        let n: &[u8] = if name.is_null() || name_len == 0 {
-            &[]
-        } else {
-            std::slice::from_raw_parts(name as *const u8, name_len)
+        let slice = |p: *const c_char, n: usize| -> &[u8] {
+            if p.is_null() || n == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts(p as *const u8, n)
+            }
         };
-        let t: &[u8] = if target.is_null() || target_len == 0 {
-            &[]
-        } else {
-            std::slice::from_raw_parts(target as *const u8, target_len)
-        };
-        let s = copy_script(script, script_len);
         let h = copy_sha(sha256, sha256_len);
-        code((*ctx).open_check(n, t, op, s.as_deref(), h.as_ref()))
+        code((*ctx).open_check(
+            slice(name, name_len),
+            slice(target, target_len),
+            op,
+            slice(script, script_len),
+            line,
+            h.as_ref(),
+        ))
     }));
     r.unwrap_or_else(|_| {
         report_panic(ctx);
@@ -2558,7 +2667,8 @@ pub unsafe extern "C" fn howdah_behavior_check_egress_at(
     })
 }
 
-/// `howdah_behavior_check_php_write` plus an optional SHA-256 of `caller`.
+/// `howdah_behavior_check_php_write` plus an optional SHA-256 of `caller` and the
+/// `line` of the call in `caller` (0 = unknown; logged as `file:line`).
 ///
 /// # Safety
 /// `ctx` NULL or live; pointers NULL or valid for their lengths.
@@ -2573,6 +2683,7 @@ pub unsafe extern "C" fn howdah_behavior_check_php_write_at(
     is_write_mode: i32,
     sha256: *const u8,
     sha256_len: usize,
+    line: u32,
 ) -> i32 {
     if ctx.is_null() {
         return HOWDAH_ALLOW;
@@ -2582,8 +2693,10 @@ pub unsafe extern "C" fn howdah_behavior_check_php_write_at(
         let t = copy_str(target, target_len);
         let h = copy_sha(sha256, sha256_len);
         let s = (!c.is_empty()).then_some(c.as_str());
+        let op = crate::behavior::WriteOp::from_code(is_write_mode);
+        let org = crate::behavior::Origin { file: &c, line };
         code((*ctx).behavior_check(
-            |cfg| crate::behavior::php_write_hit(&c, &t, is_write_mode != 0, cfg),
+            |cfg| crate::behavior::php_write_hit(org, &t, op, cfg),
             s,
             h.as_ref(),
         ))
@@ -3369,6 +3482,26 @@ mod tests {
                 0,
                 std::ptr::null(),
                 0,
+                0,
+            )
+        }
+    }
+
+    /// `open` with a calling script and line (origin attribution).
+    fn open_from(c: *mut howdah_ctx, name: &str, target: &[u8], op: i32, script: &str, line: u32) -> i32 {
+        unsafe {
+            howdah_sink_check_open_at(
+                c,
+                name.as_ptr() as *const c_char,
+                name.len(),
+                target.as_ptr() as *const c_char,
+                target.len(),
+                op,
+                script.as_ptr() as *const c_char,
+                script.len(),
+                std::ptr::null(),
+                0,
+                line,
             )
         }
     }
@@ -3449,7 +3582,9 @@ mod tests {
 
     #[test]
     fn firewall_off_disables_both() {
-        let c = init("[sinks.include]\nwrapper = \"off\"\npoison = \"off\"");
+        // The hub also serves the T5 delete / secret-read guards, so those are
+        // switched off too for "nothing armed".
+        let c = init("[sinks.include]\nwrapper = \"off\"\npoison = \"off\"\n[behavior]\ndelete_guard = \"off\"");
         begin(c);
         assert_eq!(sink(c, HOWDAH_SINK_INCLUDE, "include", b"php://filter/resource=x"), HOWDAH_ALLOW);
         assert_eq!(open(c, "fopen", b"php://filter/resource=x", HOWDAH_FILE_OP_READ), HOWDAH_ALLOW);
@@ -3458,6 +3593,196 @@ mod tests {
         // Armed by default.
         let c = init("mode = \"detect\"");
         assert_eq!(unsafe { howdah_sink_open_armed(c) }, 1);
+        unsafe { howdah_free(c) };
+    }
+
+    // ---- T5 delete / secret-read / upload-write guards ------------------------
+
+    const WP_PLUGIN: &str = "/var/www/html/wp-content/plugins/x/x.php";
+
+    #[test]
+    fn delete_guard_blocks_by_default_and_logs_origin_not_target() {
+        // Shipped posture: global detect, [behavior] untouched -> the guard blocks.
+        let c = init("mode = \"detect\"");
+        begin(c);
+        for (name, target, op) in [
+            ("unlink", &b"/var/www/html/wp-config.php"[..], HOWDAH_FILE_OP_DELETE),
+            ("unlink", b"/var/www/html/.env", HOWDAH_FILE_OP_DELETE),
+            ("unlink", b"/var/www/html/uploads/../../../../etc/cron.d/x", HOWDAH_FILE_OP_DELETE),
+            ("rmdir", b"/var/www/html/../../../../etc/ssl", HOWDAH_FILE_OP_DELETE),
+            ("rename", b"/var/www/html/wp-config.php", HOWDAH_FILE_OP_MOVE_SRC),
+        ] {
+            assert_eq!(open_from(c, name, target, op, WP_PLUGIN, 42), HOWDAH_BLOCK, "{name} {:?}", String::from_utf8_lossy(target));
+            let line = take_sink(c).expect("line");
+            assert!(line.contains("\"rule\":\"file_delete\"") && line.contains("\"action\":\"block\"") && line.contains("\"layer\":4"), "{line}");
+            assert!(line.contains(&format!("{name} ")) && line.contains("x.php:42"), "origin/function missing: {line}");
+            assert!(!line.contains("wp-config.php\"") && !line.contains("/etc/") && !line.contains(".env"), "target leaked: {line}");
+        }
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn delete_guard_benign_corpus_allows() {
+        let c = init("mode = \"detect\"");
+        begin(c);
+        for t in [
+            &b"/tmp/phpAbC123"[..],
+            b"/var/lib/php/sessions/sess_x",
+            b"/var/www/html/wp-content/cache/x.html",
+            b"/var/www/html/wp-content/uploads/2026/10/a.jpg",
+            b"/var/www/html/wp-content/upgrade/tmp",
+            b"/var/www/app/storage/framework/views/a.php",
+            b"/var/www/app/.env.example",
+            b"/var/www/html/.maintenance",
+            b"/var/www/shared/../releases/1/cache/x",
+        ] {
+            assert_eq!(open_from(c, "unlink", t, HOWDAH_FILE_OP_DELETE, WP_PLUGIN, 1), HOWDAH_ALLOW, "{:?}", String::from_utf8_lossy(t));
+            assert_eq!(open_from(c, "rmdir", t, HOWDAH_FILE_OP_DELETE, WP_PLUGIN, 1), HOWDAH_ALLOW);
+            assert!(take_sink(c).is_none());
+        }
+        // rename SOURCE: ordinary renames (including a .env.production -> .env deploy) pass.
+        for t in [&b"/var/www/app/.env.production"[..], b"/var/www/html/cache/a.tmp", b"/var/www/html/uploads/a.jpg"] {
+            assert_eq!(open_from(c, "rename", t, HOWDAH_FILE_OP_MOVE_SRC, WP_PLUGIN, 1), HOWDAH_ALLOW);
+        }
+        // The T3/T4 firewall behaviour is unchanged for the read/write ops.
+        assert_eq!(open(c, "fopen", b"/var/www/html/data.json", HOWDAH_FILE_OP_READ), HOWDAH_ALLOW);
+        assert_eq!(open(c, "fopen", b"/var/www/html/.env", HOWDAH_FILE_OP_READ), HOWDAH_ALLOW); // secret_read is off
+        assert!(take_sink(c).is_none());
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn delete_guard_modes_observe_exceptions_and_master_switches() {
+        let target = b"/var/www/html/wp-config.php";
+        let run = |toml: &str| {
+            let c = init(toml);
+            begin(c);
+            let a = open_from(c, "unlink", target, HOWDAH_FILE_OP_DELETE, "/var/www/migrate/installer.php", 3);
+            let l = take_sink(c);
+            unsafe { howdah_free(c) };
+            (a, l)
+        };
+        assert_eq!(run("[behavior]\ndelete_guard = \"detect\"").0, HOWDAH_LOG);
+        assert_eq!(run("[behavior]\ndelete_guard = \"off\"").0, HOWDAH_ALLOW);
+        // Independent of the (log-only by default) section mode.
+        assert_eq!(run("[behavior]\nmode = \"detect\"").0, HOWDAH_BLOCK);
+        // observe is propose-only: never a block, line marked proposed.
+        let (a, l) = run("[behavior]\nobserve = true");
+        assert_eq!(a, HOWDAH_LOG);
+        assert!(l.unwrap().contains("proposed:"));
+        // Layer-4 master switches.
+        assert_eq!(run("mode = \"off\"").0, HOWDAH_ALLOW);
+        assert_eq!(run("[behavior]\nenabled = false").0, HOWDAH_ALLOW);
+        assert_eq!(run("[behavior]\nmode = \"off\"").0, HOWDAH_ALLOW);
+        // A scoped exception on the executing script lets a migration tool through.
+        let ex = "[[exceptions]]\nrule = \"behavior.file_delete\"\nscript = \"/var/www/migrate/**\"\nreason = \"migration installer\"\n";
+        assert_eq!(run(ex).0, HOWDAH_ALLOW);
+        // ... but not a different script.
+        let c = init(ex);
+        begin(c);
+        assert_eq!(open_from(c, "unlink", target, HOWDAH_FILE_OP_DELETE, WP_PLUGIN, 3), HOWDAH_BLOCK);
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn secret_read_is_off_by_default_and_opt_in() {
+        let target = b"/var/www/html/.env";
+        let read = |toml: &str| {
+            let c = init(toml);
+            begin(c);
+            let a = open_from(c, "file_get_contents", target, HOWDAH_FILE_OP_READ, WP_PLUGIN, 9);
+            let l = take_sink(c);
+            unsafe { howdah_free(c) };
+            (a, l)
+        };
+        assert_eq!(read("").0, HOWDAH_ALLOW);
+        assert_eq!(read("[behavior]\nmode = \"block\"").0, HOWDAH_ALLOW); // still off
+        let (a, l) = read("[behavior]\nsecret_read = \"detect\"");
+        assert_eq!(a, HOWDAH_LOG);
+        let l = l.unwrap();
+        assert!(l.contains("\"rule\":\"secret_read\"") && l.contains("\"layer\":4") && l.contains("\"action\":\"log\""), "{l}");
+        assert!(l.contains("file_get_contents reads a dotenv file at /var/www/html/wp-content/plugins/x/x.php:9"), "{l}");
+        assert_eq!(read("[behavior]\nsecret_read = \"block\"").0, HOWDAH_BLOCK);
+        // observe downgrades even an explicit block.
+        assert_eq!(read("[behavior]\nsecret_read = \"block\"\nobserve = true").0, HOWDAH_LOG);
+        assert_eq!(read("mode = \"off\"\n[behavior]\nsecret_read = \"block\"").0, HOWDAH_ALLOW);
+        // A write-mode open of .env is not a read.
+        let c = init("[behavior]\nsecret_read = \"block\"");
+        begin(c);
+        assert_eq!(open(c, "fopen", target, HOWDAH_FILE_OP_WRITE), HOWDAH_ALLOW);
+        // The firewall wins (and logs file_open) when both would fire.
+        assert_eq!(open(c, "fopen", b"/proc/self/environ", HOWDAH_FILE_OP_READ), HOWDAH_BLOCK);
+        assert!(take_sink(c).unwrap().contains("file_open"));
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn behavior_armed_facets_for_the_file_guards() {
+        let armed = |toml: &str, f: i32| {
+            let c = init(toml);
+            let r = unsafe { howdah_behavior_armed(c, f) };
+            unsafe { howdah_free(c) };
+            r
+        };
+        // Defaults: upload-write and delete on, secret-read off, scoped write off.
+        assert_eq!(armed("", HOWDAH_BEHAVIOR_UPLOAD_WRITE), 1);
+        assert_eq!(armed("", HOWDAH_BEHAVIOR_DELETE), 1);
+        assert_eq!(armed("", HOWDAH_BEHAVIOR_SECRET_READ), 0);
+        assert_eq!(armed("", HOWDAH_BEHAVIOR_PHP_WRITE), 0);
+        assert_eq!(armed("[behavior]\nsecret_read = \"detect\"", HOWDAH_BEHAVIOR_SECRET_READ), 1);
+        assert_eq!(armed("[behavior]\ndelete_guard = \"off\"", HOWDAH_BEHAVIOR_DELETE), 0);
+        assert_eq!(armed("[behavior]\nupload_write = \"off\"", HOWDAH_BEHAVIOR_UPLOAD_WRITE), 0);
+        assert_eq!(armed("mode = \"off\"", HOWDAH_BEHAVIOR_DELETE), 0);
+    }
+
+    #[test]
+    fn upload_write_guard_blocks_by_default_without_config() {
+        let c = init("mode = \"detect\"");
+        begin(c);
+        let call = |caller: &str, target: &str, mode: i32| unsafe {
+            howdah_behavior_check_php_write_at(
+                c,
+                caller.as_ptr() as _,
+                caller.len(),
+                target.as_ptr() as _,
+                target.len(),
+                mode,
+                std::ptr::null(),
+                0,
+                77,
+            )
+        };
+        let up = "/var/www/html/upload.php";
+        for t in ["/var/www/html/uploads/s.php", "/var/www/html/uploads/.htaccess", "/var/www/html/uploads/.user.ini", "/x/s.phtml", "/x/s.phar", "/x/web.config"] {
+            assert_eq!(call(up, t, HOWDAH_WRITE_UPLOAD), HOWDAH_BLOCK, "{t}");
+            let line = take_sink(c).expect("line");
+            assert!(line.contains("\"rule\":\"php_write\"") && line.contains("\"action\":\"block\"") && line.contains("upload.php:77"), "{line}");
+            assert!(!line.contains("uploads") && !line.contains(".htaccess") && !line.contains("s.php\""), "target leaked: {line}");
+        }
+        // Benign uploads and every plain write sink (no scoped tier) are allowed.
+        for t in ["/x/a.jpg", "/x/a.pdf", "/x/a.txt", "/x/a.json", "/x/a.zip", "/x/a.inc"] {
+            assert_eq!(call(up, t, HOWDAH_WRITE_UPLOAD), HOWDAH_ALLOW, "{t}");
+        }
+        for t in ["/x/s.php", "/x/.htaccess", "/x/.user.ini"] {
+            assert_eq!(call(up, t, HOWDAH_WRITE_PLAIN), HOWDAH_ALLOW, "{t}");
+            assert_eq!(call(up, t, HOWDAH_WRITE_READ), HOWDAH_ALLOW, "{t}");
+        }
+        assert!(take_sink(c).is_none());
+        unsafe { howdah_free(c) };
+        // Switchable.
+        let c = init("[behavior]\nupload_write = \"off\"");
+        begin(c);
+        assert_eq!(
+            unsafe { howdah_behavior_check_php_write(c, "/a.php".as_ptr() as _, 6, "/x/s.php".as_ptr() as _, 8, HOWDAH_WRITE_UPLOAD) },
+            HOWDAH_ALLOW
+        );
+        unsafe { howdah_free(c) };
+        let c = init("[behavior]\nupload_write = \"detect\"");
+        begin(c);
+        assert_eq!(
+            unsafe { howdah_behavior_check_php_write(c, "/a.php".as_ptr() as _, 6, "/x/s.php".as_ptr() as _, 8, HOWDAH_WRITE_UPLOAD) },
+            HOWDAH_LOG
+        );
         unsafe { howdah_free(c) };
     }
 
@@ -4420,6 +4745,7 @@ mod tests {
                 target.len(),
                 1,
                 std::ptr::null(),
+                0,
                 0,
             )
         };

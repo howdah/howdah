@@ -14,6 +14,7 @@ use howdah_sys as sys;
 
 use crate::input_filter;
 use crate::logsink;
+use crate::oom_filter;
 use crate::refusal::{Deferred, Delivery, Verdict};
 use crate::response;
 use crate::rfc1867;
@@ -71,6 +72,8 @@ static mut DISP_INCLUDE_HOOK: Option<CString> = None;
 static mut DISP_LEGACY: Option<CString> = None;
 /// The out-of-memory backstop state decided at MINIT (phpinfo row).
 static mut DISP_OOM: Option<CString> = None;
+/// The §4.7 recycle-facet state decided at MINIT (phpinfo row).
+static mut DISP_RECYCLE: Option<CString> = None;
 /// `[sinks.xml] external_entities = "deny"` in force (decided once).
 static mut XML_DENY: bool = false;
 
@@ -505,6 +508,14 @@ unsafe fn exec_dir_decision() -> Option<(c_int, String)> {
 /// Called by PHP once per request at shutdown (NTS).
 unsafe extern "C" fn post_deactivate() -> c_int {
     let _ = catch_unwind(AssertUnwindSafe(|| clear_request_state()));
+    // §4.7 recycle facet: if this request raised a poisoning-class fatal while
+    // the facet was enforcing, the error-cb marked the worker tainted. Now that
+    // request teardown is done (PHP has rendered and, on SAPIs that flush here,
+    // delivered its 500), end the worker so it never serves another request on
+    // the state CVE-2026-109619 leaves behind. `_exit(0)` from the C shim; a
+    // no-op when nothing tainted the worker. Runs unconditionally at shutdown,
+    // so a skipped RSHUTDOWN still reaches it. MUST be last.
+    sys::howdah_oom_recycle_if_tainted();
     SUCCESS
 }
 
@@ -869,9 +880,11 @@ unsafe extern "C" fn minit(type_: c_int, module_number: c_int) -> c_int {
     SUCCESS
 }
 
-/// Decide the three OOM-backstop gates, install the hook when all pass, and set
-/// the phpinfo row either way. Web SAPIs only; unpatched engine only
-/// (upstream's fix registers `memory_hard_limit_percent`); `oom_exit` on.
+/// Decide the OOM-backstop (§4.6) and recycle-facet (§4.7) gates, arm the shared
+/// `zend_error_cb` decide path, install the hook when either is armed, and set
+/// both phpinfo rows. Web SAPIs only; unpatched engine only (upstream's fix
+/// registers `memory_hard_limit_percent`). The backstop wants `oom_exit` on (the
+/// default); the recycle facet wants `recycle_on_fatal` on (off by default).
 ///
 /// # Safety
 /// Called from `minit` once per process; `CTX` is set.
@@ -885,18 +898,69 @@ unsafe fn install_oom_backstop() {
     // a global `mode = off` (or the `on_invalid_config = "off"` fallback)
     // disables the backstop like every other layer. `detect` keeps it armed.
     let exit_on = !ctx_null && core::howdah_oom_exit(CTX) != 0;
-    let armed_cfg = !ctx_null && core::howdah_oom_armed(CTX) != 0;
+    let oom_armed_cfg = !ctx_null && core::howdah_oom_armed(CTX) != 0;
+    let recycle_on = !ctx_null && core::howdah_recycle_on_fatal(CTX) != 0;
+    let recycle_armed_cfg = !ctx_null && core::howdah_recycle_armed(CTX) != 0;
+    let recycle_observe = !ctx_null && core::howdah_recycle_observe(CTX) != 0;
     let patched = sys::howdah_memory_hard_limit_percent_exists() != 0;
     let web = is_backstop_sapi(&sapi);
-    if armed_cfg && web && !patched {
+
+    // Effective, after the SAPI + patched-engine gates.
+    let oom_exit_armed = oom_armed_cfg && web && !patched;
+    let recycle_mode = if recycle_armed_cfg && web && !patched {
+        if recycle_observe { oom_filter::RECYCLE_OBSERVE } else { oom_filter::RECYCLE_ENFORCE }
+    } else {
+        oom_filter::RECYCLE_OFF
+    };
+    // On a SAPI that drops the response before `post_deactivate`, enforce takes
+    // the immediate exit (the 500 is lost either way; see §4.7 and the lab).
+    let recycle_immediate = sapi_recycle_immediate(&sapi);
+
+    oom_filter::set_arm(oom_exit_armed, recycle_mode, recycle_immediate);
+    if oom_exit_armed || recycle_mode != oom_filter::RECYCLE_OFF {
         sys::howdah_install_oom_hook(crate::oom_filter::decide);
     }
-    DISP_OOM = Some(cstring(&oom_backstop_label(ctx_null, exit_on, armed_cfg, &sapi, web, patched)));
+    DISP_OOM = Some(cstring(&oom_backstop_label(ctx_null, exit_on, oom_armed_cfg, &sapi, web, patched)));
+    DISP_RECYCLE = Some(cstring(&recycle_facet_label(
+        ctx_null, recycle_on, recycle_armed_cfg, recycle_observe, &sapi, web, patched, recycle_immediate,
+    )));
 }
 
 /// Web SAPIs the out-of-memory backstop runs on. Off on cli / cli-server.
 fn is_backstop_sapi(name: &str) -> bool {
     matches!(name, "apache2handler" | "fpm-fcgi" | "cgi-fcgi" | "litespeed")
+}
+
+/// Whether the §4.7 recycle facet must `_exit` immediately (from the
+/// `zend_error_cb`, before PHP's bailout longjmp) instead of recycling after
+/// teardown. The spec (§4.7) keeps recycle-after only where the response is
+/// flushed to the client BEFORE `post_deactivate`; on any SAPI where it isn't,
+/// the producing request's 500 is dropped under recycle-after just as under an
+/// immediate exit, so the simpler, guaranteed-safe immediate fail-stop is used
+/// ("safety over the preserved error page").
+///
+/// Measured empirically by `lab/integration/recycle.sh`: **every tested web SAPI
+/// finalizes the response AFTER `post_deactivate`**, so none preserves the 500.
+///
+/// * **FastCGI (`fpm-fcgi`, `cgi-fcgi`):** php-fpm sends the `FCGI_END_REQUEST`
+///   record only after `php_request_shutdown` returns (in its main loop), i.e.
+///   after `zend_post_deactivate_modules` runs our `post_deactivate`. Exiting
+///   there closes the FastCGI socket before `END_REQUEST`, so nginx answers 502
+///   (lab: producing request = 502).
+/// * **Apache mod_php (`apache2handler`):** mod_php finalizes the response (the
+///   output-filter flush + connection close) only after the handler returns,
+///   which is after `post_deactivate`; exiting there resets the client
+///   connection (lab: producing request = no response / 000).
+/// * **LiteSpeed (`litespeed`):** untested here; defaulted to the immediate
+///   fail-stop (the safe direction) until the lab covers it.
+///
+/// The recycle-after code path (the tainted flag + the `post_deactivate` exit)
+/// is retained and is selected automatically for any SAPI that DOES flush before
+/// teardown; none of the supported web SAPIs do, so enforce currently resolves
+/// to an immediate exit on all of them, while still fully closing the
+/// CVE-2026-109619 window (the worker never serves the consumer request).
+fn sapi_recycle_immediate(name: &str) -> bool {
+    matches!(name, "fpm-fcgi" | "cgi-fcgi" | "apache2handler" | "litespeed")
 }
 
 /// The `OOM backstop (oom_exit)` phpinfo row: armed, or the specific reason not.
@@ -918,6 +982,46 @@ fn oom_backstop_label(ctx_null: bool, exit_on: bool, armed_cfg: bool, sapi: &str
         return "off (patched PHP: memory_hard_limit_percent present)".to_string();
     }
     format!("armed (ends the worker on out-of-memory; SAPI {sapi})")
+}
+
+/// The `Recycle after fatal (recycle_on_fatal)` phpinfo row: armed (and in which
+/// mode and delivery strategy), or the specific reason not. Off by default.
+#[allow(clippy::too_many_arguments)]
+fn recycle_facet_label(
+    ctx_null: bool,
+    recycle_on: bool,
+    armed_cfg: bool,
+    observe: bool,
+    sapi: &str,
+    web: bool,
+    patched: bool,
+    immediate: bool,
+) -> String {
+    if ctx_null {
+        return "off (core unavailable)".to_string();
+    }
+    if !recycle_on {
+        return "off (recycle_on_fatal = false)".to_string();
+    }
+    if !armed_cfg {
+        // recycle_on_fatal is on, so the only remaining config reason is a global off.
+        return "off (mode = off)".to_string();
+    }
+    if !web {
+        return format!("off (non-web SAPI: {sapi})");
+    }
+    if patched {
+        return "off (patched PHP: memory_hard_limit_percent present)".to_string();
+    }
+    if observe {
+        return format!("armed (observe: logs a would-recycle, does not exit; SAPI {sapi})");
+    }
+    let how = if immediate {
+        "immediate _exit (this SAPI drops the response before teardown)"
+    } else {
+        "recycle after teardown (the request keeps its 500)"
+    };
+    format!("armed (enforce: {how}; SAPI {sapi})")
 }
 
 /// The `Include/eval hook` phpinfo row: what the shim reported installed, and
@@ -1017,6 +1121,9 @@ unsafe extern "C" fn minfo(_module: *mut sys::zend_module_entry) {
     }
     if let Some(o) = (*ptr::addr_of!(DISP_OOM)).as_ref() {
         row(b"OOM backstop (oom_exit)\0", o.as_bytes_with_nul());
+    }
+    if let Some(r) = (*ptr::addr_of!(DISP_RECYCLE)).as_ref() {
+        row(b"Recycle after fatal (recycle_on_fatal)\0", r.as_bytes_with_nul());
     }
     if *ptr::addr_of!(XML_DENY) {
         row(b"XML external entities\0", b"denied ([sinks.xml] external_entities)\0");

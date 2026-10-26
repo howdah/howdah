@@ -12,6 +12,7 @@
 /lab/integration/.matrix-out
 /lab/integration/.refusal-out
 /lab/integration/.oom-backstop-out
+/lab/integration/.recycle-out
 /lab/integration/.request-limits-out
 /lab/integration/.log-consumers-out
 # Benchmark runs (lab/bench/run.sh, corpus.sh, jit.sh); published runs are

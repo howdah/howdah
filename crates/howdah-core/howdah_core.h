@@ -26,16 +26,6 @@
 #define MAX_PATH 4096
 
 /**
- * §4.5 cost of one array-nesting level in the parse-memory estimate (bytes).
- */
-#define COST_PER_LEVEL_BYTES 384
-
-/**
- * §4.5 fallback ceiling (bytes) when `memory_limit = -1` (no limit).
- */
-#define FALLBACK_CEILING_BYTES (64 * 1024 * 1024)
-
-/**
  * Action codes returned over the ABI. Pinned: Allow=0, Log=1, Block=2.
  */
 #define HOWDAH_ALLOW 0
@@ -120,9 +110,55 @@
 #define HOWDAH_HOOK_WHY_DENY_EXEC_DIRS 3
 
 /**
+ * Per-file weight for the nesting budget (gap C / §4.4): PHP builds several
+ * metadata arrays per file (`name`, `type`, `tmp_name`, `error`, `size` under
+ * `$_FILES[name]`), so a file name's levels cost more than a field name's.
+ * Provisional; calibrated against peak RSS in the lab (plan Task 8).
+ */
+#define FILE_NAME_WEIGHT 5
+
+/**
+ * §4.5 cost of one array-nesting level in the parse-memory estimate (bytes).
+ * A Zend array (HashTable + initial buckets) is on this order. Provisional;
+ * the Task-8 RSS calibration pins it.
+ */
+#define COST_PER_LEVEL_BYTES 384
+
+/**
+ * §4.5 cost multiplier per buffered non-file byte. 2, not 1: while PHP reads a
+ * field it holds the growing read buffer AND, once complete, the registered
+ * copy, so the peak is roughly twice the value's size. Conservative (blocks a
+ * touch earlier, nearer the real peak). Provisional; Task-8 RSS calibrated.
+ */
+#define COST_PER_NONFILE_BYTE 2
+
+/**
+ * §4.5 fallback ceiling (bytes) when `memory_limit = -1` (no limit). The
+ * advisory names `-1` as a partial mitigation; Howdah keeps working there with
+ * a fixed, measured ceiling. Provisional; Task-8 calibrated.
+ */
+#define FALLBACK_CEILING_BYTES ((64 * 1024) * 1024)
+
+/**
  * Version of the event line format. 1 was the unversioned 1.0 to 1.4.0 line.
  */
 #define SCHEMA_VERSION 2
+
+#define E_ERROR 1
+
+#define E_WARNING 2
+
+#define E_PARSE 4
+
+#define E_NOTICE 8
+
+#define E_CORE_ERROR 16
+
+#define E_COMPILE_ERROR 64
+
+#define E_USER_ERROR 256
+
+#define E_RECOVERABLE_ERROR 4096
 
 /**
  * Maximum number of class names reported by `unserialize_classes`.
@@ -204,8 +240,8 @@ int32_t howdah_feed(struct howdah_ctx *ctx, const char *chunk, size_t len);
  * absent boundary leaves the scanner off. NULL ctx / panic is a no-op.
  *
  * `post_max_size` and `memory_limit` are PHP's effective INI values for this
- * request in bytes (`post_max_size <= 0` = unlimited -> gap B off;
- * `memory_limit = -1` = no limit -> §4.5 fallback ceiling).
+ * request in bytes (`post_max_size <= 0` = unlimited → gap B off;
+ * `memory_limit = -1` = no limit → §4.5 fallback ceiling).
  *
  * # Safety
  * `ctx` NULL or live; `content_type` NULL or valid for `ct_len` bytes.
@@ -218,7 +254,7 @@ void howdah_scan_post_begin(struct howdah_ctx *ctx,
 
 /**
  * §4.2: feed `len` raw body bytes (as the `read_post` wrapper reads them) to the
- * byte-stream scanner. Returns the most severe action so far (0 Allow, 1 Log,
+ * byte-stream scanner. Returns the most severe action so far (0 Allow / 1 Log /
  * 2 Block); `Block` tells the wrapper to stop reading. The bytes are scanned for
  * framing only, never logged. NULL ctx, a scanner that was never armed, or a
  * panic returns 0 (fail open).
@@ -282,7 +318,10 @@ int32_t howdah_input_var(struct howdah_ctx *ctx, const char *name, size_t name_l
  * # Safety
  * `ctx` NULL or live; `name` NULL or valid for `name_len` bytes.
  */
-int32_t howdah_note_name(struct howdah_ctx *ctx, const char *name, size_t name_len, int32_t is_file);
+int32_t howdah_note_name(struct howdah_ctx *ctx,
+                         const char *name,
+                         size_t name_len,
+                         int32_t is_file);
 
 /**
  * Inspect one request value (Layer 2). `source` is a `HOWDAH_SRC_*` code.
@@ -567,14 +606,49 @@ int32_t howdah_oom_exit(struct howdah_ctx *ctx);
 /**
  * 1 iff the config ARMS the out-of-memory backstop: `oom_exit` is on AND the
  * global mode is not `off`. A global `off` disables every layer (the backstop
- * included); `detect` keeps it armed, since it is a Critical fail-stop that
- * cannot be "detected only". 0 for NULL and on panic. The glue applies the SAPI
- * and patched-engine gates on top of this.
+ * included), matching `[rules] decide` and the sink/inspect/behavior layers;
+ * `detect` keeps it armed, since it is a Critical fail-stop that cannot be
+ * "detected only". 0 for NULL and on panic. The glue applies the SAPI and
+ * patched-engine gates on top of this.
  *
  * # Safety
  * `ctx` NULL or live.
  */
 int32_t howdah_oom_armed(struct howdah_ctx *ctx);
+
+/**
+ * 1 iff the context's config has `recycle_on_fatal = true` (the §4.7 recycle
+ * facet opt-in); 0 otherwise, for NULL and on panic. Read by the glue at MINIT
+ * for the phpinfo row. Off by default. See [`howdah_recycle_armed`].
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_recycle_on_fatal(struct howdah_ctx *ctx);
+
+/**
+ * 1 iff the config ARMS the §4.7 recycle facet: `recycle_on_fatal` is on AND
+ * the global mode is not `off` (a global `off` disables every layer, this one
+ * included; `detect` keeps it armed, like the OOM backstop). The glue applies
+ * the SAPI and patched-engine gates on top of this, and chooses observe vs
+ * enforce from [`howdah_recycle_observe`]. 0 for NULL and on panic (do not arm
+ * — the fail-open direction).
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_recycle_armed(struct howdah_ctx *ctx);
+
+/**
+ * 1 iff the config has `recycle_observe = true`: the §4.7 facet logs a
+ * "would-recycle" event but does NOT exit, so an operator can size their
+ * uncaught-fatal rate before enforcing. Only meaningful when the facet is
+ * armed. 0 (enforce) for NULL and on panic.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_recycle_observe(struct howdah_ctx *ctx);
 
 /**
  * 1 iff some exception has a `script_sha256` facet that could apply to

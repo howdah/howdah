@@ -237,6 +237,7 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::TlsVerify => "curl TLS certificate verification disabled",
         RuleId::OutOfMemory => "worker ended on out-of-memory",
         RuleId::StartupFatal => "fatal error during request startup",
+        RuleId::FatalRecycle => "worker recycled after a poisoning-class fatal",
         RuleId::PostTooLarge => "request body exceeds post_max_size",
         RuleId::NestingBudget => "too many array-nesting levels across request inputs",
         RuleId::ParseMemoryEstimate => "estimated parse memory exceeds the memory_limit-based ceiling",
@@ -1916,6 +1917,56 @@ pub unsafe extern "C" fn howdah_oom_armed(ctx: *mut howdah_ctx) -> i32 {
         i32::from(c.config.oom_exit && c.config.mode != Mode::Off)
     }))
     .unwrap_or(0)
+}
+
+/// 1 iff the context's config has `recycle_on_fatal = true` (the §4.7 recycle
+/// facet opt-in); 0 otherwise, for NULL and on panic. Read by the glue at MINIT
+/// for the phpinfo row. Off by default. See [`howdah_recycle_armed`].
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_recycle_on_fatal(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| i32::from((*ctx).config.recycle_on_fatal))).unwrap_or(0)
+}
+
+/// 1 iff the config ARMS the §4.7 recycle facet: `recycle_on_fatal` is on AND
+/// the global mode is not `off` (a global `off` disables every layer, this one
+/// included; `detect` keeps it armed, like the OOM backstop). The glue applies
+/// the SAPI and patched-engine gates on top of this, and chooses observe vs
+/// enforce from [`howdah_recycle_observe`]. 0 for NULL and on panic (do not arm
+/// — the fail-open direction).
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_recycle_armed(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = &*ctx;
+        i32::from(c.config.recycle_on_fatal && c.config.mode != Mode::Off)
+    }))
+    .unwrap_or(0)
+}
+
+/// 1 iff the config has `recycle_observe = true`: the §4.7 facet logs a
+/// "would-recycle" event but does NOT exit, so an operator can size their
+/// uncaught-fatal rate before enforcing. Only meaningful when the facet is
+/// armed. 0 (enforce) for NULL and on panic.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_recycle_observe(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| i32::from((*ctx).config.recycle_observe))).unwrap_or(0)
 }
 
 /// 1 iff some exception has a `script_sha256` facet that could apply to
@@ -3748,6 +3799,58 @@ mod tests {
             howdah_free(d);
             howdah_free(off);
             howdah_free(no);
+        }
+    }
+
+    // ---- howdah_recycle_*: the §4.7 recycle facet toggles ---------------------
+
+    #[test]
+    fn recycle_on_fatal_getter_defaults_off() {
+        let def = init(""); // off by default
+        assert_eq!(unsafe { howdah_recycle_on_fatal(def) }, 0);
+        let on = init("recycle_on_fatal = true\n");
+        assert_eq!(unsafe { howdah_recycle_on_fatal(on) }, 1);
+        assert_eq!(unsafe { howdah_recycle_on_fatal(std::ptr::null_mut()) }, 0);
+        unsafe {
+            howdah_free(def);
+            howdah_free(on);
+        }
+    }
+
+    #[test]
+    fn recycle_armed_honors_key_and_mode() {
+        // Off by default -> not armed.
+        let def = init("");
+        assert_eq!(unsafe { howdah_recycle_armed(def) }, 0);
+        // On, block mode -> armed.
+        let on = init("recycle_on_fatal = true\n");
+        assert_eq!(unsafe { howdah_recycle_armed(on) }, 1);
+        // detect keeps it armed (Critical fail-stop).
+        let d = init("mode = \"detect\"\nrecycle_on_fatal = true\n");
+        assert_eq!(unsafe { howdah_recycle_armed(d) }, 1);
+        // A global off disables it even with the key on.
+        let off = init("mode = \"off\"\nrecycle_on_fatal = true\n");
+        assert_eq!(unsafe { howdah_recycle_armed(off) }, 0);
+        assert_eq!(unsafe { howdah_recycle_on_fatal(off) }, 1, "key itself is still on");
+        assert_eq!(unsafe { howdah_recycle_armed(std::ptr::null_mut()) }, 0);
+        unsafe {
+            howdah_free(def);
+            howdah_free(on);
+            howdah_free(d);
+            howdah_free(off);
+        }
+    }
+
+    #[test]
+    fn recycle_observe_getter_defaults_enforce() {
+        let enforce = init("recycle_on_fatal = true\n"); // observe off -> enforce
+        assert_eq!(unsafe { howdah_recycle_observe(enforce) }, 0);
+        let observe = init("recycle_on_fatal = true\nrecycle_observe = true\n");
+        assert_eq!(unsafe { howdah_recycle_observe(observe) }, 1);
+        assert_eq!(unsafe { howdah_recycle_observe(std::ptr::null_mut()) }, 0);
+        unsafe {
+            howdah_free(enforce);
+            howdah_free(observe);
         }
     }
 

@@ -126,6 +126,13 @@ extern "C" {
     /// not installed. Called from MSHUTDOWN, before the core ctx is freed.
     pub fn howdah_uninstall_oom_hook();
 
+    /// §4.7 recycle facet: `_exit(0)` the worker iff a poisoning-class script
+    /// fatal tainted it this request (the decide callback returned 2). Called
+    /// from the ext's `post_deactivate` AFTER request teardown, so PHP has
+    /// rendered and (on SAPIs that flush before teardown) delivered its 500.
+    /// A no-op when the worker was not tainted; allocates nothing.
+    pub fn howdah_oom_recycle_if_tainted();
+
     /// 1 iff the `memory_hard_limit_percent` ini directive is registered at
     /// runtime: upstream's out-of-memory fix (8.2.35/8.3.36/8.4.27/8.5.12) adds
     /// it, so its presence means the backstop should stay off (the engine
@@ -218,8 +225,10 @@ pub type HowdahReadPostDecide = unsafe extern "C" fn(
 /// is PHP's `E_*` code, `msg` the rendered message (8.x) or `format` string
 /// (5.x/7.x) for `msg_len` bytes, `during_startup` 1 inside `php_request_startup`,
 /// and `file`/`file_len`/`line` the error's location (script path + line, for
-/// the logged reason; `file` may be NULL). Returns 1 to end the worker (after
-/// logging), 0 to chain to the prior handler.
+/// the logged reason; `file` may be NULL). Returns 0 to chain to the prior
+/// handler, 1 to end the worker NOW (the §4.6 backstop), or 2 to mark the worker
+/// tainted and chain (the §4.7 recycle facet — the C shim `_exit`s it at the
+/// ext's `post_deactivate`, after this request delivers its 500).
 pub type HowdahOomDecide = unsafe extern "C" fn(
     error_type: ::std::ffi::c_int,
     msg: *const ::std::ffi::c_char,

@@ -47,6 +47,7 @@ impl Layer {
             | RuleId::MaxRequestHeaderBytes
             | RuleId::OutOfMemory
             | RuleId::StartupFatal
+            | RuleId::FatalRecycle
             | RuleId::PostTooLarge
             | RuleId::NestingBudget
             | RuleId::ParseMemoryEstimate => Layer::Limits,

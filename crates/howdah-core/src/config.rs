@@ -596,6 +596,18 @@ pub struct Config {
     /// PHP2Shell backstop (§4.6). On by default; web SAPIs only, and off on
     /// engines that carry upstream's fix (decided by the glue at startup).
     pub oom_exit: bool,
+    /// Recycle the PHP worker AFTER a poisoning-class bailout fatal during the
+    /// script — an uncaught `Error`, a parse/compile error, a failed `require`,
+    /// `max_execution_time` — so the worker never serves a second request on the
+    /// state CVE-2026-109619 leaves behind (§4.7). The producing request still
+    /// delivers its own 500. **Off by default** (an operator opt-in for
+    /// unpatched, long-lived-worker deployments). Same gates as `oom_exit`: web
+    /// SAPIs only, off on patched engines (decided by the glue at startup).
+    pub recycle_on_fatal: bool,
+    /// When `recycle_on_fatal` is on, only LOG a "would-recycle" event instead
+    /// of recycling, so an operator can size their uncaught-fatal rate before
+    /// enforcing. Off by default (enforce). No effect unless the facet is armed.
+    pub recycle_observe: bool,
 }
 
 #[derive(Deserialize)]
@@ -612,6 +624,8 @@ struct RawConfig {
     exceptions: Vec<ExceptionEntry>,
     exceptions_log: bool,
     oom_exit: bool,
+    recycle_on_fatal: bool,
+    recycle_observe: bool,
 }
 
 impl Default for RawConfig {
@@ -629,6 +643,8 @@ impl Default for RawConfig {
             exceptions: c.exceptions,
             exceptions_log: c.exceptions_log,
             oom_exit: c.oom_exit,
+            recycle_on_fatal: c.recycle_on_fatal,
+            recycle_observe: c.recycle_observe,
         }
     }
 }
@@ -702,6 +718,8 @@ impl Config {
             exceptions: raw.exceptions,
             exceptions_log: raw.exceptions_log,
             oom_exit: raw.oom_exit,
+            recycle_on_fatal: raw.recycle_on_fatal,
+            recycle_observe: raw.recycle_observe,
         })
     }
 
@@ -771,6 +789,8 @@ impl Config {
             exceptions: Vec::new(),
             exceptions_log: false,
             oom_exit: true,
+            recycle_on_fatal: false,
+            recycle_observe: false,
         }
     }
 }
@@ -1391,6 +1411,30 @@ self_test = "off"
         assert!(!Config::from_toml("oom_exit = false\n").unwrap().oom_exit);
         assert!(Config::from_toml("oom_exit = true\n").unwrap().oom_exit);
         assert!(Config::from_toml("oom_exit = \"no\"").is_err());
+    }
+
+    // ---- recycle_on_fatal / recycle_observe (the §4.7 recycle facet) ----------
+
+    #[test]
+    fn recycle_keys_default_off_and_serialize() {
+        let c = Config::safe_defaults();
+        assert!(!c.recycle_on_fatal, "recycle facet is off by default");
+        assert!(!c.recycle_observe, "enforce (not observe) by default");
+        let j = serde_json::to_value(&c).unwrap();
+        assert_eq!(j["recycle_on_fatal"], false);
+        assert_eq!(j["recycle_observe"], false);
+        // Absent in the file -> defaults.
+        let d = Config::from_toml("mode = \"block\"\n").unwrap();
+        assert!(!d.recycle_on_fatal && !d.recycle_observe);
+    }
+
+    #[test]
+    fn recycle_keys_parse_and_reject_non_bool() {
+        assert!(Config::from_toml("recycle_on_fatal = true\n").unwrap().recycle_on_fatal);
+        assert!(Config::from_toml("recycle_on_fatal = true\nrecycle_observe = true\n").unwrap().recycle_observe);
+        assert!(!Config::from_toml("recycle_on_fatal = false\n").unwrap().recycle_on_fatal);
+        assert!(Config::from_toml("recycle_on_fatal = \"yes\"").is_err());
+        assert!(Config::from_toml("recycle_observe = 1").is_err());
     }
 
     // ---- [[exceptions]] -------------------------------------------------------

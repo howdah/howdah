@@ -45,6 +45,7 @@ pub fn rule_layer(r: RuleId) -> u8 {
         | RuleId::MaxRequestHeaderBytes
         | RuleId::OutOfMemory
         | RuleId::StartupFatal
+        | RuleId::FatalRecycle
         | RuleId::PostTooLarge
         | RuleId::NestingBudget
         | RuleId::ParseMemoryEstimate => 1,
@@ -122,6 +123,7 @@ fn rule_name(r: RuleId) -> &'static str {
         RuleId::TlsVerify => "tls_verify",
         RuleId::OutOfMemory => "out_of_memory",
         RuleId::StartupFatal => "startup_fatal",
+        RuleId::FatalRecycle => "fatal_recycle",
         RuleId::PostTooLarge => "post_too_large",
         RuleId::NestingBudget => "nesting_budget",
         RuleId::ParseMemoryEstimate => "parse_memory_estimate",
@@ -302,11 +304,12 @@ mod tests {
             (RuleId::TlsVerify, 3),
             (RuleId::OutOfMemory, 1),
             (RuleId::StartupFatal, 1),
+            (RuleId::FatalRecycle, 1),
             (RuleId::PostTooLarge, 1),
             (RuleId::NestingBudget, 1),
             (RuleId::ParseMemoryEstimate, 1),
         ];
-        assert_eq!(rule_catalog().len(), 40);
+        assert_eq!(rule_catalog().len(), 41);
         assert_eq!(want.len(), rule_catalog().len(), "layer table and rule_catalog differ");
         for r in rule_catalog() {
             let w = want.iter().find(|(x, _)| x == r).unwrap_or_else(|| panic!("{r:?} has no layer in this table")).1;

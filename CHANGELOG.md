@@ -5,6 +5,36 @@ All notable changes to Howdah are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- An opt-in Layer 1 facet that recycles the PHP worker after a poisoning-class
+  bailout fatal during the script — an uncaught `Error`, a parse/compile error,
+  a failed `require`, `max_execution_time` — the last CVE-2026-109619 producer
+  the §4.6 out-of-memory backstop deliberately leaves running (design §4.7).
+  The out-of-memory fatal's consumer runs on a *later* request on the same
+  worker, so ending that worker before it serves another fully closes the
+  window. Howdah's `zend_error_cb` handler now classifies three outcomes:
+  exit-now (out-of-memory any phase, or any fatal during request startup —
+  unchanged §4.6 behaviour), recycle-after (a script-phase bailout fatal, when
+  the facet is armed), or none. A new Critical Layer 1 rule, `fatal_recycle`,
+  and two new top-level keys beside `oom_exit`: `recycle_on_fatal` (default
+  `false` — an operator opt-in for unpatched, long-lived-worker deployments) and
+  `recycle_observe` (default `false`; when on, logs a "would-recycle" event
+  without ending the worker, so the uncaught-fatal rate can be sized before
+  enforcing). Same gates as the backstop: web SAPIs only, NTS, off on patched
+  engines (runtime `memory_hard_limit_percent` probe); off entirely under
+  `mode = off`. The event line carries only the rule, a fixed reason and the
+  error's `file:line` — never request content. `php --ri howdah` shows a
+  "Recycle after fatal" row. Verified on PHP 5.4–8.5 under php-fpm behind nginx
+  and Apache mod_php.
+  - Lab flush-ordering finding (design §4.7, §5.6): both tested web SAPIs
+    finalize the response *after* `post_deactivate`, so neither preserves the
+    producing request's 500 under recycle-after (fpm/nginx answers 502; Apache
+    resets the connection). Per §4.7 both therefore take the immediate `_exit`
+    from the error handler — the worker is still recycled and the CVE window
+    still fully closed; only the producing request's error page is dropped (as
+    it would be under any immediate fail-stop). The recycle-after-teardown path
+    is retained for any SAPI that flushes earlier.
+
 ## [1.6.1] - 2026-10-25
 
 ### Fixed

@@ -449,6 +449,13 @@ pub enum RuleId {
     /// nesting levels + buffered non-file field bytes) passed the ceiling derived
     /// from the request's live `memory_limit` (§4.5). Critical, Layer 1.
     ParseMemoryEstimate,
+    /// A poisoning-class bailout fatal (an uncaught `Error`, a parse/compile
+    /// error, a failed `require`, `max_execution_time`) struck during the script
+    /// on an unpatched engine, and the recycle facet (§4.7) ended the worker
+    /// after the request delivered its 500 — before it could serve another and
+    /// hit the CVE-2026-109619 consumer window. Critical, Layer 1. Reported
+    /// directly by the glue's `zend_error_cb` hook, never by a limit check.
+    FatalRecycle,
 }
 
 impl RuleId {
@@ -493,7 +500,7 @@ impl RuleId {
 /// or miss one it accepts. `rule_catalog_covers_every_variant` fails to
 /// compile when a variant is added here but not to the list.
 pub fn rule_catalog() -> &'static [RuleId] {
-    const ALL: [RuleId; 40] = [
+    const ALL: [RuleId; 41] = [
         RuleId::MaxParts,
         RuleId::MaxFiles,
         RuleId::MaxPartHeaders,
@@ -534,6 +541,7 @@ pub fn rule_catalog() -> &'static [RuleId] {
         RuleId::PostTooLarge,
         RuleId::NestingBudget,
         RuleId::ParseMemoryEstimate,
+        RuleId::FatalRecycle,
     ];
     &ALL
 }
@@ -794,10 +802,11 @@ mod tests {
                 | RuleId::StartupFatal
                 | RuleId::PostTooLarge
                 | RuleId::NestingBudget
-                | RuleId::ParseMemoryEstimate => {}
+                | RuleId::ParseMemoryEstimate
+                | RuleId::FatalRecycle => {}
             }
         }
-        assert_eq!(rule_catalog().len(), 40);
+        assert_eq!(rule_catalog().len(), 41);
         let mut sorted = all.to_vec();
         sorted.sort();
         sorted.dedup();

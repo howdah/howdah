@@ -279,11 +279,38 @@ pub struct CommandExecConfig {
 }
 
 /// Layer-3 include/require sink settings.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+///
+/// `mode`/`allow_paths` are the legacy allowlist check (a `block` path outside
+/// `allow_paths`; inert with no allowlist, inherits `sinks.mode`). `wrapper`
+/// and `poison` are the T4 include/open firewall: each is ENFORCED by default
+/// (`block`) and INDEPENDENT of `sinks.mode` and of the global mode (like the
+/// `xxe`/`cgi_arg` rules), so the firewall is on out of the box. A global `off`
+/// or `[sinks] enabled = false` still silences them. The same two knobs govern
+/// the file-open sinks (fopen/file_get_contents/readfile), see `wrapper` below.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct IncludeConfig {
     pub mode: Option<Mode>,
     pub allow_paths: Vec<String>,
+    /// Non-`file` stream-wrapper firewall (`php://filter`/`input`/*, `data:`,
+    /// `expect://`, remote `http(s)`/`ftp(s)`). `block` refuses the
+    /// include/open, `detect` logs, `off` disables. Default `block`.
+    pub wrapper: Mode,
+    /// Poisonable-local-target firewall (`/proc/self/environ` and other
+    /// `/proc/*`, the runtime session dir, PHP's `error_log`). `block` refuses,
+    /// `detect` logs, `off` disables. Default `block`.
+    pub poison: Mode,
+}
+
+impl Default for IncludeConfig {
+    fn default() -> Self {
+        IncludeConfig {
+            mode: None,
+            allow_paths: Vec::new(),
+            wrapper: Mode::Block,
+            poison: Mode::Block,
+        }
+    }
 }
 
 /// Layer-3 eval sink settings.
@@ -369,6 +396,8 @@ pub enum HookReason {
     IncludeAllowPaths,
     /// `auto`: Layer 4 `deny_exec_dirs` is set.
     DenyExecDirs,
+    /// `auto`: the include/open wrapper-scheme firewall is on (the default).
+    IncludeFirewall,
 }
 
 impl HookReason {
@@ -379,6 +408,7 @@ impl HookReason {
             HookReason::EvalOnly => "auto: eval only",
             HookReason::IncludeAllowPaths => "auto: include allow_paths set",
             HookReason::DenyExecDirs => "auto: deny_exec_dirs set",
+            HookReason::IncludeFirewall => "auto: include firewall on",
         }
     }
 }
@@ -493,17 +523,52 @@ impl SinkConfig {
         self.hook.unwrap_or(SinkHook::Auto)
     }
 
-    /// True iff the `include` sink needs the hook: on AND with an allowlist
-    /// (with an empty `allow_paths` it never produces an event).
-    fn include_needs_hook(&self, global: Mode) -> bool {
+    /// Effective mode of the include/open wrapper-scheme firewall. Off if the
+    /// global mode is off or sinks are disabled; otherwise `[sinks.include]
+    /// wrapper` (default `block`). Independent of `sinks.mode` and the global
+    /// `detect`/`block`, like the `xxe`/`cgi_arg` rules.
+    pub fn include_wrapper_mode(&self, global: Mode) -> Mode {
+        if global == Mode::Off || !self.enabled {
+            Mode::Off
+        } else {
+            self.include.wrapper
+        }
+    }
+
+    /// Effective mode of the poisonable-local-target firewall. Same gating as
+    /// [`SinkConfig::include_wrapper_mode`]; `[sinks.include] poison` (default
+    /// `block`).
+    pub fn include_poison_mode(&self, global: Mode) -> Mode {
+        if global == Mode::Off || !self.enabled {
+            Mode::Off
+        } else {
+            self.include.poison
+        }
+    }
+
+    /// True iff the include firewall (wrapper or poison) is armed. On by
+    /// default; the compile-swap covers it (warm-opcache caveat documented), so
+    /// it does NOT by itself force the opcode mechanism (unlike `allow_paths`).
+    fn include_firewall_armed(&self, global: Mode) -> bool {
+        self.include_wrapper_mode(global) != Mode::Off || self.include_poison_mode(global) != Mode::Off
+    }
+
+    /// True iff the `include` allowlist check is armed: the sink is on AND has
+    /// an allowlist (with an empty `allow_paths` it never produces an event).
+    /// This is the case where a warm-opcache include matters, so `auto` picks
+    /// the opcode mechanism for it.
+    fn include_allowlist_armed(&self, global: Mode) -> bool {
         self.effective_mode(SinkId::Include, global) != Mode::Off && !self.include.allow_paths.is_empty()
     }
 
     /// True iff the include/eval hook has to be installed at all for the
-    /// Layer-3 sinks: `eval` is on, or `include` needs it. Layer 4's
+    /// Layer-3 sinks: `eval` is on, the `include` allowlist is armed, or the
+    /// include firewall (wrapper/poison, on by default) is armed. Layer 4's
     /// `deny_exec_dirs` is the other consumer; the FFI combines both.
     pub fn include_eval_hook_needed(&self, global: Mode) -> bool {
-        self.effective_mode(SinkId::Eval, global) != Mode::Off || self.include_needs_hook(global)
+        self.effective_mode(SinkId::Eval, global) != Mode::Off
+            || self.include_allowlist_armed(global)
+            || self.include_firewall_armed(global)
     }
 
     /// The startup plan for the include/eval hook: `None` when nothing needs
@@ -517,16 +582,23 @@ impl SinkConfig {
         global: Mode,
         deny_exec_dirs_armed: bool,
     ) -> Option<(SinkHook, HookReason)> {
-        let include = self.include_needs_hook(global);
+        let allowlist = self.include_allowlist_armed(global);
+        let firewall = self.include_firewall_armed(global);
         let eval = self.effective_mode(SinkId::Eval, global) != Mode::Off;
-        if !include && !eval && !deny_exec_dirs_armed {
+        if !allowlist && !firewall && !eval && !deny_exec_dirs_armed {
             return None;
         }
         Some(match self.hook() {
             SinkHook::Opcode => (SinkHook::Opcode, HookReason::Configured),
             SinkHook::Compile => (SinkHook::Compile, HookReason::Configured),
+            // Opcode (JIT off) only where a warm-opcache include matters: the
+            // include allowlist, or Layer 4's deny_exec_dirs.
             SinkHook::Auto if deny_exec_dirs_armed => (SinkHook::Opcode, HookReason::DenyExecDirs),
-            SinkHook::Auto if include => (SinkHook::Opcode, HookReason::IncludeAllowPaths),
+            SinkHook::Auto if allowlist => (SinkHook::Opcode, HookReason::IncludeAllowPaths),
+            // The wrapper/poison firewall and eval are both fully covered by the
+            // compile swap (attack includes are dynamic cache-misses; eval is
+            // never cached), so auto keeps the JIT on with compile.
+            SinkHook::Auto if firewall => (SinkHook::Compile, HookReason::IncludeFirewall),
             SinkHook::Auto => (SinkHook::Compile, HookReason::EvalOnly),
         })
     }
@@ -1292,50 +1364,91 @@ self_test = "off"
         use HookReason::*;
         use SinkHook::*;
         let plan = |toml: &str, l4: bool| Config::from_toml(toml).unwrap().sinks.include_eval_hook_plan(Mode::Detect, l4);
-        // Shipped defaults: eval detect, include inert, no deny_exec_dirs ->
-        // compile, so a default install keeps the JIT on.
-        assert_eq!(plan("", false), Some((Compile, EvalOnly)));
+        // Shipped defaults: the include firewall is on, and both it and eval are
+        // covered by the compile swap, so auto keeps the JIT on.
+        assert_eq!(plan("", false), Some((Compile, IncludeFirewall)));
+        // Firewall-only (eval off): still compile.
+        assert_eq!(plan("[sinks.eval]\nmode=\"off\"", false), Some((Compile, IncludeFirewall)));
+        // Pure eval-only (firewall off too): compile, reason eval.
+        assert_eq!(
+            plan("[sinks.include]\nwrapper=\"off\"\npoison=\"off\"", false),
+            Some((Compile, EvalOnly))
+        );
         // include with allow_paths -> opcode (warm-opcache includes matter).
         assert_eq!(plan("[sinks.include]\nallow_paths=[\"/srv/app\"]", false), Some((Opcode, IncludeAllowPaths)));
         // Layer 4 deny_exec_dirs -> opcode, even with eval off.
         assert_eq!(plan("[sinks.eval]\nmode=\"off\"", true), Some((Opcode, DenyExecDirs)));
-        // Nothing needs it -> None.
-        assert_eq!(plan("[sinks.eval]\nmode=\"off\"", false), None);
+        // Nothing needs it -> None (firewall AND eval off, no allowlist/deny).
+        assert_eq!(plan("[sinks.include]\nwrapper=\"off\"\npoison=\"off\"\n[sinks.eval]\nmode=\"off\"", false), None);
         assert_eq!(plan("[sinks]\nenabled=false", false), None);
         // Explicit settings win over auto, in both directions.
         assert_eq!(plan("[sinks]\nhook=\"opcode\"", false), Some((Opcode, Configured)));
         assert_eq!(plan("[sinks]\nhook=\"compile\"\n[sinks.include]\nallow_paths=[\"/srv\"]", true), Some((Compile, Configured)));
         // Explicit still installs nothing when nothing needs it.
-        assert_eq!(plan("[sinks]\nhook=\"opcode\"\n[sinks.eval]\nmode=\"off\"", false), None);
+        assert_eq!(plan("[sinks]\nhook=\"opcode\"\n[sinks.include]\nwrapper=\"off\"\npoison=\"off\"\n[sinks.eval]\nmode=\"off\"", false), None);
         // Global off beats everything (Layer 4 is off too then; the FFI passes false).
         assert_eq!(Config::from_toml("").unwrap().sinks.include_eval_hook_plan(Mode::Off, false), None);
         assert_eq!(IncludeAllowPaths.label(), "auto: include allow_paths set");
+        assert_eq!(IncludeFirewall.label(), "auto: include firewall on");
     }
 
     #[test]
-    fn include_eval_hook_needed_follows_eval_and_include_allowlist() {
-        // Shipped defaults: eval inherits detect, so the hook is needed.
+    fn include_eval_hook_needed_follows_eval_firewall_and_allowlist() {
+        // Shipped defaults: the firewall is on, so the hook is needed.
         let c = Config::from_toml("").unwrap();
         assert!(c.sinks.include_eval_hook_needed(Mode::Detect));
         // Global off / sinks disabled: nothing needs it.
         assert!(!c.sinks.include_eval_hook_needed(Mode::Off));
         let c = Config::from_toml("[sinks]\nenabled = false").unwrap();
         assert!(!c.sinks.include_eval_hook_needed(Mode::Block));
-        // eval off, include detect but inert (no allow_paths): not needed.
+        // eval off but the firewall is on by default: still needed.
         let c = Config::from_toml("[sinks.eval]\nmode = \"off\"").unwrap();
+        assert!(c.sinks.include_eval_hook_needed(Mode::Detect));
+        // Firewall explicitly off AND eval off, no allowlist: not needed.
+        let c = Config::from_toml("[sinks.include]\nwrapper=\"off\"\npoison=\"off\"\n[sinks.eval]\nmode=\"off\"").unwrap();
         assert!(!c.sinks.include_eval_hook_needed(Mode::Detect));
-        // include armed with an allowlist: needed even with eval off.
+        // include armed with an allowlist: needed even with everything else off.
         let c = Config::from_toml(
-            "[sinks.eval]\nmode = \"off\"\n[sinks.include]\nmode = \"detect\"\nallow_paths = [\"/srv/app\"]",
+            "[sinks.eval]\nmode = \"off\"\n[sinks.include]\nwrapper=\"off\"\npoison=\"off\"\nmode = \"detect\"\nallow_paths = [\"/srv/app\"]",
         )
         .unwrap();
         assert!(c.sinks.include_eval_hook_needed(Mode::Detect));
-        // Section mode off, eval explicitly block: needed.
-        let c = Config::from_toml("[sinks]\nmode = \"off\"\n[sinks.eval]\nmode = \"block\"").unwrap();
-        assert!(c.sinks.include_eval_hook_needed(Mode::Detect));
-        // Everything off: not needed.
+        // Section mode off does NOT silence the firewall (it has its own mode).
         let c = Config::from_toml("[sinks]\nmode = \"off\"").unwrap();
-        assert!(!c.sinks.include_eval_hook_needed(Mode::Block));
+        assert!(c.sinks.include_eval_hook_needed(Mode::Block));
+        // Everything off (global off): not needed.
+        let c = Config::from_toml("[sinks]\nmode = \"off\"").unwrap();
+        assert!(!c.sinks.include_eval_hook_needed(Mode::Off));
+    }
+
+    #[test]
+    fn include_wrapper_poison_default_block_independent_of_section_and_global() {
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.sinks.include.wrapper, Mode::Block);
+        assert_eq!(c.sinks.include.poison, Mode::Block);
+        // On under detect and block; silenced only by global off / disabled.
+        for g in [Mode::Detect, Mode::Block] {
+            assert_eq!(c.sinks.include_wrapper_mode(g), Mode::Block, "{g:?}");
+            assert_eq!(c.sinks.include_poison_mode(g), Mode::Block, "{g:?}");
+        }
+        assert_eq!(c.sinks.include_wrapper_mode(Mode::Off), Mode::Off);
+        assert_eq!(c.sinks.include_poison_mode(Mode::Off), Mode::Off);
+        // [sinks] mode = off does not touch the firewall (own mode, like xxe).
+        let c = Config::from_toml("[sinks]\nmode = \"off\"").unwrap();
+        assert_eq!(c.sinks.include_wrapper_mode(Mode::Block), Mode::Block);
+        // Its own knobs: detect logs, off disables.
+        let c = Config::from_toml("[sinks.include]\nwrapper = \"detect\"\npoison = \"off\"").unwrap();
+        assert_eq!(c.sinks.include_wrapper_mode(Mode::Block), Mode::Detect);
+        assert_eq!(c.sinks.include_poison_mode(Mode::Block), Mode::Off);
+        // enabled = false silences both.
+        let c = Config::from_toml("[sinks]\nenabled = false").unwrap();
+        assert_eq!(c.sinks.include_wrapper_mode(Mode::Block), Mode::Off);
+        assert_eq!(c.sinks.include_poison_mode(Mode::Block), Mode::Off);
+        // The defaults are visible in the serialized config (the editor reads them).
+        let j = serde_json::to_value(Config::from_toml("").unwrap()).unwrap();
+        assert_eq!(j["sinks"]["include"]["wrapper"], "block");
+        assert_eq!(j["sinks"]["include"]["poison"], "block");
+        assert!(Config::from_toml("[sinks.include]\nwrapper = \"maybe\"").is_err());
     }
 
     // ---- legacy-era sinks (mail, preg_eval, create_function, assert, callback, xml, tls)

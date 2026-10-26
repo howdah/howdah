@@ -288,13 +288,36 @@ unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
             // mode `ssrf_filter::armed` still returns 0 (ssrf+egress off), so the
             // fopen SSRF branch short-circuits before any DNS/block work; only
             // the php-write branch activates.
+            // The T4 file-open firewall (include/open wrapper scheme + poison)
+            // is on by default. fopen / file_get_contents are swapped by the
+            // SSRF install, and their firewall branch self-gates on the file
+            // decide callback, so a firewall-armed config must reach the SSRF
+            // install too.
+            let open_armed = core::howdah_sink_open_armed(CTX) != 0;
             if core::howdah_sink_armed(CTX, core::HOWDAH_SINK_SSRF) != 0
                 || core::howdah_behavior_egress_active(CTX) != 0
                 || core::howdah_behavior_armed(CTX, core::HOWDAH_BEHAVIOR_PHP_WRITE) != 0
+                || open_armed
             {
                 sys::howdah_install_ssrf_hooks(
                     crate::ssrf_filter::decide,
                     crate::ssrf_filter::armed,
+                );
+            }
+            // File-op foundation: swap readfile and set the shared file decide
+            // callback (which lights up the fopen / file_get_contents branches).
+            // Stash the runtime session.save_path / error_log for the poison
+            // check; empty values simply leave that category inert.
+            if open_armed {
+                sys::howdah_install_file_hooks(crate::file_filter::decide);
+                let session = ini_string(b"session.save_path\0").unwrap_or_default();
+                let error_log = ini_string(b"error_log\0").unwrap_or_default();
+                core::howdah_set_runtime_paths(
+                    CTX,
+                    session.as_ptr() as *const c_char,
+                    session.len(),
+                    error_log.as_ptr() as *const c_char,
+                    error_log.len(),
                 );
             }
             // Layer-4 behavior glue: install once if ANY facet is armed. This
@@ -1061,6 +1084,7 @@ fn include_hook_label(installed: c_int, why: i32, jit_on: bool) -> String {
         core::HOWDAH_HOOK_WHY_EVAL_ONLY => "auto: eval only",
         core::HOWDAH_HOOK_WHY_INCLUDE_ALLOW_PATHS => "auto: include allow_paths set",
         core::HOWDAH_HOOK_WHY_DENY_EXEC_DIRS => "auto: deny_exec_dirs set",
+        core::HOWDAH_HOOK_WHY_INCLUDE_FIREWALL => "auto: include firewall on",
         _ => "configured",
     };
     let sep = if mech.ends_with('(') { "" } else { "; " };

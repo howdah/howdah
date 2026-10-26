@@ -265,11 +265,37 @@ static int ssrf_should_block(const char *arg, size_t arglen, int scheme_required
         howdah_orig_##cname(INTERNAL_FUNCTION_PARAM_PASSTHRU);                 \
     }
 
-HOWDAH_DEFINE_URL_SINK(file_get_contents, 1)
 HOWDAH_DEFINE_URL_SINK(get_headers, 1)
 HOWDAH_DEFINE_URL_SINK(fsockopen, 0)
 HOWDAH_DEFINE_URL_SINK(pfsockopen, 0)
 HOWDAH_DEFINE_URL_SINK(stream_socket_client, 0)
+
+/* file_get_contents (T4): a URL sink for SSRF (scheme required) AND a file-open
+ * sink for the wrapper/poison firewall. Bespoke (not HOWDAH_DEFINE_URL_SINK) so
+ * it runs the firewall check after the SSRF verdict. Final action = max(ssrf,
+ * firewall); BLOCK neutralizes (RETVAL_FALSE). */
+static howdah_zif howdah_orig_file_get_contents = NULL;
+static void howdah_hook_file_get_contents(INTERNAL_FUNCTION_PARAMETERS) {
+    zval *a;
+    int block = 0;
+    HOWDAH_ARG(1, a);
+    if (HOWDAH_IS_STR(a)) {
+        const char *org = howdah_current_script();
+        if (ssrf_should_block(Z_STRVAL_P(a), Z_STRLEN_P(a), 1, org, org ? strlen(org) : 0)) {
+            block = 1;
+        }
+        if (!block
+            && howdah_file_firewall_check("file_get_contents", sizeof("file_get_contents") - 1,
+                                          Z_STRVAL_P(a), Z_STRLEN_P(a), HOWDAH_FILE_OP_READ)) {
+            block = 1;
+        }
+    }
+    if (block) {
+        RETVAL_FALSE;
+        return;
+    }
+    howdah_orig_file_get_contents(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
 
 /* 1 iff a fopen mode string selects a write (any of w/a/x/c/+). Read-only ("r"
  * / "rb") yields 0. Scanned, never logged. */
@@ -310,6 +336,21 @@ static void howdah_hook_fopen(INTERNAL_FUNCTION_PARAMETERS) {
             }
             if (howdah_g_behavior_php_write(NULL, org, orglen, Z_STRVAL_P(a),
                     Z_STRLEN_P(a), is_write) == HOWDAH_ACTION_BLOCK) {
+                block = 1;
+            }
+        }
+        /* T4 file-open firewall: wrapper scheme + poisonable local target. The
+         * op class is read vs write, read off the mode string (arg2). Self-gates
+         * on the decide callback, so this is a no-op when the firewall is off. */
+        if (!block) {
+            zval *m2;
+            int op = HOWDAH_FILE_OP_READ;
+            HOWDAH_ARG(2, m2);
+            if (HOWDAH_IS_STR(m2) && howdah_mode_is_write(Z_STRVAL_P(m2), Z_STRLEN_P(m2))) {
+                op = HOWDAH_FILE_OP_WRITE;
+            }
+            if (howdah_file_firewall_check("fopen", sizeof("fopen") - 1,
+                                           Z_STRVAL_P(a), Z_STRLEN_P(a), op)) {
                 block = 1;
             }
         }

@@ -337,10 +337,23 @@ makes `include`/`eval` **active on PHP 5.x**. These results come from
 | `phar://` (wrapper proxy; off by default) | detect/deny + **deserialization** | detect/deny + **deserialization** | detect/deny **only**; no deserialization claim |
 | SSRF (function swap + curl handle map; off by default) | yes, opt-in | yes, opt-in | yes, opt-in |
 | `include` / `eval` | **now active** (include: opcache caveat; eval: full) | active | active |
+| include/open wrapper firewall (`include_wrapper`, `file_open`; **on by default, block**) | yes (compile-swap; opcache caveat) | yes (compile default + opcode) | yes (compile default + opcode) |
 
-Verified on PHP 5.4, 5.6, 7.4, 8.3 and 8.5. Other minors build and are expected
-to work but are **not independently verified**. A debug-build leak review is
-still pending.
+The wrapper firewall (new; `lab/integration/wrapper.sh`, verified on PHP 5.4,
+5.6, 7.0, 7.4, 8.0, 8.1, 8.3, 8.5) classifies the fully resolved include/open
+target and refuses non-`file` wrappers (`php://filter` chains, `php://input`,
+`data:`, `expect://`, remote `http(s)`/`ftp(s)`; `phar://` stays with the phar
+sink) and poisonable local targets (`/proc/self/environ`, the session dir, the
+error_log). The file-open sinks (`fopen`/`file_get_contents`/`readfile`) refuse
+only the tight dangerous-wrapper set, so `php://input`, `php://temp`/`memory`
+and remote fetches are not false positives; a benign include corpus (relative
+templates, autoloader paths, absolute config, vendor autoload) is zero-block on
+every version. On PHP 5.x an include served from a warm opcache is not
+re-inspected (the same compile-swap caveat as `include`/`eval`).
+
+Verified on PHP 5.4, 5.6, 7.4, 8.3 and 8.5 (the wrapper firewall on 5.4, 5.6,
+7.0, 7.4, 8.0, 8.1, 8.3, 8.5). Other minors build and are expected to work but
+are **not independently verified**. A debug-build leak review is still pending.
 
 ### Legacy-era sinks (1.5 additions)
 

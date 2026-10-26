@@ -33,6 +33,7 @@ fn main() {
     println!("cargo:rerun-if-changed=sink_hook.c");
     println!("cargo:rerun-if-changed=phar_hook.c");
     println!("cargo:rerun-if-changed=ssrf_hook.c");
+    println!("cargo:rerun-if-changed=file_hook.c");
     println!("cargo:rerun-if-changed=refuse_hook.c");
     println!("cargo:rerun-if-changed=legacy_hook.c");
     println!("cargo:rerun-if-changed=oom_hook.c");
@@ -43,6 +44,7 @@ fn main() {
         .file("sink_hook.c")
         .file("phar_hook.c")
         .file("ssrf_hook.c")
+        .file("file_hook.c")
         .file("refuse_hook.c")
         .file("legacy_hook.c")
         .file("oom_hook.c")

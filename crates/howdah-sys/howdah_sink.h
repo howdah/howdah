@@ -41,6 +41,36 @@
 #define HOWDAH_LEGACY_XML             32
 #define HOWDAH_LEGACY_TLS             64
 
+/* File-op classes for the T4 file-open firewall (howdah_sink_check_open_at).
+ * Values MUST mirror HOWDAH_FILE_OP_* in howdah-core/src/ffi.rs. The reusable
+ * foundation (file_hook.c) that T5 extends adds further op codes here. */
+#define HOWDAH_FILE_OP_READ  0
+#define HOWDAH_FILE_OP_WRITE 1
+
+/* ---- T4 file-open firewall glue (file_hook.c) ---------------------------
+ * The decision callback the file-op trampolines invoke per intercepted call:
+ * `name` is the guarded function, `target` its path/URL argument (scanned,
+ * never logged), `op` a HOWDAH_FILE_OP_* code. Returns the action (0 ALLOW /
+ * 1 LOG / 2 BLOCK). Mirrors the `howdah_sink_check_open_at` FFI. */
+typedef int (*howdah_file_decide_t)(const char *name, size_t name_len,
+                                    const char *target, size_t target_len, int op);
+
+/* Install the file-op foundation: set the shared decide callback and swap the
+ * read-open sinks file_hook.c owns (readfile today; T5 extends this with
+ * delete/rename/write-target trampolines on the SAME callback). The fopen /
+ * file_get_contents trampolines live in ssrf_hook.c (already swapped there) and
+ * call howdah_file_firewall_check directly. Call once at first RINIT when the
+ * firewall is armed. A NULL callback leaves the firewall disarmed (fail-open). */
+void howdah_install_file_hooks(howdah_file_decide_t decide);
+
+/* Shared file-open firewall check, exported for ssrf_hook.c's fopen /
+ * file_get_contents trampolines (which are swapped there for SSRF/php-write).
+ * Returns 1 iff the call must be neutralized (BLOCK). Fail-open (0) when the
+ * firewall is disarmed (callback NULL) or `target` is NULL. Defined in
+ * file_hook.c. */
+int howdah_file_firewall_check(const char *name, size_t name_len,
+                               const char *target, size_t target_len, int op);
+
 /* Layer-4 behavior facets. Values MUST mirror HOWDAH_BEHAVIOR_* in
  * howdah-core/src/ffi.rs (and howdah_core.h). */
 #define HOWDAH_BEHAVIOR_EXEC_DIR  0

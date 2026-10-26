@@ -56,6 +56,8 @@ pub fn rule_layer(r: RuleId) -> u8 {
         | RuleId::Unserialize
         | RuleId::Phar
         | RuleId::Ssrf
+        | RuleId::IncludeWrapper
+        | RuleId::FileOpen
         | RuleId::MailInjection
         | RuleId::PregEval
         | RuleId::CreateFunction
@@ -110,6 +112,8 @@ fn rule_name(r: RuleId) -> &'static str {
         RuleId::Eval => "eval",
         RuleId::Phar => "phar",
         RuleId::Ssrf => "ssrf",
+        RuleId::IncludeWrapper => "include_wrapper",
+        RuleId::FileOpen => "file_open",
         RuleId::Unserialize => "unserialize",
         RuleId::UploadExec => "upload_exec",
         RuleId::UnexpectedBinary => "unexpected_binary",
@@ -293,6 +297,8 @@ mod tests {
             (RuleId::Unserialize, 3),
             (RuleId::Phar, 3),
             (RuleId::Ssrf, 3),
+            (RuleId::IncludeWrapper, 3),
+            (RuleId::FileOpen, 3),
             (RuleId::UploadExec, 4),
             (RuleId::UnexpectedBinary, 4),
             (RuleId::UnexpectedEgress, 4),
@@ -311,7 +317,7 @@ mod tests {
             (RuleId::NestingBudget, 1),
             (RuleId::ParseMemoryEstimate, 1),
         ];
-        assert_eq!(rule_catalog().len(), 42);
+        assert_eq!(rule_catalog().len(), 44);
         assert_eq!(want.len(), rule_catalog().len(), "layer table and rule_catalog differ");
         for r in rule_catalog() {
             let w = want.iter().find(|(x, _)| x == r).unwrap_or_else(|| panic!("{r:?} has no layer in this table")).1;

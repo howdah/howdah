@@ -27,6 +27,8 @@ pub mod script_hash;
 #[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]
 mod behavior_filter;
 #[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]
+mod file_filter;
+#[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]
 mod input_filter;
 #[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]
 mod legacy_filter;

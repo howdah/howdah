@@ -30,8 +30,9 @@ test('validateConfigWith returns the core error text', () => {
 
 test('ruleCatalogWith lists every rule with severities', () => {
   const rules = H.ruleCatalogWith(x);
-  assert.equal(rules.length, 42);
+  assert.equal(rules.length, 44);
   assert.ok(rules.some((r) => r.name === 'phar') && rules.some((r) => r.name === 'ssrf'));
+  assert.ok(rules.some((r) => r.name === 'include_wrapper') && rules.some((r) => r.name === 'file_open'));
   assert.ok(rules.some((r) => r.name === 'tls_verify') && rules.some((r) => r.name === 'dangerous_callback'));
   assert.ok(rules.some((r) => r.name === 'out_of_memory') && rules.some((r) => r.name === 'startup_fatal'));
   assert.ok(rules.some((r) => r.name === 'post_too_large') && rules.some((r) => r.name === 'nesting_budget') && rules.some((r) => r.name === 'parse_memory_estimate'));

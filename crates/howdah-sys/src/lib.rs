@@ -87,6 +87,15 @@ extern "C" {
     /// Called from the ext's `clear_request_state` (RSHUTDOWN and bailout paths).
     pub fn howdah_ssrf_request_reset();
 
+    /// Install the T4 file-op foundation (see `file_hook.c`): set the shared
+    /// file-op decide callback and swap the read-open sinks file_hook.c owns
+    /// (`readfile`). fopen / file_get_contents are swapped by
+    /// `howdah_install_ssrf_hooks` and call the firewall check once the callback
+    /// is set, so a file-firewall-armed config must ALSO reach
+    /// `howdah_install_ssrf_hooks`. Call once at first RINIT when the firewall is
+    /// armed. Idempotent; a NULL callback leaves the firewall disarmed.
+    pub fn howdah_install_file_hooks(decide: HowdahFileDecide);
+
     /// Install the Layer-4 behavior glue: set the five behavior callbacks AND
     /// swap `file_put_contents`/`move_uploaded_file`/`rename` onto their
     /// php-write trampolines (fopen is already swapped by the SSRF install, so
@@ -265,6 +274,18 @@ pub type HowdahSsrfDecide = unsafe extern "C" fn(
     port: u16,
     ips: *const u8,
     ips_count: usize,
+) -> ::std::ffi::c_int;
+
+/// The T4 file-op decide callback the file-open trampolines invoke (mirrors
+/// `howdah_file_decide_t` in `howdah_sink.h`). `name` is the guarded function,
+/// `target` its path/URL argument (never logged by the core), `op` a
+/// `HOWDAH_FILE_OP_*` code. Returns 0 ALLOW / 1 LOG / 2 BLOCK.
+pub type HowdahFileDecide = unsafe extern "C" fn(
+    name: *const ::std::ffi::c_char,
+    name_len: usize,
+    target: *const ::std::ffi::c_char,
+    target_len: usize,
+    op: ::std::ffi::c_int,
 ) -> ::std::ffi::c_int;
 
 /// The glue decision callback the C sink trampolines invoke. `sink` is a

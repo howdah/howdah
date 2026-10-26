@@ -50,7 +50,7 @@ order.
 |---|---|---|
 | 1 | Request-shape limits: multipart, input shape, request headers, the self-test marker, and the out-of-memory backstop | `max_parts`, `max_files`, `max_part_headers`, `max_part_header_bytes`, `max_field_name_len`, `max_filename_len`, `parse_memory_budget`, `malformed_multipart`, `upload_progress_abuse`, `self_test`, `max_input_vars`, `max_input_nesting_depth`, `max_input_key_bytes`, `max_request_headers`, `max_request_header_bytes`, `out_of_memory`, `startup_fatal`, `post_too_large`, `nesting_budget`, `parse_memory_estimate` |
 | 2 | Input inspection (the content classes are log-only by default; `cgi_arg_injection` blocks by default) | `sql_injection`, `path_traversal`, `command_injection`, `cgi_arg_injection` |
-| 3 | Sink hardening (log-only by default; `xxe` blocks by default, only when a dangerous libxml flag meets an external entity) | `command_exec`, `include`, `eval`, `unserialize`, `phar`, `ssrf`, and the legacy-era sinks `mail_injection`, `preg_eval`, `create_function`, `assert_string`, `dangerous_callback`, `xxe`, `tls_verify` |
+| 3 | Sink hardening (log-only by default; `xxe` and the include/open wrapper firewall `include_wrapper`/`file_open` block by default) | `command_exec`, `include`, `eval`, `unserialize`, `phar`, `ssrf`, `include_wrapper`, `file_open`, and the legacy-era sinks `mail_injection`, `preg_eval`, `create_function`, `assert_string`, `dangerous_callback`, `xxe`, `tls_verify` |
 | 4 | After-breach behaviour (log-only by default; inert until its lists are set) | `upload_exec`, `unexpected_binary`, `unexpected_egress`, `php_write` |
 
 The layer is computed from the rule by `rule_layer` in

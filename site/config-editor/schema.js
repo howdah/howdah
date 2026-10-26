@@ -72,6 +72,9 @@
     sql_injection: 'inspect', path_traversal: 'inspect', command_injection: 'inspect', cgi_arg_injection: 'inspect',
     command_exec: 'sinks', include: 'sinks', eval: 'sinks', unserialize: 'sinks',
     phar: 'sinks', ssrf: 'sinks',
+    // T4 include/open wrapper-scheme firewall (governed by [sinks.include]
+    // wrapper/poison, not by a per-rule [rules] mode).
+    include_wrapper: 'sinks', file_open: 'sinks',
     upload_exec: 'behavior', unexpected_binary: 'behavior', unexpected_egress: 'behavior', php_write: 'behavior',
     // 1.5 legacy-era sinks: modes come from [sinks.<sink>] mode, as for the others.
     mail_injection: 'sinks', preg_eval: 'sinks', create_function: 'sinks', assert_string: 'sinks',
@@ -137,7 +140,7 @@
     { key: 'mode', type: 'enum', values: MODES, default: 'detect',
       note: 'Independent of the global mode: a global block does not arm any sink. detect logs only (the default). Set a sink’s allowlist before arming block.' },
     { key: 'hook', type: 'enum', values: ['auto', 'opcode', 'compile'], default: 'auto',
-      note: 'How include/require/eval are guarded on PHP 7.0+. auto (default): compile when only eval needs the hook, so a default install keeps OPcache JIT on; opcode when include has allow_paths or [behavior] deny_exec_dirs is set. opcode: a user opcode handler, full coverage (warm-opcache includes too) but PHP turns the JIT off while it is installed. compile: the compile-pointer swap PHP 5.x uses; JIT stays on, eval is fully covered, an include served from a warm opcache is not re-inspected. Nothing is installed when eval and include are off and deny_exec_dirs is unset.' },
+      note: 'How include/require/eval are guarded on PHP 7.0+. auto (default): compile when the include firewall (on by default) and/or eval need the hook, so a default install keeps OPcache JIT on; opcode only when include has allow_paths or [behavior] deny_exec_dirs is set (where a warm-opcache include matters). opcode: a user opcode handler, full coverage (warm-opcache includes too) but PHP turns the JIT off while it is installed. compile: the compile-pointer swap PHP 5.x uses; JIT stays on, eval is fully covered, an include served from a warm opcache is not re-inspected (attack includes of a wrapper/poison target are dynamic cache-misses, so compile still sees them). Nothing is installed only when the include firewall, eval and include allow_paths are all off and deny_exec_dirs is unset.' },
     { key: 'command_exec.mode', type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
       note: 'system, exec, shell_exec, passthru, popen, proc_open. Unset inherits sinks.mode. Only a string first argument is inspected (proc_open with an array command is not).' },
     { key: 'command_exec.allow', type: 'list', default: [],
@@ -146,9 +149,13 @@
       note: 'Off by default (object unserialize is high-volume). detect logs classes not in allow_classes; block refuses them. Fill allow_classes from the detect log first.' },
     { key: 'unserialize.allow_classes', type: 'list', default: [], note: 'Class names that may be unserialized, one per line.' },
     { key: 'include.mode', type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
-      note: 'include/require. Active on PHP 5.x and 7.0+; on 5.x an include served from a warm opcache is not re-inspected. Inert until allow_paths is set.' },
+      note: 'The include/require ALLOWLIST check. Active on PHP 5.x and 7.0+; on 5.x an include served from a warm opcache is not re-inspected. Inert until allow_paths is set. The wrapper/poison firewall below is separate and on by default.' },
     { key: 'include.allow_paths', type: 'list', default: [],
       note: 'Directories include/require may load from, one per line. Lexical prefixes: a symlink under an allowed directory is not resolved.' },
+    { key: 'include.wrapper', type: 'enum', values: MODES, default: 'block',
+      note: 'The include/open wrapper-scheme firewall (T4): refuses a non-file stream wrapper. For include/require every non-file, non-phar wrapper (php://filter chains, php://input, data:, expect://, remote http(s)/ftp(s), zip://…); for fopen/file_get_contents/readfile only the near-zero-benign-use wrappers (php://filter, data:, expect://) — php://input/temp/memory and remote fetches stay allowed (SSRF guards remote). ENFORCED by default (block), independent of the global mode and sinks.mode, like xxe. detect logs; off disables. Only a scheme label is logged, never the target.' },
+    { key: 'include.poison', type: 'enum', values: MODES, default: 'block',
+      note: 'The poisonable-local-target firewall (T4): refuses include/open of /proc/self/environ and other /proc/*, a file under the runtime session.save_path, or PHP’s configured error_log — the classic LFI->RCE log/session/proc poisoning sinks. ENFORCED by default (block), independent of the global mode and sinks.mode. detect logs; off disables. Only a category label is logged, never the target.' },
     { key: 'eval.mode', type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
       note: 'eval. Active on PHP 5.x and 7.0+ (fully covered on both). There is no allowlist: in detect every eval() logs; in block every eval() is skipped.' },
     // 1.3: both opt-in (off); only an explicit mode here arms them.

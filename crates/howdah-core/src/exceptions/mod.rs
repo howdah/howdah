@@ -60,6 +60,8 @@ impl Layer {
             | RuleId::Unserialize
             | RuleId::Phar
             | RuleId::Ssrf
+            | RuleId::IncludeWrapper
+            | RuleId::FileOpen
             | RuleId::MailInjection
             | RuleId::PregEval
             | RuleId::CreateFunction

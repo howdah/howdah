@@ -87,6 +87,16 @@
 #define HOWDAH_SINK_TLS 12
 
 /**
+ * A read-open: fopen (read mode), file_get_contents, readfile.
+ */
+#define HOWDAH_FILE_OP_READ 0
+
+/**
+ * A write-open: fopen (write/append/create mode).
+ */
+#define HOWDAH_FILE_OP_WRITE 1
+
+/**
  * Action code from `howdah_sink_check_xml`: the dangerous call is neutralized
  * by removing the dangerous libxml flags from its options argument (the glue
  * then runs the original call with the rewritten flags) instead of refusing
@@ -142,6 +152,8 @@
 #define HOWDAH_HOOK_WHY_INCLUDE_ALLOW_PATHS 2
 
 #define HOWDAH_HOOK_WHY_DENY_EXEC_DIRS 3
+
+#define HOWDAH_HOOK_WHY_INCLUDE_FIREWALL 4
 
 /**
  * Per-file weight for the nesting budget (gap C / §4.4): PHP builds several
@@ -208,9 +220,11 @@
  * Longest prefix of an XML document the external-entity scan looks at. The
  * DOCTYPE (where entity declarations live) must precede the root element, so
  * nothing past the first element start is ever read; this cap bounds a
- * document that never opens one.
+ * document that never opens one. A prolog that is still open at the cap (a
+ * DOCTYPE pushed out of the window with a megabyte of comment) is reported,
+ * not waved through: see `XxeKind::Unscannable`.
  */
-#define XML_SCAN_MAX (64 * 1024)
+#define XML_SCAN_MAX (1024 * 1024)
 
 /**
  * Longest name in `DANGEROUS_CALLBACKS` plus a leading backslash; a cheap
@@ -715,6 +729,52 @@ int32_t howdah_sink_check_at(struct howdah_ctx *ctx,
                              size_t script_len,
                              const uint8_t *sha256,
                              size_t sha256_len);
+
+/**
+ * Store the runtime `session.save_path` and `error_log` for the include/open
+ * poisonable-local-target firewall (the glue reads them from PHP's ini). An
+ * empty value (NULL / 0 len) clears the slot, so that category simply does not
+ * fire. NULL ctx or panic is a no-op. Scanned, never logged.
+ *
+ * # Safety
+ * `ctx` NULL or live; each pointer NULL or valid for its length.
+ */
+void howdah_set_runtime_paths(struct howdah_ctx *ctx,
+                              const char *session,
+                              size_t session_len,
+                              const char *error_log,
+                              size_t error_log_len);
+
+/**
+ * 1 iff the include/open wrapper-or-poison firewall is armed (either mode is
+ * not off). The glue reads this once per process to decide whether to install
+ * the file-open trampolines; NULL ctx or panic is 0.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_sink_open_armed(struct howdah_ctx *ctx);
+
+/**
+ * File-open firewall check (T4) for fopen / file_get_contents / readfile.
+ * `name` is the guarded function, `target` the resolved path/URL (scanned,
+ * never logged), `op` a `HOWDAH_FILE_OP_*` class, `script`/`sha256` as the
+ * other `_at` entry points. Returns 0 Allow / 1 Log / 2 Block; NULL ctx or
+ * panic is 0 (fail-open). A hit is retrievable with `howdah_take_sink_log_line`.
+ *
+ * # Safety
+ * `ctx` NULL or live; every pointer NULL or valid for its length.
+ */
+int32_t howdah_sink_check_open_at(struct howdah_ctx *ctx,
+                                  const char *name,
+                                  size_t name_len,
+                                  const char *target,
+                                  size_t target_len,
+                                  int32_t op,
+                                  const char *script,
+                                  size_t script_len,
+                                  const uint8_t *sha256,
+                                  size_t sha256_len);
 
 /**
  * `howdah_sink_check_ssrf` plus the executing script and optional SHA-256.

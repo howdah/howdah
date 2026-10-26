@@ -359,9 +359,11 @@ allow = []                # commands that are fine; anything else is logged (or 
 # mode = "detect"         # opt in (log only). "block" refuses non-allowlisted classes.
 allow_classes = []        # class names that may be unserialized
 
-[sinks.include]           # include/require. Inert until allow_paths is set.
-# mode = "block"          # optional per-sink override; unset inherits sinks.mode
+[sinks.include]           # include/require. The allowlist check is inert until allow_paths is set.
+# mode = "block"          # optional per-sink override for the ALLOWLIST check; unset inherits sinks.mode
 allow_paths = []          # directories include/require may load from
+# wrapper = "block"       # include/open wrapper-scheme firewall (default BLOCK; "detect"/"off"). See below.
+# poison  = "block"       # poisonable-local-target firewall (default BLOCK; "detect"/"off"). See below.
 [sinks.eval]              # eval
 
 # New in 1.3. Both are OFF by default and are armed only by an explicit
@@ -403,6 +405,48 @@ running and the script continues. As always, the argument is never logged.
   `include` served from a **warm opcache** is not compiled again and is **not
   re-inspected**, so already-cached application files are not checked.
 
+#### `wrapper` / `poison`: the include/open stream-wrapper firewall
+
+Separate from the `allow_paths` allowlist above, and **enforced by default**,
+is a firewall that classifies the fully resolved target — the string after
+concatenation, variables and decoding, which an in-process hook sees but a
+network WAF cannot. It governs both `include`/`require` and the file-open sinks
+`fopen`, `file_get_contents` and `readfile`, through two keys under
+`[sinks.include]`:
+
+- **`wrapper`** (default `block`) — the stream-wrapper scheme. For
+  `include`/`require`, every non-`file` wrapper is refused: `php://filter`
+  chains, `php://input`, any other `php://*`, `data:`, `expect://`, remote
+  `http(s)`/`ftp(s)` and any other scheme (`zip://`, `compress.*://`, …).
+  Including a stream wrapper is never legitimate. `phar://` is **left to the
+  `phar` sink** (not double-guarded). For the file-open sinks the set is tighter
+  — only the near-zero-benign-use wrappers `php://filter`, `data:` and
+  `expect://` — so `file_get_contents('php://input')` (reading the request
+  body), `fopen('php://temp'|'php://memory', …)` and remote fetches (the `ssrf`
+  sink's job) are never false positives.
+- **`poison`** (default `block`) — a tight poisonable-local-target set:
+  `/proc/self/environ` and other `/proc/*`, a file under the runtime
+  `session.save_path`, and PHP's configured `error_log`. These are the classic
+  LFI->RCE log/session/proc poisoning sinks; nothing legitimate includes or
+  opens them. The match is anchored at the effective root (so a relative
+  `templates/…` or a plain app path never matches) and the `error_log` match is
+  exact.
+
+Both keys are **independent of the global `howdah.mode` and of `sinks.mode`**,
+like `xxe` and `cgi_arg_injection`: `block` (the default) refuses, `detect`
+logs only, `off` disables. A global `howdah.mode = off` or `[sinks] enabled =
+false` silences them. A block is a clean sink neutralization — the `include` is
+skipped (returns `false`) or the open returns `false`, and the **script
+continues; the worker survives** — never a request-level refusal. Rules:
+`include_wrapper` (the include path) and `file_open` (the open sinks), both
+Layer 3, Standard. Only a scheme/category label (`php://filter`, `data://`,
+`proc_environ`, `session`, `log`, …) and the guarded function name are logged;
+the target content is not. The file-open sinks are hooked whenever this firewall
+is armed. On PHP 5.x the firewall rides the compile-swap and shares its
+warm-opcache caveat (an already-cached include is not re-inspected); an attack
+include of a wrapper/poison target is a dynamic cache-miss, so it is compiled
+and seen.
+
 #### `hook`: the include/eval mechanism and OPcache JIT
 
 PHP's OPcache JIT refuses to run alongside any extension that installs a user
@@ -413,18 +457,21 @@ installed it unconditionally at startup, so loading Howdah turned the JIT off
 on PHP 8 even with `[sinks] enabled = false`. Now:
 
 - **A hook is installed only when something needs it**, decided once at
-  startup from the config: the `eval` sink is on (it is, in the shipped
-  defaults: `detect`), or the `include` sink is on **and** has `allow_paths`
-  (with no `allow_paths` it never produces an event, so it needs no hook), or
-  Layer 4 `[behavior] deny_exec_dirs` is set (its `require`d-file check runs in
-  the same hook). With all three off nothing is installed and the JIT stays on.
-  Like every other key, changing these needs a php-fpm/Apache restart.
+  startup from the config: the include/open firewall (`wrapper`/`poison`) is on
+  (it is, in the shipped defaults: `block`), or the `eval` sink is on (it is:
+  `detect`), or the `include` sink is on **and** has `allow_paths` (with no
+  `allow_paths` it never produces an event, so it needs no hook), or Layer 4
+  `[behavior] deny_exec_dirs` is set (its `require`d-file check runs in the same
+  hook). With all of those off nothing is installed and the JIT stays on. Like
+  every other key, changing these needs a php-fpm/Apache restart.
 - **`hook = "auto"` (the default)** picks the mechanism from what needs it:
-  `compile` when only `eval` does (the compile pointers cover every `eval`, so
-  the opcode handler would buy nothing and only cost the JIT), `opcode` when
-  `include` has `allow_paths` or `deny_exec_dirs` is set (the cases where an
-  include served from a warm opcache matters). So **a default install keeps
-  the JIT on** with `eval` still fully guarded.
+  `compile` when only `eval` and/or the include firewall need it (the compile
+  pointers cover every `eval`, and an attack include of a wrapper/poison target
+  is a dynamic cache-miss that the compile swap still sees, so the opcode
+  handler would only cost the JIT), `opcode` when `include` has `allow_paths` or
+  `deny_exec_dirs` is set (the cases where an *already-cached* include matters).
+  So **a default install keeps the JIT on** with the firewall and `eval` fully
+  guarded.
 - **`hook = "opcode"`:** the opcode handler. Full coverage: every
   `include`/`require` and `eval`, including files served from a warm opcache.
   The JIT is off. Whenever the opcode handler is what gets installed
@@ -455,9 +502,9 @@ on PHP 8 even with `[sinks] enabled = false`. Now:
   in the SAPI error log and PHP reports the `dl()` as failed.
 - `php --ri howdah` / `phpinfo()` show the result and why:
   `Include/eval hook => none | opcode handler (JIT disabled by PHP; <why>) | compile pointer (JIT compatible; <why>)`
-  where `<why>` is `auto: eval only`, `auto: include allow_paths set`,
-  `auto: deny_exec_dirs set` or `configured` (the JIT parentheticals appear on
-  PHP 8.0+, where the JIT exists).
+  where `<why>` is `auto: include firewall on`, `auto: eval only`,
+  `auto: include allow_paths set`, `auto: deny_exec_dirs set` or `configured`
+  (the JIT parentheticals appear on PHP 8.0+, where the JIT exists).
 
 The rest of Layer 3 (`command_exec`, `unserialize`, `phar`, `ssrf`) and
 Layers 1, 2 and 4 are function-table swaps, stream-wrapper proxies and

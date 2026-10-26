@@ -422,6 +422,18 @@ pub enum RuleId {
     Unserialize,
     Phar,
     Ssrf,
+    /// `include`/`require` of a non-`file` stream wrapper (`php://filter` chains,
+    /// `php://input`, `data:`, `expect://`, remote `http(s)`/`ftp(s)`), or of a
+    /// poisonable local target (`/proc/self/environ`, the session dir, the
+    /// error_log): LFI->RCE, RFI and log/session/proc poisoning. Standard,
+    /// Layer 3; enforced by default (`[sinks.include] wrapper`/`poison`), like
+    /// the `xxe`/`cgi_arg` rules. See `crate::sinks::wrapper`.
+    IncludeWrapper,
+    /// A file-open sink (`fopen`/`file_get_contents`/`readfile`) called with a
+    /// dangerous wrapper (`php://filter`, `data:`, `expect://`) or a poisonable
+    /// local target. Standard, Layer 3; enforced by default alongside
+    /// `IncludeWrapper`. See `crate::sinks::wrapper`.
+    FileOpen,
     UploadExec,
     UnexpectedBinary,
     UnexpectedEgress,
@@ -484,6 +496,8 @@ impl RuleId {
             | RuleId::Unserialize
             | RuleId::Phar
             | RuleId::Ssrf
+            | RuleId::IncludeWrapper
+            | RuleId::FileOpen
             | RuleId::UploadExec
             | RuleId::UnexpectedBinary
             | RuleId::UnexpectedEgress
@@ -506,7 +520,7 @@ impl RuleId {
 /// or miss one it accepts. `rule_catalog_covers_every_variant` fails to
 /// compile when a variant is added here but not to the list.
 pub fn rule_catalog() -> &'static [RuleId] {
-    const ALL: [RuleId; 42] = [
+    const ALL: [RuleId; 44] = [
         RuleId::MaxParts,
         RuleId::MaxFiles,
         RuleId::MaxPartHeaders,
@@ -532,6 +546,8 @@ pub fn rule_catalog() -> &'static [RuleId] {
         RuleId::Unserialize,
         RuleId::Phar,
         RuleId::Ssrf,
+        RuleId::IncludeWrapper,
+        RuleId::FileOpen,
         RuleId::UploadExec,
         RuleId::UnexpectedBinary,
         RuleId::UnexpectedEgress,
@@ -795,6 +811,8 @@ mod tests {
                 | RuleId::Unserialize
                 | RuleId::Phar
                 | RuleId::Ssrf
+                | RuleId::IncludeWrapper
+                | RuleId::FileOpen
                 | RuleId::UploadExec
                 | RuleId::UnexpectedBinary
                 | RuleId::UnexpectedEgress
@@ -814,7 +832,7 @@ mod tests {
                 | RuleId::FatalRecycle => {}
             }
         }
-        assert_eq!(rule_catalog().len(), 42);
+        assert_eq!(rule_catalog().len(), 44);
         let mut sorted = all.to_vec();
         sorted.sort();
         sorted.dedup();
@@ -836,6 +854,10 @@ mod tests {
         assert_eq!(RuleId::Include.severity(), Severity::Standard);
         assert_eq!(RuleId::Eval.severity(), Severity::Standard);
         assert_eq!(RuleId::Unserialize.severity(), Severity::Standard);
+        assert_eq!(RuleId::IncludeWrapper.severity(), Severity::Standard);
+        assert_eq!(RuleId::FileOpen.severity(), Severity::Standard);
+        assert_eq!(serde_json::to_string(&RuleId::IncludeWrapper).unwrap(), "\"include_wrapper\"");
+        assert_eq!(serde_json::to_string(&RuleId::FileOpen).unwrap(), "\"file_open\"");
         assert_eq!(RuleId::UploadExec.severity(), Severity::Standard);
         assert_eq!(RuleId::UnexpectedBinary.severity(), Severity::Standard);
         assert_eq!(RuleId::UnexpectedEgress.severity(), Severity::Standard);

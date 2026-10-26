@@ -6,6 +6,36 @@ All notable changes to Howdah are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Include/open wrapper-scheme firewall, on and enforcing by default.** A new
+  Layer 3 control classifies the FULLY RESOLVED target of an include/require and
+  of the file-open sinks (`fopen`, `file_get_contents`, `readfile`) in-process —
+  the string after concatenation, variables and decoding, which a network WAF
+  never sees — and refuses dangerous stream wrappers and poisonable local
+  targets. For `include`/`require` every non-`file` wrapper is refused
+  (`php://filter` chains, `php://input`, any other `php://*`, `data:`,
+  `expect://`, remote `http(s)`/`ftp(s)`, `zip://`…); `phar://` is left to the
+  existing phar sink. For the file-open sinks only the near-zero-benign-use
+  wrappers are refused (`php://filter`, `data:`, `expect://`) — `php://input`,
+  `php://temp`/`memory` and remote fetches (the SSRF sink's job) stay allowed. A
+  separate poison check refuses include/open of `/proc/self/environ` and other
+  `/proc/*`, a file under the runtime `session.save_path`, and PHP's configured
+  `error_log`, closing the classic LFI->RCE log/session/proc poisoning paths. New
+  rules `include_wrapper` and `file_open` (Layer 3, Standard). Both are
+  **enforced by default** (`[sinks.include] wrapper` / `poison`, default
+  `block`), independent of the global mode and `sinks.mode` like the `xxe` and
+  `cgi_arg_injection` rules; a global `off` or `[sinks] enabled = false` silences
+  them, `detect` logs only. A block is a clean sink neutralization — the include
+  is skipped / the open returns `false` and the script continues, the worker
+  survives — never a mid-VM bailout. Only a scheme/category label
+  (e.g. `php://filter`, `proc_environ`) and the guarded function name are logged;
+  the target content, which carries user data, is not. Enforced on PHP 5.4–8.5:
+  the include path uses the `ZEND_INCLUDE_OR_EVAL` opcode handler on 7.0+ (full
+  coverage, with `hook = "opcode"`) and the `zend_compile_file` pointer swap
+  elsewhere (the default, JIT stays on). **5.x warm-opcache caveat:** on PHP 5.x
+  (compile-swap only) an include served from a warm opcache is not re-compiled
+  and so is not re-inspected; an attack include of a wrapper/poison target is a
+  dynamic cache-miss and is compiled and seen. The file-op foundation
+  (`file_hook.c`) is built to be reused by the delete/read guards planned next.
 - XXE flag-awareness, **on and enforcing by default**. The Layer 3 `xxe` rule
   (the `xml` legacy sink) used to log any XML string that declared an external
   entity and, when armed, refuse it whatever the parse flags said. It now reads
@@ -36,7 +66,7 @@ All notable changes to Howdah are documented here. The format follows
   and `Dom\XMLDocument::createFromString` on 8.4+. The by-path readers
   (`simplexml_load_file`, `DOMDocument::load`, `XMLReader::open`) are still not
   hooked; `[sinks.xml] external_entities = "deny"` covers them. Same rule id (`xxe`,
-  catalog stays 42), same severity; `[sinks.xml] mode` now defaults to `block`
+  no new rule for this change), same severity; `[sinks.xml] mode` now defaults to `block`
   instead of inheriting `sinks.mode`, whatever the global mode (like `[inspect]
   cgi_arg`); `"detect"` logs only, `"off"` disables it, and `[sinks] enabled =
   false` and `howdah.mode = off` silence it. The other six legacy sinks keep their

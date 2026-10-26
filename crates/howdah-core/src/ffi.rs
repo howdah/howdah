@@ -91,6 +91,14 @@ pub const HOWDAH_SINK_CALLBACK: i32 = 10;
 pub const HOWDAH_SINK_XML: i32 = 11;
 pub const HOWDAH_SINK_TLS: i32 = 12;
 
+// File-op classes for `howdah_sink_check_open_at` (the T4 file-open firewall;
+// the reusable foundation T5 extends with delete/rename ops). Mirrored in
+// howdah_sink.h.
+/// A read-open: fopen (read mode), file_get_contents, readfile.
+pub const HOWDAH_FILE_OP_READ: i32 = 0;
+/// A write-open: fopen (write/append/create mode).
+pub const HOWDAH_FILE_OP_WRITE: i32 = 1;
+
 /// Action code from `howdah_sink_check_xml`: the dangerous call is neutralized
 /// by removing the dangerous libxml flags from its options argument (the glue
 /// then runs the original call with the rewritten flags) instead of refusing
@@ -216,6 +224,12 @@ pub struct howdah_ctx {
     exceptions: Exceptions,
     /// Write matched exceptions as `excepted` events.
     exceptions_log: bool,
+    /// Runtime `session.save_path` for the poisonable-local-target firewall
+    /// (empty when the glue has not set it). Scanned, never logged.
+    session_save_path: String,
+    /// Runtime `error_log` for the poisonable-local-target firewall (empty when
+    /// unset / logging to SAPI). Scanned, never logged.
+    error_log: String,
 }
 
 fn describe(r: RuleId) -> &'static str {
@@ -245,6 +259,8 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::Unserialize => "unserialize sink invoked on untrusted data",
         RuleId::Phar => "phar:// stream wrapper access outside the allowlist",
         RuleId::Ssrf => "outbound request to a disallowed destination",
+        RuleId::IncludeWrapper => "include/require of a non-file wrapper or a poisonable local target",
+        RuleId::FileOpen => "file-open sink called with a dangerous wrapper or a poisonable local target",
         RuleId::UploadExec => "possible executable or server-side code in an uploaded file",
         RuleId::UnexpectedBinary => "unexpected binary executed following an upload",
         RuleId::UnexpectedEgress => "possible unexpected outbound connection",
@@ -318,6 +334,8 @@ impl howdah_ctx {
             sink_log: None,
             exceptions,
             exceptions_log,
+            session_save_path: String::new(),
+            error_log: String::new(),
         }
     }
 
@@ -521,6 +539,112 @@ impl howdah_ctx {
         self.apply_with_mode(&hit, mode, &std::collections::BTreeMap::new(), &reason)
     }
 
+    /// Stash a firewall hit (shared by the include and open paths): honor a
+    /// scoped exception, resolve the action from the rule's own mode (block →
+    /// Block, else Log), and record the line. `reason` carries only a
+    /// scheme/category label and the construct name — never the target content.
+    fn emit_firewall(
+        &mut self,
+        rule: RuleId,
+        mode: Mode,
+        reason: String,
+        script: Option<&str>,
+        sha: Option<&[u8; 32]>,
+    ) -> Action {
+        if let Some(m) = self.excepted(rule, script, sha, None) {
+            self.note_excepted_sink(rule, &m);
+            return Action::Allow;
+        }
+        let action = if mode == Mode::Block { Action::Block } else { Action::Log };
+        self.sink_log = Some(self.record(rule, action, reason));
+        action
+    }
+
+    /// Layer-3 include/require firewall (T4): classify the resolved target's
+    /// stream-wrapper scheme (`wrapper`, default block), then flag a poisonable
+    /// local target (`poison`, default block), then the legacy `allow_paths`
+    /// check (inherits `sinks.mode`). First hit wins. The target is scanned,
+    /// never logged. `arg` is the fully resolved include target the hook saw.
+    fn include_firewall_check(
+        &mut self,
+        name: &[u8],
+        arg: &[u8],
+        script: Option<&str>,
+        sha: Option<&[u8; 32]>,
+    ) -> Action {
+        use crate::sinks::wrapper::{classify_poison, classify_scheme};
+        let global = self.config.mode;
+        let n = String::from_utf8_lossy(&name[..name.len().min(64)]).into_owned();
+        let decision: Option<(RuleId, Mode, String)> = (|| {
+            let sinks = &self.config.sinks;
+            let wmode = sinks.include_wrapper_mode(global);
+            let pmode = sinks.include_poison_mode(global);
+            let imode = sinks.effective_mode(SinkId::Include, global);
+            let cls = classify_scheme(arg);
+            if wmode != Mode::Off && cls.blocks_include() {
+                return Some((RuleId::IncludeWrapper, wmode, format!("include of {} wrapper refused via {n}", cls.as_label())));
+            }
+            if pmode != Mode::Off {
+                if let Some(kind) =
+                    classify_poison(arg, self.session_save_path.as_bytes(), self.error_log.as_bytes())
+                {
+                    return Some((RuleId::IncludeWrapper, pmode, format!("include of poisonable local target ({}) via {n}", kind.as_label())));
+                }
+            }
+            if imode != Mode::Off
+                && !sinks.include.allow_paths.is_empty()
+                && !include_allowed(arg, &sinks.include.allow_paths)
+            {
+                return Some((RuleId::Include, imode, format!("include path outside allowlist via {n}")));
+            }
+            None
+        })();
+        match decision {
+            Some((rule, mode, reason)) => self.emit_firewall(rule, mode, reason, script, sha),
+            None => Action::Allow,
+        }
+    }
+
+    /// Layer-3 file-open firewall (T4): a file-open sink (fopen/
+    /// file_get_contents/readfile) called with a dangerous wrapper
+    /// (`php://filter`/`data:`/`expect://`; remote is the SSRF sink's job) or a
+    /// poisonable local target. `op` is the operation class (read/write) for
+    /// future use; the verdict does not depend on it today. Target scanned,
+    /// never logged.
+    fn open_check(
+        &mut self,
+        name: &[u8],
+        target: &[u8],
+        _op: i32,
+        script: Option<&str>,
+        sha: Option<&[u8; 32]>,
+    ) -> Action {
+        use crate::sinks::wrapper::{classify_poison, classify_scheme};
+        let global = self.config.mode;
+        let n = String::from_utf8_lossy(&name[..name.len().min(64)]).into_owned();
+        let decision: Option<(RuleId, Mode, String)> = (|| {
+            let sinks = &self.config.sinks;
+            let wmode = sinks.include_wrapper_mode(global);
+            let pmode = sinks.include_poison_mode(global);
+            let cls = classify_scheme(target);
+            if wmode != Mode::Off && cls.blocks_open() {
+                return Some((RuleId::FileOpen, wmode, format!("open of {} wrapper refused via {n}", cls.as_label())));
+            }
+            if pmode != Mode::Off {
+                if let Some(kind) =
+                    classify_poison(target, self.session_save_path.as_bytes(), self.error_log.as_bytes())
+                {
+                    return Some((RuleId::FileOpen, pmode, format!("open of poisonable local target ({}) via {n}", kind.as_label())));
+                }
+            }
+            None
+        })();
+        match decision {
+            Some((rule, mode, reason)) => self.emit_firewall(rule, mode, reason, script, sha),
+            None => Action::Allow,
+        }
+    }
+
     /// Layer-3 sink check. `arg` is scanned, never logged. Independent of
     /// `worst`/`log`: a hit goes only to `sink_log`. All sinks honor block;
     /// include/eval block is enforced by the C opcode handler (PHP 7.0+); PHP
@@ -536,6 +660,14 @@ impl howdah_ctx {
         #[cfg(test)]
         if tests::FORCE_PANIC.with(|f| f.get()) {
             panic!("injected test panic");
+        }
+        // Include/require goes through the T4 firewall (wrapper scheme + poison
+        // local target, each with its own default-block mode), which also runs
+        // the legacy allow_paths check. Its modes are independent of the
+        // include sink's `effective_mode`, so it must not pass through the gate
+        // below.
+        if sink == SinkId::Include {
+            return self.include_firewall_check(name, arg, script, sha);
         }
         let mode = self.config.sinks.effective_mode(sink, self.config.mode);
         if mode == Mode::Off {
@@ -2165,6 +2297,98 @@ pub unsafe extern "C" fn howdah_sink_check_at(
     })
 }
 
+/// Store the runtime `session.save_path` and `error_log` for the include/open
+/// poisonable-local-target firewall (the glue reads them from PHP's ini). An
+/// empty value (NULL / 0 len) clears the slot, so that category simply does not
+/// fire. NULL ctx or panic is a no-op. Scanned, never logged.
+///
+/// # Safety
+/// `ctx` NULL or live; each pointer NULL or valid for its length.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_set_runtime_paths(
+    ctx: *mut howdah_ctx,
+    session: *const c_char,
+    session_len: usize,
+    error_log: *const c_char,
+    error_log_len: usize,
+) {
+    if ctx.is_null() {
+        return;
+    }
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        (*ctx).session_save_path = copy_str(session, session_len);
+        (*ctx).error_log = copy_str(error_log, error_log_len);
+    }));
+}
+
+/// 1 iff the include/open wrapper-or-poison firewall is armed (either mode is
+/// not off). The glue reads this once per process to decide whether to install
+/// the file-open trampolines; NULL ctx or panic is 0.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_sink_open_armed(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = &*ctx;
+        let g = c.config.mode;
+        i32::from(
+            c.config.sinks.include_wrapper_mode(g) != Mode::Off
+                || c.config.sinks.include_poison_mode(g) != Mode::Off,
+        )
+    }))
+    .unwrap_or(0)
+}
+
+/// File-open firewall check (T4) for fopen / file_get_contents / readfile.
+/// `name` is the guarded function, `target` the resolved path/URL (scanned,
+/// never logged), `op` a `HOWDAH_FILE_OP_*` class, `script`/`sha256` as the
+/// other `_at` entry points. Returns 0 Allow / 1 Log / 2 Block; NULL ctx or
+/// panic is 0 (fail-open). A hit is retrievable with `howdah_take_sink_log_line`.
+///
+/// # Safety
+/// `ctx` NULL or live; every pointer NULL or valid for its length.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn howdah_sink_check_open_at(
+    ctx: *mut howdah_ctx,
+    name: *const c_char,
+    name_len: usize,
+    target: *const c_char,
+    target_len: usize,
+    op: i32,
+    script: *const c_char,
+    script_len: usize,
+    sha256: *const u8,
+    sha256_len: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let n: &[u8] = if name.is_null() || name_len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(name as *const u8, name_len)
+        };
+        let t: &[u8] = if target.is_null() || target_len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(target as *const u8, target_len)
+        };
+        let s = copy_script(script, script_len);
+        let h = copy_sha(sha256, sha256_len);
+        code((*ctx).open_check(n, t, op, s.as_deref(), h.as_ref()))
+    }));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
 /// `howdah_sink_check_ssrf` plus the executing script and optional SHA-256.
 ///
 /// # Safety
@@ -2385,6 +2609,7 @@ pub const HOWDAH_HOOK_WHY_CONFIGURED: i32 = 0;
 pub const HOWDAH_HOOK_WHY_EVAL_ONLY: i32 = 1;
 pub const HOWDAH_HOOK_WHY_INCLUDE_ALLOW_PATHS: i32 = 2;
 pub const HOWDAH_HOOK_WHY_DENY_EXEC_DIRS: i32 = 3;
+pub const HOWDAH_HOOK_WHY_INCLUDE_FIREWALL: i32 = 4;
 
 /// The startup plan for the include/eval hook: `mechanism | (reason << 4)`
 /// with the `HOWDAH_HOOK_PLAN_*` / `HOWDAH_HOOK_WHY_*` codes. Mechanism
@@ -2420,6 +2645,7 @@ pub unsafe extern "C" fn howdah_sink_hook_plan(ctx: *mut howdah_ctx) -> i32 {
                     HookReason::EvalOnly => HOWDAH_HOOK_WHY_EVAL_ONLY,
                     HookReason::IncludeAllowPaths => HOWDAH_HOOK_WHY_INCLUDE_ALLOW_PATHS,
                     HookReason::DenyExecDirs => HOWDAH_HOOK_WHY_DENY_EXEC_DIRS,
+                    HookReason::IncludeFirewall => HOWDAH_HOOK_WHY_INCLUDE_FIREWALL,
                 };
                 m | (w << 4)
             }
@@ -3128,6 +3354,113 @@ mod tests {
         unsafe { howdah_free(c) };
     }
 
+    // ---- T4 include/open wrapper-scheme firewall ------------------------------
+
+    fn open(c: *mut howdah_ctx, name: &str, target: &[u8], op: i32) -> i32 {
+        unsafe {
+            howdah_sink_check_open_at(
+                c,
+                name.as_ptr() as *const c_char,
+                name.len(),
+                target.as_ptr() as *const c_char,
+                target.len(),
+                op,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            )
+        }
+    }
+
+    #[test]
+    fn include_wrapper_firewall_blocks_by_default() {
+        // On by default (shipped detect), independent of the include sink mode.
+        let c = init("mode = \"detect\"");
+        begin(c);
+        for target in [
+            &b"php://filter/convert.base64-encode/resource=/etc/passwd"[..],
+            b"php://input",
+            b"data://text/plain;base64,PD9waHA=",
+            b"expect://id",
+            b"http://evil.example/shell.txt",
+            b"ftp://evil.example/x",
+        ] {
+            assert_eq!(sink(c, HOWDAH_SINK_INCLUDE, "include", target), HOWDAH_BLOCK, "{:?}", String::from_utf8_lossy(target));
+            let line = take_sink(c).expect("line");
+            assert!(line.contains("\"rule\":\"include_wrapper\"") && line.contains("\"action\":\"block\""), "{line}");
+            // The target content never appears; only a scheme label.
+            assert!(!line.contains("passwd") && !line.contains("evil.example") && !line.contains("PD9waHA"), "{line}");
+        }
+        // A plain template / config path is never blocked.
+        assert_eq!(sink(c, HOWDAH_SINK_INCLUDE, "include", b"templates/header.php"), HOWDAH_ALLOW);
+        assert_eq!(sink(c, HOWDAH_SINK_INCLUDE, "include", b"/var/www/app/config.php"), HOWDAH_ALLOW);
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn include_poison_firewall_blocks_proc_and_session() {
+        let c = init("mode = \"detect\"");
+        begin(c);
+        unsafe {
+            let s = "/var/lib/php/sessions";
+            let e = "/var/log/php_errors.log";
+            howdah_set_runtime_paths(c, s.as_ptr() as *const c_char, s.len(), e.as_ptr() as *const c_char, e.len());
+        }
+        for target in [
+            &b"/proc/self/environ"[..],
+            b"/var/lib/php/sessions/sess_abc",
+            b"/var/log/php_errors.log",
+        ] {
+            assert_eq!(sink(c, HOWDAH_SINK_INCLUDE, "include", target), HOWDAH_BLOCK, "{:?}", String::from_utf8_lossy(target));
+            let line = take_sink(c).expect("line");
+            assert!(line.contains("\"rule\":\"include_wrapper\"") && line.contains("poisonable"), "{line}");
+        }
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn open_firewall_is_tight() {
+        let c = init("mode = \"detect\"");
+        begin(c);
+        // Blocked: the dangerous wrappers.
+        for t in [&b"php://filter/resource=/etc/passwd"[..], b"data://text/plain;base64,x", b"expect://id"] {
+            assert_eq!(open(c, "fopen", t, HOWDAH_FILE_OP_READ), HOWDAH_BLOCK, "{:?}", String::from_utf8_lossy(t));
+            let line = take_sink(c).expect("line");
+            assert!(line.contains("\"rule\":\"file_open\"") && line.contains("\"action\":\"block\""), "{line}");
+        }
+        // Allowed: legitimate open targets (php://input is read-the-body; remote
+        // is the SSRF sink's job; php://temp is benign).
+        for t in [&b"php://input"[..], b"php://temp", b"https://api.example/x.json", b"/var/www/app/data.json"] {
+            assert_eq!(open(c, "file_get_contents", t, HOWDAH_FILE_OP_READ), HOWDAH_ALLOW, "{:?}", String::from_utf8_lossy(t));
+            assert!(take_sink(c).is_none());
+        }
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn open_firewall_poison_proc() {
+        let c = init("mode = \"detect\"");
+        begin(c);
+        assert_eq!(open(c, "readfile", b"/proc/self/environ", HOWDAH_FILE_OP_READ), HOWDAH_BLOCK);
+        assert!(take_sink(c).unwrap().contains("\"rule\":\"file_open\""));
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn firewall_off_disables_both() {
+        let c = init("[sinks.include]\nwrapper = \"off\"\npoison = \"off\"");
+        begin(c);
+        assert_eq!(sink(c, HOWDAH_SINK_INCLUDE, "include", b"php://filter/resource=x"), HOWDAH_ALLOW);
+        assert_eq!(open(c, "fopen", b"php://filter/resource=x", HOWDAH_FILE_OP_READ), HOWDAH_ALLOW);
+        assert_eq!(unsafe { howdah_sink_open_armed(c) }, 0);
+        unsafe { howdah_free(c) };
+        // Armed by default.
+        let c = init("mode = \"detect\"");
+        assert_eq!(unsafe { howdah_sink_open_armed(c) }, 1);
+        unsafe { howdah_free(c) };
+    }
+
     #[test]
     fn unserialize_capped_fails_closed() {
         let c = init("[sinks.unserialize]\nmode=\"block\"\nallow_classes=[\"A\"]");
@@ -3506,10 +3839,10 @@ mod tests {
     #[test]
     fn sink_hook_plan_follows_config() {
         assert_eq!(unsafe { howdah_sink_hook_plan(std::ptr::null_mut()) }, HOWDAH_HOOK_PLAN_NONE);
-        // Shipped defaults: eval inherits detect -> the hook is needed; auto
-        // picks compile (eval only), so the JIT stays on by default.
+        // Shipped defaults: the include firewall is on -> the hook is needed;
+        // auto picks compile (firewall + eval are compile-covered), JIT stays on.
         let c = init("");
-        assert_eq!(unsafe { howdah_sink_hook_plan(c) }, HOWDAH_HOOK_PLAN_COMPILE | (HOWDAH_HOOK_WHY_EVAL_ONLY << 4));
+        assert_eq!(unsafe { howdah_sink_hook_plan(c) }, HOWDAH_HOOK_PLAN_COMPILE | (HOWDAH_HOOK_WHY_INCLUDE_FIREWALL << 4));
         unsafe { howdah_free(c) };
         let c = init("[sinks]\nhook = \"compile\"");
         assert_eq!(unsafe { howdah_sink_hook_plan(c) }, HOWDAH_HOOK_PLAN_COMPILE | (HOWDAH_HOOK_WHY_CONFIGURED << 4));
@@ -3525,8 +3858,16 @@ mod tests {
         let c = init("[sinks]\nenabled = false\n[behavior]\ndeny_exec_dirs = [\"/var/www/uploads\"]");
         assert_eq!(unsafe { howdah_sink_hook_plan(c) }, HOWDAH_HOOK_PLAN_OPCODE | (HOWDAH_HOOK_WHY_DENY_EXEC_DIRS << 4));
         unsafe { howdah_free(c) };
-        // Nothing armed, or global off: plan NONE.
-        for toml in ["[sinks.eval]\nmode = \"off\"", "[sinks]\nenabled = false", "mode = \"off\"\n[behavior]\ndeny_exec_dirs = [\"/x\"]"] {
+        // eval off but the firewall is on by default -> still compile.
+        let c = init("[sinks.eval]\nmode = \"off\"");
+        assert_eq!(unsafe { howdah_sink_hook_plan(c) }, HOWDAH_HOOK_PLAN_COMPILE | (HOWDAH_HOOK_WHY_INCLUDE_FIREWALL << 4));
+        unsafe { howdah_free(c) };
+        // Nothing armed (firewall + eval off), or global off / disabled: NONE.
+        for toml in [
+            "[sinks.include]\nwrapper = \"off\"\npoison = \"off\"\n[sinks.eval]\nmode = \"off\"",
+            "[sinks]\nenabled = false",
+            "mode = \"off\"\n[behavior]\ndeny_exec_dirs = [\"/x\"]",
+        ] {
             let c = init(toml);
             assert_eq!(unsafe { howdah_sink_hook_plan(c) }, HOWDAH_HOOK_PLAN_NONE, "{toml}");
             unsafe { howdah_free(c) };

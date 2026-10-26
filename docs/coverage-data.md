@@ -505,3 +505,105 @@ fixture marker. Every changed C file was also compiled with
 Not covered by this lab: php-fpm and Apache (same function-table swaps as the
 Layer 3 sinks), PHP 8.2 and 8.4 (not run), Windows. Known misses are listed in `docs/config.md` under `[behavior]` "Known
 limitations".
+
+# SSRF hardening (rebind, scheme, redirect)
+
+Lab: `lab/integration/sinks_fastfollow.sh` (driver) and
+`sinks_fastfollow_container.sh` (one `howdah-dev-php<ver>` image per run: builds the
+real extension, harmless fixtures only, no payload). The T6 section starts a
+loopback target (`php -S`: `hit.php` records that the "internal service" was
+reached, `redir.php` answers with a chosen `Location` and status), a DNS server
+(`lab/integration/corpus/rebind_dns.php`: the first A answer for a name under
+`.rebind.test` is the documentation address `203.0.113.7`, every later one is
+`127.0.0.1`) and a self-signed HTTPS target
+(`lab/integration/corpus/https_server.php`). Run on PHP 5.4.16, 5.6.40, 7.0.33,
+7.4.33, 8.0.30, 8.1.34, 8.3.36 and 8.5.12RC1, all PASS. The knobs are off unless a
+check arms them; every check first proves its baseline (facet off, or the range
+guard alone) really lets the attack through, and a negative check ("the internal
+service was not reached") runs against a server that was proven alive just before.
+
+| php | libcurl | curl pin | scheme refusals | redirects refused | rebind refusals | gaps pinned | T6 checks |
+|---|---|---|---|---|---|---|---|
+| 5.4.16 | 7.29.0 | none (after the fact) | 13 | 10 (308 not run) | 8 | 4 | 23 |
+| 5.6.40 | 7.52.1 | one address (< 7.59) | 13 | 11 | 9 | 4 | 24 |
+| 7.0.33 | 7.52.1 | one address (< 7.59) | 13 | 11 | 9 | 4 | 24 |
+| 7.4.33 | 7.74.0 | address list (>= 7.59) | 13 | 11 | 9 | 4 | 24 |
+| 8.0.30 | 7.74.0 | address list (>= 7.59) | 13 | 11 | 9 | 4 | 24 |
+| 8.1.34 | 8.14.1 | address list (>= 7.59) | 13 | 11 | 9 | 4 | 24 |
+| 8.3.36 | 8.14.1 | address list (>= 7.59) | 13 | 11 | 9 | 4 | 24 |
+| 8.5.12RC1 | 8.14.1 | address list (>= 7.59) | 13 | 11 | 9 | 4 | 24 |
+
+The pin is asserted to work on every PHP 5.5+ row; whether it pins one address or the
+list follows the libcurl version found at run time (7.59.0 is the boundary) and is
+not itself asserted.
+
+What each column counts:
+
+- **scheme refusals** (`scheme = "block"`): 7 curl URLs (`file://`, `gopher://` with a
+  smuggled `GET /hit.php`, `dict://`, `ldap://`, `tftp://`, `ftp://`, and the
+  `ftp.`-host protocol guess), 3 redirect hops (a 302 whose `Location` is
+  `gopher://`, `dict://` or `file://`) and 3 stream calls (`ftp://` through
+  `file_get_contents`, `fopen`, `get_headers`). Each returned `false`, the script
+  continued, the local file was not read, the smuggled request did not reach the
+  server, and the log line carried the scheme category only. With the facet off all
+  of them work (the lab proves the `file://` read, the redirect to loopback, and
+  whether this libcurl still speaks `gopher://`); `scheme = "detect"` logs and the
+  read still happens; `http://`, `HTTP://`, scheme-less `host:port`,
+  `curl_init(url)`, `curl_setopt_array`, `file://`/`php://memory`/`php://temp` on
+  the stream functions are untouched with zero events.
+- **redirects refused** (`redirect = "block"`): 302/301/303/307/308 to
+  `http://127.0.0.1/hit.php`, a scheme-relative `//127.0.0.1/..`, `169.254.169.254`
+  (class `metadata`, aborted at once, not after a connect timeout), `[::1]`, decimal
+  `2130706433` and `10.0.0.5`, plus a hop to the name `localhost` (resolved to
+  loopback). Each: `false`, `curl_errno` 23, script continued, `hit.flag` never
+  written. PHP 5.4's built-in test server wedges on a 308 (no reason phrase in 5.4)
+  and libcurl 7.29 predates 308, so that one case is skipped there. Untouched:
+  relative redirect, redirect to an `allow_hosts` host, a `Location` on a `201`,
+  `FOLLOWLOCATION` off, and `detect` (logs, follows).
+- **rebind refusals** (`rebind = "block"`): a name that resolves to loopback at call
+  time (refused before the connect, no `mode` needed); a rebinding name through curl
+  (**PHP >= 5.5: pinned**, libcurl connected to the decoy and failed with
+  `CURLE_COULDNT_CONNECT`/`OPERATION_TIMEDOUT`, the server was not reached, the
+  attempt is silent; **PHP 5.4: judged after the transfer**, response discarded,
+  logged `curl-connect` class `loopback`); `fsockopen`, `pfsockopen` and
+  `stream_socket_client` to a rebinding name (peer judged, stream closed, no fatal);
+  `fopen('http://rebinding/...')` (stream refused after the open; the request had
+  already reached the server, recorded as such); the peer of an `ssl://`
+  `stream_socket_client` (closed unless the host is in `allow_hosts`); a script's own
+  `CURLOPT_RESOLVE` to loopback (PHP >= 5.5); and a final redirect hop to a
+  rebinding name. With only the call-time guard all of those are served: the TOCTOU
+  is real in this lab, not assumed. `detect` serves and logs.
+- **benign** (every knob in `block`, `allow_hosts = ["localhost", "127.0.0.1"]`):
+  curl by name and by literal, a relative redirect and a redirect to the allowed
+  host, `file_get_contents`, `fopen`, `fsockopen`, `get_headers`, and HTTPS
+  (`curl` with the pin in place, `file_get_contents`) to the self-signed target,
+  all served with zero events.
+- **gaps pinned** (4): `file_get_contents` against a rebinding name is served under
+  `rebind = "block"` (no peer to inspect); a redirect hop to a rebinding name passes
+  `redirect` alone and is only discarded after the fact by `rebind`; a script-set
+  `CURLOPT_HEADERFUNCTION` with `FOLLOWLOCATION` is followed; `curl_multi_*` is not
+  hooked. Each is asserted as the current behavior, so the lab fails if one closes
+  without the docs being updated.
+- Footprint: with every knob off no extra function exists; with `redirect` or
+  `scheme` armed `howdah_curl_header_guard` is registered (first request), nothing
+  else is added.
+
+The C is also compiled with `gcc -fsyntax-only -Wall -Wextra -Werror` against
+each of the eight images' `php-config --includes` (clean). The Layer 3 fast-follow
+checks that already existed (phar, ssrf range, PHP 5.x include/eval, the misfire
+guard) pass unchanged on all eight versions; the misfire guard (C7) now switches
+the 1.5 `create_function` / `assert` sinks off, because they log every call by
+default and it was already failing on PHP 5.4 and 5.6 before this change.
+
+Every T6 scenario's exit status is checked (a signal or a fatal fails the run), and
+ten runs with the header guard registered must all exit 0: registering that
+function at request time instead of at startup aborted the PHP 7.0 worker about
+half the time at shutdown, which the exit-code check now catches.
+
+The neighbouring labs that exercise the same trampolines pass unchanged against the
+final code: `wrapper.sh` (8 versions, 28 checks each), `file_guard.sh` (8 versions,
+33 checks), `behavior.sh`, `legacy_sinks.sh` and `sinks.sh` (PHP 5.4, 7.4, 8.5).
+
+Not covered by this lab: php-fpm and Apache (same function-table swaps as the other
+Layer 3 sinks), a libcurl built without `CURLINFO_PRIMARY_IP`, `CURLOPT_PROXY`,
+Alpine/musl, and PHP 8.2/8.4 (not run).

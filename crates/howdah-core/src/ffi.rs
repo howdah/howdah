@@ -31,7 +31,10 @@ use crate::limits::{LimitHit, RuleId, Severity};
 use crate::log::{log_line, new_request_id, EventRecord};
 use crate::multipart::{Event, MultipartState};
 use crate::rules::{decide, Action};
-use crate::sinks::ssrf::{classify_ip, decode_literal_ip, host_allowed, parse_host, HostForm, IpRepr};
+use crate::sinks::ssrf::{
+    classify_ip, decode_literal_ip, denied_scheme, host_allowed, parse_host, resolve_pin_entry, HostForm, IpRepr,
+    SchemeCtx,
+};
 use crate::sinks::{command_allowed, include_allowed, legacy, phar_allowed, unserialize_classes, SinkId};
 
 /// Action codes returned over the ABI. Pinned: Allow=0, Log=1, Block=2.
@@ -90,6 +93,28 @@ pub const HOWDAH_SINK_ASSERT: i32 = 9;
 pub const HOWDAH_SINK_CALLBACK: i32 = 10;
 pub const HOWDAH_SINK_XML: i32 = 11;
 pub const HOWDAH_SINK_TLS: i32 = 12;
+
+// SSRF event kinds (`howdah_sink_check_ssrf_kind_at`). RANGE is the original
+// check-time reserved-range verdict; REBIND judges the address a connection
+// uses (resolve-at-connect); REDIRECT judges a curl 3xx hop's target.
+pub const HOWDAH_SSRF_KIND_RANGE: i32 = 0;
+pub const HOWDAH_SSRF_KIND_REBIND: i32 = 1;
+pub const HOWDAH_SSRF_KIND_REDIRECT: i32 = 2;
+
+// SSRF armed-mask bits (`howdah_ssrf_armed_mask`): which parts of the SSRF
+// hardening the C shim must run. PIN / PROTOCOLS say the rebind / scheme knob is
+// `block`, i.e. the shim may also change the curl handle's options; in `detect`
+// the shim only observes.
+pub const HOWDAH_SSRF_ARM_RANGE: i32 = 1;
+pub const HOWDAH_SSRF_ARM_REBIND: i32 = 2;
+pub const HOWDAH_SSRF_ARM_SCHEME: i32 = 4;
+pub const HOWDAH_SSRF_ARM_REDIRECT: i32 = 8;
+pub const HOWDAH_SSRF_ARM_PIN: i32 = 16;
+pub const HOWDAH_SSRF_ARM_PROTOCOLS: i32 = 32;
+
+// Where a URL was seen, for the egress-scheme denial (`howdah_sink_ssrf_scheme_at`).
+pub const HOWDAH_SSRF_VIA_STREAM: i32 = 0;
+pub const HOWDAH_SSRF_VIA_CURL: i32 = 1;
 
 // File-op classes for `howdah_sink_check_open_at` (the T4 file-open firewall;
 // the reusable foundation T5 extends with delete/rename ops). Mirrored in
@@ -971,9 +996,28 @@ impl howdah_ctx {
         action
     }
 
-    /// SSRF check; `recs` is a multiple of 17 bytes (see `howdah_sink_check_ssrf`).
+    /// Original check-time SSRF verdict (kind RANGE).
     fn sink_check_ssrf(
         &mut self,
+        scheme: &[u8],
+        host: &[u8],
+        port: u16,
+        recs: &[u8],
+        script: Option<&str>,
+        sha: Option<&[u8; 32]>,
+    ) -> Action {
+        self.sink_check_ssrf_kind(HOWDAH_SSRF_KIND_RANGE, scheme, host, port, recs, script, sha)
+    }
+
+    /// SSRF check; `recs` is a multiple of 17 bytes (see `howdah_sink_check_ssrf`).
+    /// `kind` picks the mode that governs the verdict and the wording of the
+    /// reason: RANGE the original `[sinks.ssrf] mode`, REBIND the connect-time
+    /// `rebind` knob (the addresses are those the connection resolved to or used),
+    /// REDIRECT the `redirect` knob (the addresses are a 3xx hop's target).
+    #[allow(clippy::too_many_arguments)]
+    fn sink_check_ssrf_kind(
+        &mut self,
+        kind: i32,
         scheme: &[u8],
         host: &[u8],
         port: u16,
@@ -985,7 +1029,11 @@ impl howdah_ctx {
         if tests::FORCE_PANIC.with(|f| f.get()) {
             panic!("injected test panic");
         }
-        let mode = self.config.sinks.effective_mode(SinkId::Ssrf, self.config.mode);
+        let mode = match kind {
+            HOWDAH_SSRF_KIND_REBIND => self.config.sinks.ssrf_rebind_mode(self.config.mode),
+            HOWDAH_SSRF_KIND_REDIRECT => self.config.sinks.ssrf_redirect_mode(self.config.mode),
+            _ => self.config.sinks.effective_mode(SinkId::Ssrf, self.config.mode),
+        };
         if mode == Mode::Off {
             return Action::Allow;
         }
@@ -1034,8 +1082,13 @@ impl howdah_ctx {
             let auth = &h[..end];
             auth.rsplit_once('@').map_or(auth, |(_, host)| host).to_string()
         };
+        let lead = match kind {
+            HOWDAH_SSRF_KIND_REBIND => "ssrf rebind via",
+            HOWDAH_SSRF_KIND_REDIRECT => "ssrf redirect via",
+            _ => "ssrf via",
+        };
         let reason = format!(
-            "ssrf via {}: host={} port={} ip={} class={}",
+            "{lead} {}: host={} port={} ip={} class={}",
             clip(scheme),
             bare_host,
             port,
@@ -1055,7 +1108,18 @@ impl howdah_ctx {
     /// legitimate and can hide a zero-padded numeric IP, so it is treated as
     /// suspicious per the effective mode. The host bytes are never logged.
     fn sink_ssrf_oversize(&mut self, script: Option<&str>, sha: Option<&[u8; 32]>) -> Action {
-        let mode = self.config.sinks.effective_mode(SinkId::Ssrf, self.config.mode);
+        self.sink_ssrf_oversize_kind(HOWDAH_SSRF_KIND_RANGE, script, sha)
+    }
+
+    /// [`Ctx::sink_ssrf_oversize`] for an SSRF event `kind`: the same verdict,
+    /// governed by the kind's own mode (a redirect hop with an oversize host is
+    /// judged by `redirect`, not by the range `mode`).
+    fn sink_ssrf_oversize_kind(&mut self, kind: i32, script: Option<&str>, sha: Option<&[u8; 32]>) -> Action {
+        let mode = match kind {
+            HOWDAH_SSRF_KIND_REBIND => self.config.sinks.ssrf_rebind_mode(self.config.mode),
+            HOWDAH_SSRF_KIND_REDIRECT => self.config.sinks.ssrf_redirect_mode(self.config.mode),
+            _ => self.config.sinks.effective_mode(SinkId::Ssrf, self.config.mode),
+        };
         if mode == Mode::Off {
             return Action::Allow;
         }
@@ -1064,10 +1128,51 @@ impl howdah_ctx {
             return Action::Allow;
         }
         let action = if mode == Mode::Block { Action::Block } else { Action::Log };
+        let lead = if kind == HOWDAH_SSRF_KIND_REDIRECT { "ssrf redirect" } else { "ssrf" };
         self.sink_log = Some(self.record(
             RuleId::Ssrf,
             action,
-            "ssrf: oversize host (>256 bytes), not resolvable - treated as suspicious".to_string(),
+            format!("{lead}: oversize host (>256 bytes), not resolvable - treated as suspicious"),
+        ));
+        action
+    }
+
+    /// Egress-scheme denial (`[sinks.ssrf] scheme`). `via` is `HOWDAH_SSRF_VIA_*`.
+    /// Only the scheme CATEGORY is logged, never the URL. `[[exceptions]]`
+    /// `rule = "ssrf"` applies; `allow_hosts` does not (it names destinations,
+    /// this is a protocol policy).
+    fn sink_ssrf_scheme(
+        &mut self,
+        via: i32,
+        url: &[u8],
+        script: Option<&str>,
+        sha: Option<&[u8; 32]>,
+    ) -> Action {
+        #[cfg(test)]
+        if tests::FORCE_PANIC.with(|f| f.get()) {
+            panic!("injected test panic");
+        }
+        let mode = self.config.sinks.ssrf_scheme_mode(self.config.mode);
+        if mode == Mode::Off {
+            return Action::Allow;
+        }
+        let (ctx, name) = if via == HOWDAH_SSRF_VIA_CURL {
+            (SchemeCtx::Curl, "curl")
+        } else {
+            (SchemeCtx::Stream, "stream")
+        };
+        let Some(label) = denied_scheme(url, ctx) else {
+            return Action::Allow;
+        };
+        if let Some(m) = self.excepted(RuleId::Ssrf, script, sha, None) {
+            self.note_excepted_sink(RuleId::Ssrf, &m);
+            return Action::Allow;
+        }
+        let action = if mode == Mode::Block { Action::Block } else { Action::Log };
+        self.sink_log = Some(self.record(
+            RuleId::Ssrf,
+            action,
+            format!("ssrf scheme via {name}: scheme={label} is not http/https"),
         ));
         action
     }
@@ -2011,7 +2116,9 @@ pub unsafe extern "C" fn howdah_sink_check_ssrf(
 /// SSRF parse seam: parse the target of an intercepted outbound call so the C
 /// shim never parses URLs itself. `scheme_required != 0` selects
 /// `HostForm::SchemeRequired` (URL-only sinks), else `BareHostOk` (fsockopen,
-/// curl). Returns 2 when the host parsed but is longer than `out_host_cap`
+/// curl); `scheme_required == 2` is `SchemeRequired` for a redirect `Location`
+/// value, where a leading `//` (scheme-relative) is read as `http://` and a
+/// plain relative reference is a skip. Returns 2 when the host parsed but is longer than `out_host_cap`
 /// (suspicious: nothing is written; call `howdah_sink_ssrf_oversize`). Returns 1 ("act") after writing the clean host (no userinfo/brackets/
 /// port, lowercased) to `out_host`, its length to `*out_host_len` and the port
 /// (0 if none) to `*out_port`. Returns 0 ("skip") for a non-network target
@@ -2038,7 +2145,18 @@ pub unsafe extern "C" fn howdah_ssrf_prepare(
     }
     catch_unwind(AssertUnwindSafe(|| {
         let form = if scheme_required != 0 { HostForm::SchemeRequired } else { HostForm::BareHostOk };
-        let Some(h) = parse_host(std::slice::from_raw_parts(input, input_len), form) else {
+        let raw = std::slice::from_raw_parts(input, input_len);
+        // 2 = a redirect `Location` value: an absolute URL or a scheme-relative
+        // `//host/..` (which libcurl resolves against the current scheme). A plain
+        // relative reference stays on the same host: not a new target.
+        let scheme_relative;
+        let raw = if scheme_required == 2 && raw.trim_ascii_start().starts_with(b"//") {
+            scheme_relative = [b"http:".as_slice(), raw.trim_ascii_start()].concat();
+            &scheme_relative[..]
+        } else {
+            raw
+        };
+        let Some(h) = parse_host(raw, form) else {
             return 0;
         };
         if h.name.len() > out_host_cap {
@@ -2575,6 +2693,213 @@ pub unsafe extern "C" fn howdah_sink_ssrf_oversize_at(
         code((*ctx).sink_ssrf_oversize(s.as_deref(), h.as_ref()))
     }))
     .unwrap_or(HOWDAH_ALLOW)
+}
+
+/// `howdah_sink_ssrf_oversize_at` for an SSRF event `kind` (`HOWDAH_SSRF_KIND_*`):
+/// a redirect hop whose host is longer than the resolver buffer is judged by the
+/// `redirect` mode, not the range `mode`. 0 Allow / 1 Log / 2 Block; NULL ctx or
+/// a panic is 0. The host bytes are never logged.
+///
+/// # Safety
+/// `ctx` NULL or live; pointers NULL or valid for their lengths.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_sink_ssrf_oversize_kind_at(
+    ctx: *mut howdah_ctx,
+    kind: i32,
+    script: *const c_char,
+    script_len: usize,
+    sha256: *const u8,
+    sha256_len: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let s = copy_script(script, script_len);
+        let h = copy_sha(sha256, sha256_len);
+        code((*ctx).sink_ssrf_oversize_kind(kind, s.as_deref(), h.as_ref()))
+    }))
+    .unwrap_or(HOWDAH_ALLOW)
+}
+
+/// Which parts of the SSRF hardening are armed, as a `HOWDAH_SSRF_ARM_*` mask
+/// (0 = nothing: the shim chains with zero overhead). RANGE is the original
+/// `[sinks.ssrf] mode`; REBIND / SCHEME / REDIRECT are the three hardening
+/// knobs; PIN and PROTOCOLS add that the rebind / scheme knob is `block` (the
+/// shim may then also set `CURLOPT_RESOLVE` / `CURLOPT_PROTOCOLS`). NULL ctx or
+/// a panic is 0. Never stashes a log line.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_ssrf_armed_mask(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = &*ctx;
+        let sinks = &c.config.sinks;
+        let mut m = 0;
+        if sinks.effective_mode(SinkId::Ssrf, c.config.mode) != Mode::Off {
+            m |= HOWDAH_SSRF_ARM_RANGE;
+        }
+        match sinks.ssrf_rebind_mode(c.config.mode) {
+            Mode::Off => {}
+            Mode::Detect => m |= HOWDAH_SSRF_ARM_REBIND,
+            Mode::Block => m |= HOWDAH_SSRF_ARM_REBIND | HOWDAH_SSRF_ARM_PIN,
+        }
+        match sinks.ssrf_scheme_mode(c.config.mode) {
+            Mode::Off => {}
+            Mode::Detect => m |= HOWDAH_SSRF_ARM_SCHEME,
+            Mode::Block => m |= HOWDAH_SSRF_ARM_SCHEME | HOWDAH_SSRF_ARM_PROTOCOLS,
+        }
+        if sinks.ssrf_redirect_mode(c.config.mode) != Mode::Off {
+            m |= HOWDAH_SSRF_ARM_REDIRECT;
+        }
+        m
+    }))
+    .unwrap_or(0)
+}
+
+/// SSRF verdict of a given kind (`HOWDAH_SSRF_KIND_*`) plus the executing
+/// script and optional SHA-256: the connect-time (REBIND) and redirect-hop
+/// (REDIRECT) variants of `howdah_sink_check_ssrf_at`. `ips` is `ips_count` x
+/// 17-byte records. 0 Allow / 1 Log / 2 Block; NULL ctx, malformed input or a
+/// panic is 0 (fail-open).
+///
+/// # Safety
+/// As `howdah_sink_check_ssrf_at`.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn howdah_sink_check_ssrf_kind_at(
+    ctx: *mut howdah_ctx,
+    kind: i32,
+    scheme: *const c_char,
+    scheme_len: usize,
+    host: *const c_char,
+    host_len: usize,
+    port: u16,
+    ips: *const u8,
+    ips_count: usize,
+    script: *const c_char,
+    script_len: usize,
+    sha256: *const u8,
+    sha256_len: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let sl = |p: *const c_char, n: usize| -> &[u8] {
+            if p.is_null() || n == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts(p as *const u8, n)
+            }
+        };
+        let recs: &[u8] = if ips.is_null() || ips_count == 0 {
+            &[]
+        } else {
+            match ips_count.checked_mul(17) {
+                Some(total) if total <= (1 << 24) => std::slice::from_raw_parts(ips, total),
+                _ => return HOWDAH_ALLOW,
+            }
+        };
+        let s = copy_script(script, script_len);
+        let h = copy_sha(sha256, sha256_len);
+        code((*ctx).sink_check_ssrf_kind(
+            kind,
+            sl(scheme, scheme_len),
+            sl(host, host_len),
+            port,
+            recs,
+            s.as_deref(),
+            h.as_ref(),
+        ))
+    }));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// Egress-scheme verdict for a URL (`via`: `HOWDAH_SSRF_VIA_STREAM` /
+/// `HOWDAH_SSRF_VIA_CURL`) plus the executing script and optional SHA-256. 0
+/// Allow / 1 Log / 2 Block per `[sinks.ssrf] scheme`; the log line carries the
+/// scheme category only. NULL ctx or a panic is 0.
+///
+/// # Safety
+/// `ctx` NULL or live; pointers NULL or valid for their lengths.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_sink_ssrf_scheme_at(
+    ctx: *mut howdah_ctx,
+    via: i32,
+    url: *const c_char,
+    url_len: usize,
+    script: *const c_char,
+    script_len: usize,
+    sha256: *const u8,
+    sha256_len: usize,
+) -> i32 {
+    if ctx.is_null() || url.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let u = std::slice::from_raw_parts(url as *const u8, url_len);
+        let s = copy_script(script, script_len);
+        let h = copy_sha(sha256, sha256_len);
+        code((*ctx).sink_ssrf_scheme(via, u, s.as_deref(), h.as_ref()))
+    }));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// Build the `CURLOPT_RESOLVE` entry that pins `input`'s hostname (an HTTP(S) or
+/// scheme-less curl URL) to the validated IPv4 addresses in `recs`
+/// (`recs_count` x 17-byte records), writing `host:port:ip[,ip...]` (no NUL) to
+/// `out`. `multi != 0` allows a comma list (libcurl 7.59+), else only the first
+/// address is pinned. Returns the byte count written, or 0 when there is
+/// nothing safe to pin (literal-IP host, non-HTTP(S) URL, IPv6-only/unresolved
+/// host, odd host spelling, or `out_cap` too small). NULL arguments or a panic
+/// is 0. Pure: no ctx, no logging.
+///
+/// # Safety
+/// `input` valid for `input_len`; `recs` NULL or valid for `recs_count * 17`
+/// bytes; `out` writable for `out_cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_ssrf_pin_entry(
+    input: *const u8,
+    input_len: usize,
+    recs: *const u8,
+    recs_count: usize,
+    multi: i32,
+    out: *mut u8,
+    out_cap: usize,
+) -> usize {
+    if input.is_null() || out.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let r: &[u8] = if recs.is_null() || recs_count == 0 {
+            &[]
+        } else {
+            match recs_count.checked_mul(17) {
+                Some(total) if total <= (1 << 24) => std::slice::from_raw_parts(recs, total),
+                _ => return 0,
+            }
+        };
+        let Some(e) = resolve_pin_entry(std::slice::from_raw_parts(input, input_len), r, multi != 0) else {
+            return 0;
+        };
+        if e.len() > out_cap {
+            return 0;
+        }
+        std::ptr::copy_nonoverlapping(e.as_ptr(), out, e.len());
+        e.len()
+    }))
+    .unwrap_or(0)
 }
 
 /// `howdah_behavior_check_exec_dir` plus an optional SHA-256 of the file at
@@ -3856,6 +4181,276 @@ mod tests {
         let b = b"10.0.0.5";
         let r = unsafe { howdah_ssrf_prepare(b.as_ptr(), b.len(), 0, buf.as_mut_ptr(), 64, &mut n, &mut port) };
         assert_eq!((r, &buf[..n], port), (1, &b"10.0.0.5"[..], 0));
+    }
+
+    #[test]
+    fn ssrf_prepare_redirect_location_forms() {
+        let (mut buf, mut n, mut port) = ([0u8; 64], 0usize, 0u16);
+        let mut go = |loc: &str| -> (i32, String) {
+            let r = unsafe {
+                howdah_ssrf_prepare(loc.as_ptr(), loc.len(), 2, buf.as_mut_ptr(), 64, &mut n, &mut port)
+            };
+            (r, String::from_utf8_lossy(&buf[..n]).into_owned())
+        };
+        // Absolute and scheme-relative Locations are new targets.
+        assert_eq!(go("http://169.254.169.254/latest/meta-data"), (1, "169.254.169.254".into()));
+        assert_eq!(go("//127.0.0.1:8080/x"), (1, "127.0.0.1".into()));
+        assert_eq!(go("  //Evil.example/x").0, 1);
+        // A relative reference stays on the current host: not a target.
+        for rel in ["/admin", "admin", "../x", "?q=1", "#f", ""] {
+            assert_eq!(go(rel).0, 0, "{rel:?}");
+        }
+        // Unknown schemes are the scheme knob's job, not a network target here.
+        assert_eq!(go("dict://127.0.0.1:11211/x").0, 0);
+    }
+
+    #[test]
+    fn ssrf_armed_mask_reflects_knobs() {
+        let mask = |toml: &str| {
+            let c = init(toml);
+            let m = unsafe { howdah_ssrf_armed_mask(c) };
+            unsafe { howdah_free(c) };
+            m
+        };
+        // Off by default, and a global block arms nothing.
+        assert_eq!(mask(""), 0);
+        assert_eq!(mask("mode=\"block\""), 0);
+        assert_eq!(mask("[sinks.ssrf]\nmode=\"detect\""), HOWDAH_SSRF_ARM_RANGE);
+        // Each knob is independent of `mode` and of the others.
+        assert_eq!(mask("[sinks.ssrf]\nrebind=\"detect\""), HOWDAH_SSRF_ARM_REBIND);
+        assert_eq!(
+            mask("[sinks.ssrf]\nrebind=\"block\""),
+            HOWDAH_SSRF_ARM_REBIND | HOWDAH_SSRF_ARM_PIN
+        );
+        assert_eq!(mask("[sinks.ssrf]\nscheme=\"detect\""), HOWDAH_SSRF_ARM_SCHEME);
+        assert_eq!(
+            mask("[sinks.ssrf]\nscheme=\"block\""),
+            HOWDAH_SSRF_ARM_SCHEME | HOWDAH_SSRF_ARM_PROTOCOLS
+        );
+        assert_eq!(mask("[sinks.ssrf]\nredirect=\"detect\""), HOWDAH_SSRF_ARM_REDIRECT);
+        assert_eq!(mask("[sinks.ssrf]\nredirect=\"block\""), HOWDAH_SSRF_ARM_REDIRECT);
+        assert_eq!(
+            mask("[sinks.ssrf]\nmode=\"block\"\nrebind=\"block\"\nscheme=\"block\"\nredirect=\"block\""),
+            HOWDAH_SSRF_ARM_RANGE
+                | HOWDAH_SSRF_ARM_REBIND
+                | HOWDAH_SSRF_ARM_PIN
+                | HOWDAH_SSRF_ARM_SCHEME
+                | HOWDAH_SSRF_ARM_PROTOCOLS
+                | HOWDAH_SSRF_ARM_REDIRECT
+        );
+        // A global off and `enabled = false` silence every knob.
+        let all = "[sinks.ssrf]\nmode=\"block\"\nrebind=\"block\"\nscheme=\"block\"\nredirect=\"block\"";
+        assert_eq!(mask(&format!("mode=\"off\"\n{all}")), 0);
+        assert_eq!(mask(&format!("[sinks]\nenabled=false\n{}", all.trim_start_matches("[sinks.ssrf]\n"))), 0);
+        assert_eq!(unsafe { howdah_ssrf_armed_mask(std::ptr::null_mut()) }, 0);
+    }
+
+    fn ssrf_kind(c: *mut howdah_ctx, kind: i32, via: &str, host: &str, ips: &[[u8; 17]]) -> i32 {
+        let flat: Vec<u8> = ips.iter().flatten().copied().collect();
+        unsafe {
+            howdah_sink_check_ssrf_kind_at(
+                c,
+                kind,
+                via.as_ptr() as _,
+                via.len(),
+                host.as_ptr() as _,
+                host.len(),
+                80,
+                flat.as_ptr(),
+                ips.len(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            )
+        }
+    }
+
+    #[test]
+    fn ssrf_rebind_judges_the_connected_address() {
+        let c = init("[sinks.ssrf]\nrebind=\"block\"");
+        begin(c);
+        // The host name looks public, but the address the connection used is loopback.
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REBIND, "curl-connect", "rebind.example", &[rec4([127, 0, 0, 1])]),
+            HOWDAH_BLOCK
+        );
+        let line = take_sink(c).expect("line");
+        assert!(line.contains("\"rule\":\"ssrf\"") && line.contains("\"action\":\"block\""), "{line}");
+        assert!(
+            line.contains("ssrf rebind via curl-connect: host=rebind.example port=80 ip=127.0.0.1 class=loopback"),
+            "{line}"
+        );
+        // A public connected address is fine; so is metadata only via the knob's own class.
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REBIND, "curl-connect", "ok.example", &[rec4([93, 184, 216, 34])]),
+            HOWDAH_ALLOW
+        );
+        assert!(take_sink(c).is_none());
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REBIND, "tcp", "x.example", &[rec4([169, 254, 169, 254])]),
+            HOWDAH_BLOCK
+        );
+        assert!(take_sink(c).expect("line").contains("class=metadata"));
+        // allow_hosts still wins (the operator vouched for the destination).
+        unsafe { howdah_free(c) };
+        let c = init("[sinks.ssrf]\nrebind=\"block\"\nallow_hosts=[\"internal.example\",\"10.0.0.0/8\"]");
+        begin(c);
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REBIND, "tcp", "internal.example", &[rec4([127, 0, 0, 1])]),
+            HOWDAH_ALLOW
+        );
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REBIND, "tcp", "other.example", &[rec4([10, 1, 2, 3])]),
+            HOWDAH_ALLOW
+        );
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REBIND, "tcp", "other.example", &[rec4([192, 168, 1, 1])]),
+            HOWDAH_BLOCK
+        );
+        unsafe { howdah_free(c) };
+        // detect logs and allows; off is silent.
+        let c = init("[sinks.ssrf]\nrebind=\"detect\"");
+        begin(c);
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REBIND, "curl-connect", "h.example", &[rec4([127, 0, 0, 1])]),
+            HOWDAH_LOG
+        );
+        assert!(take_sink(c).expect("line").contains("\"action\":\"log\""));
+        unsafe { howdah_free(c) };
+        let c = init("[sinks.ssrf]\nmode=\"block\"");
+        begin(c);
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REBIND, "curl-connect", "h.example", &[rec4([127, 0, 0, 1])]),
+            HOWDAH_ALLOW,
+            "rebind is its own knob: `mode` alone does not arm it"
+        );
+        assert!(take_sink(c).is_none());
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn ssrf_redirect_judges_the_hop_target() {
+        let c = init("[sinks.ssrf]\nredirect=\"block\"");
+        begin(c);
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REDIRECT, "http", "169.254.169.254", &[]),
+            HOWDAH_BLOCK,
+            "a literal metadata hop needs no resolved address"
+        );
+        let line = take_sink(c).expect("line");
+        assert!(line.contains("ssrf redirect via http: host=169.254.169.254 port=80 ip=169.254.169.254 class=metadata"), "{line}");
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REDIRECT, "https", "evil.example", &[rec4([10, 0, 0, 5])]),
+            HOWDAH_BLOCK
+        );
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REDIRECT, "https", "cdn.example", &[rec4([93, 184, 216, 34])]),
+            HOWDAH_ALLOW
+        );
+        // An allowlisted hop target is untouched.
+        unsafe { howdah_free(c) };
+        let c = init("[sinks.ssrf]\nredirect=\"detect\"\nallow_hosts=[\"localhost\"]");
+        begin(c);
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REDIRECT, "http", "localhost", &[rec4([127, 0, 0, 1])]),
+            HOWDAH_ALLOW
+        );
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REDIRECT, "http", "127.0.0.1", &[]),
+            HOWDAH_LOG
+        );
+        unsafe { howdah_free(c) };
+    }
+
+    fn ssrf_scheme(c: *mut howdah_ctx, via: i32, url: &str) -> i32 {
+        unsafe {
+            howdah_sink_ssrf_scheme_at(c, via, url.as_ptr() as _, url.len(), std::ptr::null(), 0, std::ptr::null(), 0)
+        }
+    }
+
+    #[test]
+    fn ssrf_scheme_denies_non_http_and_logs_only_the_category() {
+        let c = init("[sinks.ssrf]\nscheme=\"block\"");
+        begin(c);
+        for (u, label) in [
+            ("gopher://127.0.0.1:6379/_SECRETCMD", "gopher"),
+            ("dict://127.0.0.1:11211/SECRETCMD", "dict"),
+            ("file:///etc/SECRETFILE", "file"),
+            ("ldap://127.0.0.1/SECRETCMD", "ldap"),
+            ("tftp://127.0.0.1/SECRETCMD", "tftp"),
+        ] {
+            assert_eq!(ssrf_scheme(c, HOWDAH_SSRF_VIA_CURL, u), HOWDAH_BLOCK, "{u}");
+            let line = take_sink(c).expect("line");
+            assert!(line.contains("\"rule\":\"ssrf\"") && line.contains("\"action\":\"block\""), "{line}");
+            assert!(line.contains(&format!("ssrf scheme via curl: scheme={label}")), "{line}");
+            assert!(!line.contains("SECRET") && !line.contains("127.0.0.1") && !line.contains("//"), "leaked: {line}");
+        }
+        for ok in ["http://127.0.0.1/", "https://example.com/x", "example.com/x", "localhost:8080"] {
+            assert_eq!(ssrf_scheme(c, HOWDAH_SSRF_VIA_CURL, ok), HOWDAH_ALLOW, "{ok}");
+        }
+        // Stream functions: only the remote wrappers; local wrappers and phar are untouched.
+        assert_eq!(ssrf_scheme(c, HOWDAH_SSRF_VIA_STREAM, "ftp://127.0.0.1/x"), HOWDAH_BLOCK);
+        assert!(take_sink(c).expect("line").contains("ssrf scheme via stream: scheme=ftp"));
+        for ok in ["file:///etc/hostname", "php://temp", "data://text/plain,hi", "phar:///x.phar/y", "http://h/"] {
+            assert_eq!(ssrf_scheme(c, HOWDAH_SSRF_VIA_STREAM, ok), HOWDAH_ALLOW, "{ok}");
+        }
+        assert!(take_sink(c).is_none());
+        unsafe { howdah_free(c) };
+        // detect logs, off is silent, and the range `mode` does not arm it.
+        let c = init("[sinks.ssrf]\nscheme=\"detect\"");
+        begin(c);
+        assert_eq!(ssrf_scheme(c, HOWDAH_SSRF_VIA_CURL, "gopher://h/"), HOWDAH_LOG);
+        assert!(take_sink(c).expect("line").contains("\"action\":\"log\""));
+        unsafe { howdah_free(c) };
+        let c = init("[sinks.ssrf]\nmode=\"block\"");
+        begin(c);
+        assert_eq!(ssrf_scheme(c, HOWDAH_SSRF_VIA_CURL, "gopher://h/"), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        unsafe { howdah_free(c) };
+        assert_eq!(ssrf_scheme(std::ptr::null_mut(), HOWDAH_SSRF_VIA_CURL, "gopher://h/"), HOWDAH_ALLOW);
+    }
+
+    #[test]
+    fn ssrf_scheme_honours_exceptions_and_fails_open_on_panic() {
+        let toml = "[sinks.ssrf]\nscheme=\"block\"\n[[exceptions]]\nrule=\"ssrf\"\nscript=\"/app/trusted.php\"\nreason=\"partner ftp\"";
+        let c = init(toml);
+        begin(c);
+        let (url, s) = ("ftp://partner.example/x", "/app/trusted.php");
+        let r = |script: &str| unsafe {
+            howdah_sink_ssrf_scheme_at(
+                c,
+                HOWDAH_SSRF_VIA_CURL,
+                url.as_ptr() as _,
+                url.len(),
+                script.as_ptr() as _,
+                script.len(),
+                std::ptr::null(),
+                0,
+            )
+        };
+        assert_eq!(r(s), HOWDAH_ALLOW, "excepted script");
+        assert_eq!(r("/app/other.php"), HOWDAH_BLOCK, "any other script");
+        FORCE_PANIC.with(|f| f.set(true));
+        assert_eq!(ssrf_scheme(c, HOWDAH_SSRF_VIA_CURL, "gopher://h/"), HOWDAH_ALLOW);
+        FORCE_PANIC.with(|f| f.set(false));
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn ssrf_pin_entry_ffi_roundtrip() {
+        let recs = [rec4([93, 184, 216, 34]), rec4([93, 184, 216, 35])].concat();
+        let url = b"https://Example.com:8443/x?y=1";
+        let mut out = [0u8; 64];
+        let n = unsafe { howdah_ssrf_pin_entry(url.as_ptr(), url.len(), recs.as_ptr(), 2, 1, out.as_mut_ptr(), out.len()) };
+        assert_eq!(&out[..n], b"example.com:8443:93.184.216.34,93.184.216.35");
+        let n = unsafe { howdah_ssrf_pin_entry(url.as_ptr(), url.len(), recs.as_ptr(), 2, 0, out.as_mut_ptr(), out.len()) };
+        assert_eq!(&out[..n], b"example.com:8443:93.184.216.34");
+        // Too small a buffer, a literal host, NULLs: nothing.
+        assert_eq!(unsafe { howdah_ssrf_pin_entry(url.as_ptr(), url.len(), recs.as_ptr(), 2, 0, out.as_mut_ptr(), 8) }, 0);
+        let lit = b"http://127.0.0.1/";
+        assert_eq!(unsafe { howdah_ssrf_pin_entry(lit.as_ptr(), lit.len(), recs.as_ptr(), 2, 0, out.as_mut_ptr(), 64) }, 0);
+        assert_eq!(unsafe { howdah_ssrf_pin_entry(std::ptr::null(), 0, std::ptr::null(), 0, 0, out.as_mut_ptr(), 64) }, 0);
     }
 
     #[test]

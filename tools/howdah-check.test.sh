@@ -73,6 +73,8 @@ printf '%s\n' "$l3" | grep -q 'xxe.*enforced by default'
 check "Layer-3 line names the one enforced-by-default rule, xxe" $?
 printf '%s\n' "$l3" | grep -q 'never blocks a bare DOCTYPE'
 check "Layer-3 line says a bare DOCTYPE is never blocked" $?
+printf '%s\n' "$l3" | grep -q 'ssrf.*all off by default.*rebind.*scheme.*redirect'
+check "Layer-3 line names the opt-in SSRF hardening knobs (rebind, scheme, redirect) as off by default" $?
 l4=$(printf '%s\n' "$out" | grep '^note: layer 4')
 printf '%s\n' "$l4" | grep -q 'log-only by default'
 check "Layer-4 line says the behaviour facets are log-only by default" $?

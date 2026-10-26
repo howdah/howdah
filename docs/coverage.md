@@ -355,6 +355,59 @@ Verified on PHP 5.4, 5.6, 7.4, 8.3 and 8.5 (the wrapper firewall on 5.4, 5.6,
 7.0, 7.4, 8.0, 8.1, 8.3, 8.5). Other minors build and are expected to work but
 are **not independently verified**. A debug-build leak review is still pending.
 
+### SSRF hardening (`rebind`, `scheme`, `redirect`; opt-in)
+
+Three independent knobs beside the call-time range check, each **off by default**
+(`[sinks.ssrf] rebind | scheme | redirect = "detect" | "block"`; reference and the
+exact per-path guarantees in `docs/config.md`). Results from
+`lab/integration/sinks_fastfollow.sh` against a loopback target, a DNS server that
+answers a name with a public decoy once and `127.0.0.1` afterwards, and a
+self-signed HTTPS target; a negative check ("the internal service was not
+reached") is only counted against a server that was proven alive.
+
+| php | libcurl | curl rebinding | scheme refused (curl + stream) | redirects not followed | rebind refused (curl, socket, fopen) |
+|---|---|---|---|---|---|
+| 5.4 | 7.29.0 | **after the fact only** (no `CURLOPT_RESOLVE` in PHP 5.4) | yes | yes (308 not run: test server) | yes |
+| 5.6 | 7.52.1 | pinned (one address: libcurl < 7.59) | yes | yes | yes |
+| 7.0 | 7.52.1 | pinned (one address: libcurl < 7.59) | yes | yes | yes |
+| 7.4 | 7.74.0 | pinned (address list: libcurl >= 7.59) | yes | yes | yes |
+| 8.0 | 7.74.0 | pinned (address list: libcurl >= 7.59) | yes | yes | yes |
+| 8.1 | 8.14.1 | pinned (address list: libcurl >= 7.59) | yes | yes | yes |
+| 8.3 | 8.14.1 | pinned (address list: libcurl >= 7.59) | yes | yes | yes |
+| 8.5 | 8.14.1 | pinned (address list: libcurl >= 7.59) | yes | yes | yes |
+
+The lab asserts that the pin works on every row; whether it pins one address or the
+list follows the libcurl version found at run time and is not itself asserted.
+
+- **scheme:** curl `file://`, `gopher://` (a smuggled `GET` that reaches the
+  internal server when unguarded), `dict://`, `ldap://`, `tftp://`, `ftp://` and the
+  `ftp.`-host protocol guess are refused; so is a redirect hop to `gopher://` /
+  `dict://` / `file://`. `ftp://` is refused on `file_get_contents`, `fopen` and
+  `get_headers`; `file://`, `php://memory`/`temp` and `http://` are untouched.
+- **rebind:** with only the call-time guard a rebinding name is served by curl,
+  `file_get_contents` and `fsockopen` (the TOCTOU is real in the lab). With
+  `rebind = "block"` curl is pinned (libcurl connects to the decoy, never the
+  rebound loopback) or, on PHP 5.4, judged after the transfer and its response
+  discarded; `fsockopen`/`pfsockopen`/`stream_socket_client` close the stream when
+  the connected peer is internal; `fopen(url)` hides the response. `file_get_contents`
+  and `get_headers` have no peer to inspect and are still served (pinned as a known
+  gap by the lab).
+- **redirect:** a `301/302/303/307/308` to `127.0.0.1`, `[::1]`, decimal
+  `2130706433`, scheme-relative `//`, a name that resolves to loopback, `169.254.169.254`
+  or RFC1918 is aborted before libcurl follows it (`curl_errno` 23) and the internal
+  service is never contacted. Relative redirects, redirects to an `allow_hosts` host,
+  a `Location` on a `201` and `FOLLOWLOCATION` off are untouched.
+- **benign:** with `rebind`, `scheme` and `redirect` all in `block`, curl (by name,
+  literal, and through same-host and allowed-host redirects), `file_get_contents`,
+  `fopen`, `fsockopen`, `get_headers` and HTTPS to an `allow_hosts` host are served
+  with zero events.
+- **Known gaps, pinned by checks that fail if they close:** `file_get_contents` /
+  `get_headers` rebinding; a redirect hop to a rebinding name (not pinned; `rebind`
+  discards the final response after the request was sent); a script-set
+  `CURLOPT_HEADERFUNCTION` together with `FOLLOWLOCATION`; `curl_multi_*`. Also not
+  covered: the PHP http stream wrapper's own redirect following, `CURLOPT_CONNECT_TO`
+  (the connected-address check catches it), and any request through a proxy.
+
 ### Layer 4 file guards (delete, dangerous write, secret read)
 
 Three origin-attributed guards on the file-op hub (`[behavior] delete_guard`,
@@ -480,7 +533,12 @@ Limitations, stated plainly:
   build, fails open.
 - **SSRF is best-effort, resolve-at-check-time detection, not a connection-time
   boundary.** Bypasses: DNS rebinding, redirects to a new host, `curl_multi_*`,
-  `CURLOPT_RESOLVE`/`CONNECT_TO`, and a non-string or absent `CURLOPT_URL`.
+  `CURLOPT_RESOLVE`/`CONNECT_TO`, and a non-string or absent `CURLOPT_URL`. The
+  opt-in `rebind` / `scheme` / `redirect` knobs (T6, see "SSRF hardening" above)
+  close several of these on the paths PHP lets them, and the residual gaps are
+  stated there: no peer check for `file_get_contents` / `get_headers`; curl hops
+  are not pinned; a script-set `CURLOPT_HEADERFUNCTION`, `curl_multi_*` and the
+  PHP http wrapper's own redirects are not covered; PHP 5.4 cannot pin.
 - **Not hooked:** `copy`, `file`, `readfile`, `SoapClient`,
   `DOMDocument::load*`, `simplexml_load_file`.
 - A blocked `fsockopen`/`stream_socket_client` leaves `$errno`/`$errstr` unset;

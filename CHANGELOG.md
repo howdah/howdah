@@ -6,6 +6,66 @@ All notable changes to Howdah are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **SSRF hardening: resolve-at-connect, egress-scheme denial and a curl
+  internal-redirect guard (all opt-in, off by default).** Three new
+  `[sinks.ssrf]` keys beside the existing call-time range check, each `off`
+  (default), `detect` or `block`, independent of `mode`, of `[sinks] mode` and of
+  each other; a global `off` or `[sinks] enabled = false` still silences them. They
+  log as the existing `ssrf` rule (no new rule: the catalog stays at 46, and
+  `[[exceptions]]` `rule = "ssrf"` covers them) and never log a URL, path or query,
+  only a scheme category or host, port, IP and class. No new `php.ini` directive.
+  - **`scheme`:** curl may speak only `http`/`https`. `gopher://` (raw bytes to
+    Redis/memcached), `dict://`, `file://` (local file read), `ldap(s)://`,
+    `tftp://`, `ftp(s)://`, `sftp`, `scp`, `smb`, `imap`/`pop3`/`smtp`, `telnet`,
+    unknown schemes and libcurl's `ftp.`/`dict.`/`ldap.` host-prefix protocol guess
+    are refused, redirect hops included. In `block` the handle also gets
+    `CURLOPT_PROTOCOLS = HTTP|HTTPS` so libcurl itself refuses what a URL-parser
+    difference lets through. `file_get_contents`, `fopen` and `get_headers` refuse
+    the remote wrappers (`ftp`, `ftps`, `ssh2.*`, ...); `file`, `php`, `data`,
+    `glob`, `zip`, `compress.*` and `phar` are left alone.
+  - **`rebind` (resolve-at-connect, anti DNS rebinding):** the range check resolves
+    a name when the call is made and PHP/libcurl resolve it again at connect, so a
+    name can answer "public" then "internal". For curl on PHP 5.5+ the validated
+    IPv4 set is pinned with `CURLOPT_RESOLVE` (a list on libcurl 7.59+, else the
+    first address) so libcurl connects to exactly what was checked, and
+    `CURLINFO_PRIMARY_IP` is judged after the transfer (an internal address discards
+    the response). PHP 5.4 has no `CURLOPT_RESOLVE`: curl is judged after the fact
+    only (the request was already sent). `fsockopen`, `pfsockopen` and
+    `stream_socket_client` judge the connected peer of the returned stream and close
+    it (nothing was written yet); `fopen(url)` does the same after the open
+    (response hidden, request already sent). A proxy, or a script's own
+    `CURLOPT_RESOLVE`/`CONNECT_TO`, disables the pin. **Not covered:**
+    `file_get_contents` and `get_headers` (no stream or peer comes back), curl
+    redirect hops (not pinned; the final hop is judged after the fact).
+  - **`redirect`:** with `CURLOPT_FOLLOWLOCATION` on and no script-set
+    `CURLOPT_HEADERFUNCTION`, an internal header callback
+    (`howdah_curl_header_guard`, registered at startup only when this or `scheme` is armed)
+    sees each `Location` before libcurl acts on it and aborts the transfer
+    (`curl_errno` 23) when the target is internal (loopback, RFC1918, link-local,
+    metadata, CGNAT, ...; `allow_hosts` honoured) or not http(s). The internal
+    service is never contacted. **Not covered:** a script-set header callback,
+    `curl_multi_*`, the PHP http stream wrapper's own redirects (use
+    `'follow_location' => 0`), and a hop to a rebinding name.
+  - **Why PHP-level controls:** `CURLOPT_PREREQFUNCTION` / `OPENSOCKETFUNCTION` need
+    the `CURL*`, a private `php_curl` field whose layout differs per PHP version
+    (PHP exposes `PREREQFUNCTION` only from 8.5), so the guard uses
+    `CURLOPT_RESOLVE`, `CURLOPT_PROTOCOLS`, `CURLOPT_HEADERFUNCTION`,
+    `CURLINFO_PRIMARY_IP` and the stream peer name, which every supported PHP
+    shares. Howdah sets `CURLOPT_PROTOCOLS` and `CURLOPT_RESOLVE` only in `block`;
+    the header callback is installed in `detect` too (observe only, never aborts).
+  - **Verified** by `lab/integration/sinks_fastfollow.sh` on PHP 5.4, 5.6, 7.0, 7.4,
+    8.0, 8.1, 8.3 and 8.5 (libcurl 7.29.0 to 8.14.1) against a loopback target, a
+    rebinding DNS server and a self-signed HTTPS target: file/gopher/dict/ldap/tftp/
+    ftp refused, 301/302/303/307/308 to loopback, `[::1]`, decimal, scheme-relative,
+    metadata and RFC1918 not followed, a rebinding name refused by pin (5.5+) or
+    after the fact (5.4) and by the peer check on the socket openers, benign egress
+    to `allow_hosts` hosts (incl. HTTPS and same-host redirects) untouched with zero
+    events, and the four known gaps pinned by checks that fail if they close.
+    `sinks_fastfollow.sh` now takes the PHP minors as arguments (like the other
+    lab drivers) and prints a per-version table. Its misfire guard (C7) had been
+    failing on PHP 5.4/5.6 because the 1.5 `create_function`/`assert` sinks log by
+    default; it now switches those two off. See `docs/config.md`,
+    `docs/coverage.md` and `docs/coverage-data.md`.
 - **Layer 4 file guards: a delete guard and a widened dangerous-write facet
   (both enforced by default) and an opt-in secret-read guard.** Three
   origin-attributed guards on the file-op hub the include/open firewall

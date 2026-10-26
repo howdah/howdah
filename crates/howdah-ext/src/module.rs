@@ -294,7 +294,10 @@ unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
             // decide callback, so a firewall-armed config must reach the SSRF
             // install too.
             let open_armed = core::howdah_sink_open_armed(CTX) != 0;
+            // The T6 SSRF hardening knobs (rebind / scheme / redirect) are
+            // independent of the range `mode`, so any armed bit installs too.
             if core::howdah_sink_armed(CTX, core::HOWDAH_SINK_SSRF) != 0
+                || core::howdah_ssrf_armed_mask(CTX) != 0
                 || core::howdah_behavior_egress_active(CTX) != 0
                 || core::howdah_behavior_armed(CTX, core::HOWDAH_BEHAVIOR_PHP_WRITE) != 0
                 || open_armed
@@ -906,6 +909,14 @@ unsafe extern "C" fn minit(type_: c_int, module_number: c_int) -> c_int {
     // Layer 3: install the function-table sink hooks (process-global; no
     // MSHUTDOWN restore, like the other installs).
     sys::howdah_install_sink_hooks(crate::sink_filter::decide);
+
+    // T6: the SSRF redirect / scheme guard is a PHP-callable internal function.
+    // It is registered HERE, at startup, and only when one of those knobs is
+    // armed (PHP 7.x interns the name of a function registered later in the
+    // request's own string table, which dangles after the request).
+    if core::howdah_ssrf_armed_mask(CTX) & (core::HOWDAH_SSRF_ARM_REDIRECT | core::HOWDAH_SSRF_ARM_SCHEME) != 0 {
+        sys::howdah_register_ssrf_guard_fn();
+    }
 
     // The include/eval hook is a STARTUP decision (config is read once, here):
     // the core's plan says whether anything armed needs it (eval on, include

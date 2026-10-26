@@ -218,6 +218,28 @@ test('1.3 phar and ssrf sinks round-trip through the core', () => {
   assert.deepEqual(v.config.sinks.ssrf.allow_hosts, ['10.0.0.0/8', 'api.internal', '192.168.1.5']);
 });
 
+test('T6 ssrf hardening knobs emit only when set and round-trip through the core', () => {
+  // Shipped defaults emit nothing for them.
+  const base = E.emitToml(fresh(), {});
+  assert.ok(!/rebind|redirect|scheme/.test(base), base);
+  const s = fresh();
+  s['sinks.ssrf.rebind'] = 'block';
+  s['sinks.ssrf.scheme'] = 'detect';
+  s['sinks.ssrf.redirect'] = 'block';
+  const toml = E.emitToml(s, {});
+  assert.ok(toml.includes('[sinks.ssrf]'), toml);
+  const v = validate(toml);
+  assert.equal(v.ok, true, v.error);
+  assert.equal(v.config.sinks.ssrf.rebind, 'block');
+  assert.equal(v.config.sinks.ssrf.scheme, 'detect');
+  assert.equal(v.config.sinks.ssrf.redirect, 'block');
+  // They do not arm the range guard.
+  assert.equal(v.config.sinks.ssrf.mode, 'off');
+  const loaded = E.loadFromCanonical(v.config, catalog);
+  assert.equal(loaded.state['sinks.ssrf.rebind'], 'block');
+  assert.equal(loaded.state['sinks.ssrf.scheme'], 'detect');
+});
+
 test('xxe is on by default and its mode round-trips through the core', () => {
   // Shipped defaults emit nothing for [sinks.xml]: the core default (block) is the posture.
   assert.ok(!E.emitToml(fresh(), {}).includes('sinks.xml'));

@@ -86,6 +86,28 @@
 
 #define HOWDAH_SINK_TLS 12
 
+#define HOWDAH_SSRF_KIND_RANGE 0
+
+#define HOWDAH_SSRF_KIND_REBIND 1
+
+#define HOWDAH_SSRF_KIND_REDIRECT 2
+
+#define HOWDAH_SSRF_ARM_RANGE 1
+
+#define HOWDAH_SSRF_ARM_REBIND 2
+
+#define HOWDAH_SSRF_ARM_SCHEME 4
+
+#define HOWDAH_SSRF_ARM_REDIRECT 8
+
+#define HOWDAH_SSRF_ARM_PIN 16
+
+#define HOWDAH_SSRF_ARM_PROTOCOLS 32
+
+#define HOWDAH_SSRF_VIA_STREAM 0
+
+#define HOWDAH_SSRF_VIA_CURL 1
+
 /**
  * A read-open: fopen (read mode), file_get_contents, readfile.
  */
@@ -576,7 +598,9 @@ int32_t howdah_sink_check_ssrf(struct howdah_ctx *ctx,
  * SSRF parse seam: parse the target of an intercepted outbound call so the C
  * shim never parses URLs itself. `scheme_required != 0` selects
  * `HostForm::SchemeRequired` (URL-only sinks), else `BareHostOk` (fsockopen,
- * curl). Returns 2 when the host parsed but is longer than `out_host_cap`
+ * curl); `scheme_required == 2` is `SchemeRequired` for a redirect `Location`
+ * value, where a leading `//` (scheme-relative) is read as `http://` and a
+ * plain relative reference is a skip. Returns 2 when the host parsed but is longer than `out_host_cap`
  * (suspicious: nothing is written; call `howdah_sink_ssrf_oversize`). Returns 1 ("act") after writing the clean host (no userinfo/brackets/
  * port, lowercased) to `out_host`, its length to `*out_host_len` and the port
  * (0 if none) to `*out_port`. Returns 0 ("skip") for a non-network target
@@ -851,6 +875,99 @@ int32_t howdah_sink_ssrf_oversize_at(struct howdah_ctx *ctx,
                                      size_t script_len,
                                      const uint8_t *sha256,
                                      size_t sha256_len);
+
+/**
+ * `howdah_sink_ssrf_oversize_at` for an SSRF event `kind` (`HOWDAH_SSRF_KIND_*`):
+ * a redirect hop whose host is longer than the resolver buffer is judged by the
+ * `redirect` mode, not the range `mode`. 0 Allow / 1 Log / 2 Block; NULL ctx or
+ * a panic is 0. The host bytes are never logged.
+ *
+ * # Safety
+ * `ctx` NULL or live; pointers NULL or valid for their lengths.
+ */
+int32_t howdah_sink_ssrf_oversize_kind_at(struct howdah_ctx *ctx,
+                                          int32_t kind,
+                                          const char *script,
+                                          size_t script_len,
+                                          const uint8_t *sha256,
+                                          size_t sha256_len);
+
+/**
+ * Which parts of the SSRF hardening are armed, as a `HOWDAH_SSRF_ARM_*` mask
+ * (0 = nothing: the shim chains with zero overhead). RANGE is the original
+ * `[sinks.ssrf] mode`; REBIND / SCHEME / REDIRECT are the three hardening
+ * knobs; PIN and PROTOCOLS add that the rebind / scheme knob is `block` (the
+ * shim may then also set `CURLOPT_RESOLVE` / `CURLOPT_PROTOCOLS`). NULL ctx or
+ * a panic is 0. Never stashes a log line.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_ssrf_armed_mask(struct howdah_ctx *ctx);
+
+/**
+ * SSRF verdict of a given kind (`HOWDAH_SSRF_KIND_*`) plus the executing
+ * script and optional SHA-256: the connect-time (REBIND) and redirect-hop
+ * (REDIRECT) variants of `howdah_sink_check_ssrf_at`. `ips` is `ips_count` x
+ * 17-byte records. 0 Allow / 1 Log / 2 Block; NULL ctx, malformed input or a
+ * panic is 0 (fail-open).
+ *
+ * # Safety
+ * As `howdah_sink_check_ssrf_at`.
+ */
+int32_t howdah_sink_check_ssrf_kind_at(struct howdah_ctx *ctx,
+                                       int32_t kind,
+                                       const char *scheme,
+                                       size_t scheme_len,
+                                       const char *host,
+                                       size_t host_len,
+                                       uint16_t port,
+                                       const uint8_t *ips,
+                                       size_t ips_count,
+                                       const char *script,
+                                       size_t script_len,
+                                       const uint8_t *sha256,
+                                       size_t sha256_len);
+
+/**
+ * Egress-scheme verdict for a URL (`via`: `HOWDAH_SSRF_VIA_STREAM` /
+ * `HOWDAH_SSRF_VIA_CURL`) plus the executing script and optional SHA-256. 0
+ * Allow / 1 Log / 2 Block per `[sinks.ssrf] scheme`; the log line carries the
+ * scheme category only. NULL ctx or a panic is 0.
+ *
+ * # Safety
+ * `ctx` NULL or live; pointers NULL or valid for their lengths.
+ */
+int32_t howdah_sink_ssrf_scheme_at(struct howdah_ctx *ctx,
+                                   int32_t via,
+                                   const char *url,
+                                   size_t url_len,
+                                   const char *script,
+                                   size_t script_len,
+                                   const uint8_t *sha256,
+                                   size_t sha256_len);
+
+/**
+ * Build the `CURLOPT_RESOLVE` entry that pins `input`'s hostname (an HTTP(S) or
+ * scheme-less curl URL) to the validated IPv4 addresses in `recs`
+ * (`recs_count` x 17-byte records), writing `host:port:ip[,ip...]` (no NUL) to
+ * `out`. `multi != 0` allows a comma list (libcurl 7.59+), else only the first
+ * address is pinned. Returns the byte count written, or 0 when there is
+ * nothing safe to pin (literal-IP host, non-HTTP(S) URL, IPv6-only/unresolved
+ * host, odd host spelling, or `out_cap` too small). NULL arguments or a panic
+ * is 0. Pure: no ctx, no logging.
+ *
+ * # Safety
+ * `input` valid for `input_len`; `recs` NULL or valid for `recs_count * 17`
+ * bytes; `out` writable for `out_cap` bytes.
+ */
+size_t howdah_ssrf_pin_entry(const uint8_t *input,
+                             size_t input_len,
+                             const uint8_t *recs,
+                             size_t recs_count,
+                             int32_t multi,
+                             uint8_t *out,
+                             size_t out_cap);
 
 /**
  * `howdah_behavior_check_exec_dir` plus an optional SHA-256 of the file at

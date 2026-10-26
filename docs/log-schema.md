@@ -94,6 +94,31 @@ for example `unlink deletes a wp-config file at
 /var/www/html/wp-content/plugins/x/x.php:42`. They never carry the target path,
 its file name or any content.
 
+The `ssrf` rule (Layer 3, off by default) has four `reason` shapes, one per part
+of the guard, and none carries a URL, path, query or userinfo:
+
+- `ssrf via <scheme>: host=H port=P ip=I class=C` is the call-time range check
+  (`[sinks.ssrf] mode`); `class` is `loopback`, `unspecified`, `rfc1918`, `cgnat`,
+  `link_local`, `metadata`, `unique_local` or `benchmarking`.
+- `ssrf rebind via <where>: host=H port=P ip=I class=C` is the resolve-at-connect
+  knob (`rebind`); `ip` is the address the connection used or was about to be
+  pinned to, and `<where>` is `curl-resolve` (the set about to be pinned),
+  `curl-connect` (curl's connected address), `tcp-connect` (the peer of a
+  `fsockopen` / `pfsockopen` / `stream_socket_client` stream) or `stream-connect`
+  (the peer of an `fopen` stream).
+- `ssrf redirect via <scheme>: host=H port=P ip=I class=C` is the curl
+  internal-redirect guard (`redirect`): the `3xx` target that was not followed.
+- `ssrf scheme via <curl|stream>: scheme=S is not http/https` is the egress-scheme
+  denial (`scheme`); `S` is a scheme name from a fixed list, `other` for an
+  unknown one, or `guessed-ftp` / `guessed-dict` / ... for libcurl's host-prefix
+  protocol guess, never the URL.
+
+An oversize host (over 256 bytes) is logged as `ssrf: oversize host (>256 bytes),
+not resolvable - treated as suspicious` (`ssrf redirect: ...` for a redirect hop).
+A `block` is `action: "block"` and the call returns false (for `rebind` on a
+stream or curl response: after the connect, see `docs/config.md`); `detect` is
+`action: "log"`.
+
 Layer 4 in observe mode (`[behavior] observe = true`) writes its proposals
 as ordinary `action: "log"` lines whose `reason` starts with `proposed: `.
 That prefix is kept stable so proposals can be told apart.

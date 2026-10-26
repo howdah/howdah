@@ -374,6 +374,11 @@ allow_paths = []          # realpath prefixes allowed even under block
 [sinks.ssrf]              # outbound requests to internal addresses
 # mode = "detect"         # opt in (log only); "block" denies
 allow_hosts = []          # hostname | IP | CIDR; no wildcards
+# Hardening on top of the range check (T6). Each is OFF by default, takes
+# "detect" or "block", and is independent of mode and of the other two:
+# rebind   = "block"      # resolve-at-connect (anti DNS rebinding)
+# scheme   = "block"      # only http/https may leave (curl gopher/dict/file/ldap/... refused)
+# redirect = "block"      # a curl 3xx to an internal target is not followed
 ```
 
 ### `command_exec`
@@ -548,10 +553,12 @@ is checked, and a hit on a reserved or internal range is a match.
 - **DNS cost:** enabling it adds one `getaddrinfo` per distinct outbound host
   (cached for the request). There is **no timeout**: a stalled DNS server stalls
   the call. This is why it is off by default.
-- **Best effort, not a connection-time boundary.** The check resolves the host
-  when the call is made. It is bypassed by DNS rebinding, redirects to a new
-  host, `curl_multi_*` (not hooked), `CURLOPT_RESOLVE` / `CURLOPT_CONNECT_TO`,
-  and a non-string or absent `CURLOPT_URL`.
+- **Best effort, not a connection-time boundary.** `mode` alone resolves the
+  host when the call is made and PHP / libcurl resolve it again at connect. It is
+  bypassed by DNS rebinding, redirects to a new host, `curl_multi_*` (not
+  hooked), `CURLOPT_RESOLVE` / `CURLOPT_CONNECT_TO`, and a non-string or absent
+  `CURLOPT_URL`. The opt-in `rebind`, `scheme` and `redirect` knobs below close
+  several of these where PHP allows it, and say plainly where they cannot.
 - **Not hooked:** `copy`, `file`, `readfile`, `SoapClient`, `DOMDocument::load*`
   and `simplexml_load_file` can still make outbound requests unseen.
 - **Side effects of a block:** a blocked `fsockopen` / `stream_socket_client`
@@ -561,6 +568,136 @@ is checked, and a hit on a reserved or internal range is a match.
   256 bytes is treated as suspicious. Literal-IP decoding mirrors glibc
   `inet_aton`; libcurl and musl parse some encoded forms differently, so the
   resolved addresses are the authority.
+
+#### SSRF hardening: `rebind`, `scheme`, `redirect`
+
+Three opt-in knobs sit beside the range check. Each is **off by default**,
+takes `"detect"` or `"block"`, and is **independent** of `mode`, of
+`[sinks] mode` and of the other two (a global `howdah.mode = off` or
+`[sinks] enabled = false` still silences them). They log as the same `ssrf`
+rule (so `[[exceptions]]` `rule = "ssrf"` applies) and never log a URL, path or
+query: only a scheme *category*, or host, port, resolved IP and class.
+
+```toml
+[sinks.ssrf]
+mode     = "block"        # the range check at call time (above)
+rebind   = "block"        # resolve-at-connect
+scheme   = "block"        # only http/https may leave
+redirect = "block"        # a curl 3xx to an internal target is not followed
+allow_hosts = ["api.partner.example", "10.0.5.0/24"]
+```
+
+**`scheme`: only `http` and `https` may leave.**
+
+- *curl:* `gopher://`, `dict://`, `file://`, `ldap(s)://`, `tftp://`,
+  `ftp(s)://`, `sftp`, `scp`, `smb`, `imap`, `pop3`, `smtp`, `telnet`, `rtsp`,
+  `rtmp`, `mqtt` and any unknown scheme are refused, plus libcurl's host-prefix
+  protocol guess for a scheme-less URL (`ftp.example.com` is FTP; likewise
+  `dict.`, `ldap.`, `imap.`, `smtp.`, `pop3.`). `file://` reads a local file and
+  `gopher://` / `dict://` smuggle raw bytes to an internal service (Redis,
+  memcached), which is why curl gets an allowlist, not a denylist.
+- In `block` the curl handle is also given `CURLOPT_PROTOCOLS = HTTP|HTTPS` at
+  `curl_exec`, so libcurl itself refuses anything else, redirect hops included,
+  even where Howdah's URL parse and libcurl's differ. That **overrides a script's
+  own `CURLOPT_PROTOCOLS`** on that handle.
+- *`file_get_contents`, `fopen`, `get_headers`:* only the remote wrappers are
+  refused (`ftp`, `ftps`, `sftp`, `scp`, `gopher`, `dict`, `ldap(s)`, `tftp`,
+  `telnet`, `smb`, `imap`/`pop3`/`smtp`, `ssh2.*`). `http`, `https` and the local
+  wrappers (`file`, `php`, `data`, `glob`, `zip`, `compress.*`) are untouched;
+  `phar` stays the `phar` sink's and `php://filter` / `data:` / `expect://` the
+  include/open wrapper firewall's. The socket openers (`fsockopen`, ...) take
+  `tcp://` / `ssl://` transports, not URLs, so `scheme` does not apply to them.
+- `allow_hosts` does not apply (it names destinations; this is a protocol
+  policy). Exempt a trusted script with `[[exceptions]]`.
+- Log: `ssrf scheme via curl: scheme=gopher is not http/https`. The label is the
+  scheme (`other` for an unknown one, `guessed-ftp` for the host-prefix guess).
+
+**`rebind`: validate the address the connection really uses.** The range check
+resolves the host when the call is made and PHP / libcurl resolve it again when
+they connect, so a name can answer "public" to the first lookup and "internal"
+to the second. `rebind` closes that gap *where PHP lets it be closed*, and the
+guarantee differs per path:
+
+| Path | What `block` does | What it guarantees | What it cannot do |
+|---|---|---|---|
+| `curl_exec`, PHP 5.5+ | Judges the resolved set, then **pins** it into the handle with `CURLOPT_RESOLVE` (`host:port:ip`; a comma list on libcurl 7.59+, otherwise the first address). After the transfer it judges `CURLINFO_PRIMARY_IP`. | For the first hop libcurl connects to exactly the addresses that were checked; a rebinding name's second answer is never asked for. | Redirect hops are not pinned (the last hop is judged after the fact, see below). An IPv6-only host is not pinned (only the after-the-fact check applies). A literal IP has nothing to rebind. |
+| `curl_exec`, PHP 5.4 | PHP 5.4 has no `CURLOPT_RESOLVE`, so **nothing is pinned**. After the transfer `CURLINFO_PRIMARY_IP` (the address libcurl connected to) is judged and an internal one discards the response. | The response never reaches the script. | The request **was sent** to the internal address (a body already streamed to `CURLOPT_FILE` / `WRITEFUNCTION`, or echoed without `RETURNTRANSFER`, is out too). |
+| `fsockopen`, `pfsockopen`, `stream_socket_client` | After the connect, the **peer address of the returned stream** (what `getpeername` reports) is judged; an internal peer closes the stream the way `fclose` would and the call returns false. | Authoritative for the address the kernel used, however the name was resolved; nothing has been written yet (the script never held the stream). | The TCP handshake happened (a connect oracle). An unconnected `STREAM_CLIENT_ASYNC_CONNECT` socket and `unix://` are not judged. |
+| `fopen` of a URL | The same peer check on the returned stream. | The script cannot read the response. | The HTTP request had already been sent when `fopen` returned. |
+| `file_get_contents`, `get_headers` | **Nothing**: no stream or peer comes back. Only the call-time range check applies. | none beyond `mode` | A rebinding name is served. |
+
+- It judges with the same classifier and `allow_hosts` as `mode`, so a host,
+  IP or CIDR you allow is accepted at connect time too. It does not need `mode`:
+  `rebind = "block"` alone refuses a curl name that resolves to an internal
+  address at call time, before the connect, on every PHP version (pin or no pin).
+- *Ordering:* Howdah resolves with `getaddrinfo(AF_UNSPEC)` through the system
+  resolver (RFC 6724 sorting and `gai.conf` apply) and pins the IPv4 addresses in
+  the order returned; a name with A and AAAA records is pinned to its IPv4 set.
+  On libcurl before 7.59 only the first address is pinned, so a dead first A
+  record is not retried against the others.
+- *Resolve failure is fail-open (as for `mode`):* a name that does not resolve
+  when Howdah looks it up is allowed and cannot be pinned, so a resolver that
+  fails the first query and answers the second still gets through to libcurl's own
+  lookup; the after-the-fact check then judges the address it connected to (the
+  request has been sent by then).
+- A pin lives on the handle (libcurl keeps `CURLOPT_RESOLVE` entries until the
+  handle is freed or the entry is replaced); Howdah re-pins at every `curl_exec`
+  from that request's own resolution.
+- A proxy (`CURLOPT_PROXY`, or `http_proxy` / `https_proxy` / `all_proxy` in the
+  environment) means the connection goes to the proxy, which resolves the target
+  itself: neither the pin nor the connected-address check is applied. A script's
+  own `CURLOPT_RESOLVE` / `CURLOPT_CONNECT_TO` also suppresses the pin; the
+  connected-address check still catches it.
+- Log: `ssrf rebind via curl-connect: host=H port=P ip=I class=C` (the connected
+  address), `curl-resolve` (the set about to be pinned), `tcp-connect` (sockets),
+  `stream-connect` (`fopen`). `detect` pins nothing and discards nothing.
+
+**`redirect`: a curl `3xx` to an internal target is not followed.**
+
+- When `CURLOPT_FOLLOWLOCATION` is on (via `curl_setopt` or `curl_setopt_array`)
+  and the script has not set its own `CURLOPT_HEADERFUNCTION`, Howdah installs an
+  internal function, `howdah_curl_header_guard`, as the handle's header callback
+  at `curl_exec`. libcurl hands it every response header line *before it acts on
+  it*. On a `3xx` `Location` that is absolute or scheme-relative (`//host/..`),
+  whose host resolves to a reserved or internal address (the `mode` classifier,
+  `allow_hosts` honoured), or whose scheme is not http(s) while `scheme` is armed,
+  it returns a wrong length and libcurl aborts with `CURLE_WRITE_ERROR`
+  (`curl_errno` 23): the redirect is never followed, so the internal service is
+  never contacted. A relative `Location`, a `Location` on a non-3xx response and
+  `FOLLOWLOCATION` off are not new targets.
+- The function is registered at PHP startup, and only when `redirect` or `scheme`
+  is armed (it is visible in `get_defined_functions()['internal']`); a default
+  install registers nothing.
+- Log: `ssrf redirect via http: host=H port=P ip=I class=C`.
+- **Not covered:** a script that sets its own `CURLOPT_HEADERFUNCTION` together
+  with `FOLLOWLOCATION` (its hops are only judged after the fact when `rebind` is
+  armed); `curl_multi_*`; the PHP http stream wrapper's own redirect following
+  (`file_get_contents` / `fopen` follow up to 20 redirects internally and Howdah
+  never sees the hops: pass `'follow_location' => 0` in the stream context, or use
+  curl); and a hop to a *rebinding name*, which passes the hop check and is only
+  caught after the fact by `rebind` (the request was sent). Libraries that follow
+  redirects themselves (WordPress's curl transport and Guzzle do) call `curl_exec`
+  once per hop, so every hop gets the full call-time check.
+
+**Why not `CURLOPT_PREREQFUNCTION` / `CURLOPT_OPENSOCKETFUNCTION`?** They are the
+right tools (they see the address libcurl is about to connect to, once per hop)
+but they are C callbacks on the `CURL*`, which PHP keeps in a private `php_curl`
+struct whose layout differs per PHP version and whose headers are not installed
+on 5.x/7.x builds. PHP exposes `CURLOPT_PREREQFUNCTION` as a PHP callable only
+from 8.5 (libcurl 7.80+) and `CURLOPT_OPENSOCKETFUNCTION` not at all, so Howdah
+uses the controls every supported PHP shares: `CURLOPT_RESOLVE`,
+`CURLOPT_PROTOCOLS`, `CURLOPT_HEADERFUNCTION`, `CURLINFO_PRIMARY_IP` and the
+stream peer name. Howdah sets `CURLOPT_PROTOCOLS` (`scheme = "block"`) and
+`CURLOPT_RESOLVE` (`rebind = "block"`) only in `block`; the header callback for
+`redirect` / `scheme` is installed in `detect` too (it only observes there and
+never aborts). All of it goes through `curl_setopt` with errors silenced and is
+not logged.
+
+Verified by `lab/integration/sinks_fastfollow.sh` on PHP 5.4, 5.6, 7.0, 7.4, 8.0,
+8.1, 8.3 and 8.5 against a loopback target, a DNS server that rebinds a name from
+a decoy to `127.0.0.1` after the first answer, and a self-signed HTTPS target; the
+known gaps above are pinned by checks that fail if they ever close. Results in
+`docs/coverage-data.md`.
 
 ### Legacy-era sinks
 

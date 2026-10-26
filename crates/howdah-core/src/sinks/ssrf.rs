@@ -140,6 +140,140 @@ pub fn parse_host(input: &[u8], form: HostForm) -> Option<Host> {
     Some(Host { scheme, name, port })
 }
 
+/// Where a URL is about to be used, for the egress-scheme policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemeCtx {
+    /// A `curl_exec` target (or a redirect hop): anything but `http`/`https`
+    /// is refused, because libcurl is purely an egress tool (`file://` reads a
+    /// local file, `gopher://` / `dict://` smuggle raw bytes to an internal
+    /// service).
+    Curl,
+    /// A URL handed to `file_get_contents` / `fopen` / `get_headers`: only the
+    /// remote (network) wrappers are refused. Local wrappers (`file`, `php`,
+    /// `data`, `glob`, `zip`, `compress.*`) are not egress and are left alone;
+    /// `phar` is the phar sink's job.
+    Stream,
+}
+
+/// Schemes libcurl speaks (or that a PHP wrapper extension may add) that are
+/// not HTTP(S). The label is what the log carries: a category, never the URL.
+const CURL_SCHEMES: &[&str] = &[
+    "file", "gopher", "gophers", "dict", "ldap", "ldaps", "tftp", "ftp", "ftps", "sftp", "scp",
+    "telnet", "smb", "smbs", "imap", "imaps", "pop3", "pop3s", "smtp", "smtps", "rtsp", "rtmp",
+    "rtmps", "mqtt", "ws", "wss",
+];
+
+/// libcurl guesses the protocol of a scheme-less URL from the host's first
+/// label (`ftp.example.com` is FTP). Those host prefixes and their labels.
+const GUESS_PREFIXES: &[(&str, &str)] = &[
+    ("ftp.", "guessed-ftp"),
+    ("dict.", "guessed-dict"),
+    ("ldap.", "guessed-ldap"),
+    ("imap.", "guessed-imap"),
+    ("smtp.", "guessed-smtp"),
+    ("pop3.", "guessed-pop3"),
+    ("gopher.", "guessed-gopher"),
+];
+
+fn known_label(s: &[u8]) -> &'static str {
+    CURL_SCHEMES.iter().copied().find(|k| k.as_bytes() == s).unwrap_or("other")
+}
+
+/// Category label of an egress scheme the policy refuses, or `None` when the
+/// URL is allowed (HTTP(S), or no scheme where the context does not guess).
+///
+/// A scheme is the leading `alpha *(alnum / + / - / .)` run followed by `:/`;
+/// `host:port` (a colon then a digit) is not a scheme. For [`SchemeCtx::Curl`]
+/// a scheme-less URL is judged by libcurl's host-prefix protocol guess. This is
+/// a first line only: in `block` mode the C glue also sets `CURLOPT_PROTOCOLS`
+/// so libcurl itself refuses anything a parser difference lets through.
+pub fn denied_scheme(url: &[u8], ctx: SchemeCtx) -> Option<&'static str> {
+    let u = url.trim_ascii_start();
+    let n = u
+        .iter()
+        .take_while(|&&b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+        .count();
+    if n > 0 && u[0].is_ascii_alphabetic() && u.get(n) == Some(&b':') && u.get(n + 1) == Some(&b'/')
+    {
+        let s = u[..n].to_ascii_lowercase();
+        if s == b"http" || s == b"https" {
+            return None;
+        }
+        return match ctx {
+            SchemeCtx::Curl => Some(known_label(&s)),
+            SchemeCtx::Stream => {
+                if s.starts_with(b"ssh2.") {
+                    return Some("ssh2");
+                }
+                // Not egress / not ours: leave local wrappers and phar alone.
+                match known_label(&s) {
+                    "other" | "file" | "ws" | "wss" => None,
+                    k => Some(k),
+                }
+            }
+        };
+    }
+    if ctx == SchemeCtx::Curl {
+        let end = u
+            .iter()
+            .position(|&b| matches!(b, b'/' | b'?' | b'#' | b':' | b'\\'))
+            .unwrap_or(u.len());
+        let host = u[..end].to_ascii_lowercase();
+        for (p, label) in GUESS_PREFIXES {
+            if host.starts_with(p.as_bytes()) {
+                return Some(label);
+            }
+        }
+    }
+    None
+}
+
+/// Default port for the scheme-less / `http` / `https` URLs the resolve pin
+/// covers.
+fn pin_port(h: &Host) -> Option<u16> {
+    match h.scheme {
+        None | Some(Scheme::Http) => Some(h.port.unwrap_or(80)),
+        Some(Scheme::Https) => Some(h.port.unwrap_or(443)),
+        _ => None,
+    }
+}
+
+/// Build a `CURLOPT_RESOLVE` entry (`host:port:ip[,ip...]`) that pins the URL's
+/// hostname to the validated IPv4 addresses in `recs` (17-byte records), so
+/// libcurl connects to exactly what was checked instead of re-resolving
+/// (DNS rebinding). `multi` allows a comma list (libcurl 7.59+); otherwise only
+/// the first address is pinned. `None` when there is nothing safe to pin: a
+/// literal-IP host (no DNS to rebind), a non-HTTP(S) URL, an IPv6-only or
+/// unresolved host, or a name carrying anything but hostname characters (which
+/// libcurl would also spell differently).
+pub fn resolve_pin_entry(url: &[u8], recs: &[u8], multi: bool) -> Option<String> {
+    let h = parse_host(url, HostForm::BareHostOk)?;
+    let port = pin_port(&h)?;
+    if decode_literal_ip(&h.name).is_some()
+        || h.name.contains(&b':')
+        || !h.name.iter().all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+    {
+        return None;
+    }
+    let mut ips: Vec<String> = Vec::new();
+    #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)] // as_chunks needs Rust 1.88+
+    for r in recs.chunks_exact(17) {
+        if r[0] == 4 && ips.len() < 8 {
+            let s = format!("{}.{}.{}.{}", r[1], r[2], r[3], r[4]);
+            if !ips.contains(&s) {
+                ips.push(s);
+            }
+        }
+    }
+    if ips.is_empty() {
+        return None;
+    }
+    if !multi {
+        ips.truncate(1);
+    }
+    Some(format!("{}:{}:{}", String::from_utf8_lossy(&h.name), port, ips.join(",")))
+}
+
 /// Raw IP address bytes (no `std::net`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpRepr {
@@ -712,6 +846,152 @@ mod tests {
             &al(&["10/8"])
         ));
     }
+    fn ds(u: &str, c: SchemeCtx) -> Option<&'static str> {
+        denied_scheme(u.as_bytes(), c)
+    }
+
+    #[test]
+    fn curl_scheme_allows_only_http_https() {
+        use SchemeCtx::Curl;
+        for ok in [
+            "http://example.com/",
+            "HTTPS://example.com/x?y=gopher://z",
+            "  https://example.com",
+            "example.com/path",
+            "example.com:8080/path",
+            "localhost:8080",
+            "127.0.0.1:80",
+            "//cdn.example.com/x",
+            "/relative/path",
+            "ftpserver.example.com", // no dot after ftp: not the ftp. guess
+        ] {
+            assert_eq!(ds(ok, Curl), None, "{ok}");
+        }
+        for (bad, label) in [
+            ("gopher://127.0.0.1:70/_x", "gopher"),
+            ("GOPHER://127.0.0.1/", "gopher"),
+            ("dict://127.0.0.1:11211/info", "dict"),
+            ("file:///etc/passwd", "file"),
+            ("file:/etc/passwd", "file"),
+            ("ldap://127.0.0.1/", "ldap"),
+            ("tftp://127.0.0.1/x", "tftp"),
+            ("ftp://127.0.0.1/", "ftp"),
+            ("  sftp://h/x", "sftp"),
+            ("smtp://127.0.0.1:25/", "smtp"),
+            ("weird+scheme://h/", "other"),
+            ("ftp.example.com/x", "guessed-ftp"),
+            ("DICT.example.com", "guessed-dict"),
+            ("ldap.example.com:389", "guessed-ldap"),
+        ] {
+            assert_eq!(ds(bad, Curl), Some(label), "{bad}");
+        }
+    }
+
+    #[test]
+    fn stream_scheme_denies_only_remote_wrappers() {
+        use SchemeCtx::Stream;
+        for ok in [
+            "http://example.com/",
+            "https://example.com/",
+            "file:///etc/hostname",
+            "php://temp",
+            "php://input",
+            "data:text/plain,hi",
+            "data://text/plain;base64,aGk=",
+            "glob:///tmp/*",
+            "zip:///tmp/a.zip#b",
+            "compress.zlib:///tmp/a.gz",
+            "phar:///tmp/a.phar/x", // the phar sink's job
+            "expect://id",          // the include/open firewall's job
+            "/tmp/plain.txt",
+            "plain.txt",
+            "ws://host/",
+        ] {
+            assert_eq!(ds(ok, Stream), None, "{ok}");
+        }
+        for (bad, label) in [
+            ("ftp://127.0.0.1/x", "ftp"),
+            ("FTPS://h/x", "ftps"),
+            ("gopher://h/", "gopher"),
+            ("dict://h/", "dict"),
+            ("ldap://h/", "ldap"),
+            ("tftp://h/", "tftp"),
+            ("sftp://h/", "sftp"),
+            ("ssh2.sftp://u:p@h/x", "ssh2"),
+            ("ssh2.tunnel://h:22", "ssh2"),
+        ] {
+            assert_eq!(ds(bad, Stream), Some(label), "{bad}");
+        }
+        // Stream context never guesses a protocol from a scheme-less host.
+        assert_eq!(ds("ftp.example.com/x", Stream), None);
+    }
+
+    fn rec4(a: [u8; 4]) -> [u8; 17] {
+        let mut r = [0u8; 17];
+        r[0] = 4;
+        r[1..5].copy_from_slice(&a);
+        r
+    }
+    fn rec6(a: [u8; 16]) -> [u8; 17] {
+        let mut r = [0u8; 17];
+        r[0] = 6;
+        r[1..].copy_from_slice(&a);
+        r
+    }
+
+    #[test]
+    fn pin_entry_builds_host_port_ip() {
+        let mut recs = Vec::new();
+        recs.extend_from_slice(&rec4([93, 184, 216, 34]));
+        assert_eq!(
+            resolve_pin_entry(b"http://Example.COM/x?y", &recs, false).as_deref(),
+            Some("example.com:80:93.184.216.34")
+        );
+        assert_eq!(
+            resolve_pin_entry(b"https://example.com/", &recs, false).as_deref(),
+            Some("example.com:443:93.184.216.34")
+        );
+        assert_eq!(
+            resolve_pin_entry(b"example.com:8080/p", &recs, false).as_deref(),
+            Some("example.com:8080:93.184.216.34")
+        );
+        assert_eq!(
+            resolve_pin_entry(b"http://user:pw@example.com:81/", &recs, false).as_deref(),
+            Some("example.com:81:93.184.216.34")
+        );
+    }
+
+    #[test]
+    fn pin_entry_multi_and_v6_filtering() {
+        let mut recs = Vec::new();
+        recs.extend_from_slice(&rec6([0x20, 0x01, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]));
+        recs.extend_from_slice(&rec4([1, 2, 3, 4]));
+        recs.extend_from_slice(&rec4([5, 6, 7, 8]));
+        recs.extend_from_slice(&rec4([1, 2, 3, 4])); // duplicate dropped
+        let single = resolve_pin_entry(b"http://h.example/", &recs, false).unwrap();
+        assert_eq!(single, "h.example:80:1.2.3.4");
+        let multi = resolve_pin_entry(b"http://h.example/", &recs, true).unwrap();
+        assert_eq!(multi, "h.example:80:1.2.3.4,5.6.7.8");
+        // IPv6-only: nothing safe to pin.
+        let v6only = rec6([0x20, 0x01, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        assert_eq!(resolve_pin_entry(b"http://h.example/", &v6only, true), None);
+    }
+
+    #[test]
+    fn pin_entry_refuses_unpinnable_targets() {
+        let recs = rec4([1, 2, 3, 4]);
+        // Literal IPs resolve nothing, so there is nothing to rebind or pin.
+        for lit in ["http://127.0.0.1/", "http://2130706433/", "http://[::1]/", "10.0.0.1:80"] {
+            assert_eq!(resolve_pin_entry(lit.as_bytes(), &recs, true), None, "{lit}");
+        }
+        // Non-HTTP(S) schemes and odd host spellings are never pinned.
+        assert_eq!(resolve_pin_entry(b"ftp://h.example/", &recs, true), None);
+        assert_eq!(resolve_pin_entry(b"gopher://h.example/", &recs, true), None);
+        assert_eq!(resolve_pin_entry(b"http://h%2eexample/", &recs, true), None);
+        // No usable address: no pin.
+        assert_eq!(resolve_pin_entry(b"http://h.example/", &[], true), None);
+    }
+
     #[test]
     fn reservedclass_as_str_pinned() {
         let all = [

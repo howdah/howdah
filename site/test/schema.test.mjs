@@ -44,6 +44,11 @@ test('every schema default equals the core default', () => {
   assert.equal(state['sinks.ssrf.mode'], core.sinks.ssrf.mode);
   assert.equal(state['sinks.ssrf.mode'], 'off');
   assert.deepEqual(state['sinks.ssrf.allow_hosts'], []);
+  // T6: the three SSRF hardening knobs are opt-in (off), like the facet.
+  for (const k of ['rebind', 'scheme', 'redirect']) {
+    assert.equal(state['sinks.ssrf.' + k], core.sinks.ssrf[k], k);
+    assert.equal(state['sinks.ssrf.' + k], 'off', k);
+  }
   // xxe is the one legacy sink enforced by default, with its own mode (it does not
   // inherit sinks.mode, which is detect).
   assert.equal(state['sinks.xml.mode'], core.sinks.xml.mode);

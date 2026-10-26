@@ -82,6 +82,13 @@ is not inspected.
   (DNS rebinding, redirects, `curl_multi_*` and others bypass it), several
   outbound primitives (`copy`, `file`, `readfile`, `SoapClient`...) are not
   hooked, and it adds a DNS lookup with no timeout per distinct outbound host.
+  Three more opt-in `[sinks.ssrf]` knobs, each off by default, narrow those
+  gaps where PHP allows it: `rebind` (pin the validated address into curl and
+  judge the connected address / stream peer), `scheme` (only http/https may
+  leave: curl `gopher://`, `dict://`, `file://` are refused) and `redirect` (a curl
+  `3xx` to an internal target is not followed). Their residual gaps
+  (`file_get_contents` has no peer to check, `curl_multi_*`, PHP 5.4 cannot pin)
+  are listed in [docs/config.md](docs/config.md).
 - Verified on PHP 5.4, 5.6, 7.4, 8.3 and 8.5; other minors build and are
   expected to work but are not independently verified.
 

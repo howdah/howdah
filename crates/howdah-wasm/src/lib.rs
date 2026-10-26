@@ -277,6 +277,24 @@ mod tests {
     }
 
     #[test]
+    fn ssrf_hardening_knobs_validate_and_default_off() {
+        // T6: the three SSRF hardening knobs are config keys (not rules): the
+        // catalog is unchanged, the defaults are off and each takes off|detect|block.
+        let d: serde_json::Value = serde_json::from_str(&validate_config(b"")).unwrap();
+        assert_eq!(d["ok"], true, "{d}");
+        for k in ["rebind", "scheme", "redirect"] {
+            assert_eq!(d["config"]["sinks"]["ssrf"][k], "off", "{k}");
+            let toml = format!("[sinks.ssrf]\n{k} = \"block\"");
+            let v: serde_json::Value = serde_json::from_str(&validate_config(toml.as_bytes())).unwrap();
+            assert_eq!(v["ok"], true, "{k}: {v}");
+            assert_eq!(v["config"]["sinks"]["ssrf"][k], "block");
+            let bad = format!("[sinks.ssrf]\n{k} = \"observe\"");
+            let v: serde_json::Value = serde_json::from_str(&validate_config(bad.as_bytes())).unwrap();
+            assert_eq!(v["ok"], false, "{k}");
+        }
+    }
+
+    #[test]
     fn rule_catalog_has_every_rule_with_severity() {
         let v: serde_json::Value = serde_json::from_str(&rule_catalog_json()).unwrap();
         let rules = v.as_array().unwrap();

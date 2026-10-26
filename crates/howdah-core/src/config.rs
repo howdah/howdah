@@ -349,17 +349,44 @@ impl Default for PharConfig {
 }
 
 /// Layer-3 SSRF sink settings. Off by default.
+///
+/// `mode`/`allow_hosts` are the original check-time range guard. `rebind`,
+/// `scheme` and `redirect` are the T6 hardening additions, each an independent
+/// opt-in (default `off`, like the facet itself) with its own `detect`/`block`:
+///
+/// * `rebind`: resolve-at-connect. Make the address the connection really uses
+///   match the address that was validated (pin it with `CURLOPT_RESOLVE` where
+///   PHP and libcurl allow it, then verify the connected peer).
+/// * `scheme`: refuse egress schemes other than `http`/`https` (curl:
+///   `gopher`, `dict`, `file`, `ldap`, `tftp`, ...; the stream functions: the
+///   remote wrappers such as `ftp`).
+/// * `redirect`: do not follow a curl `3xx` to an internal target.
+///
+/// Each is silenced by a global `off` or `[sinks] enabled = false` and is
+/// independent of `mode`, `sinks.mode` and the global `detect`/`block`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct SsrfConfig {
     pub mode: Option<Mode>,
     /// Exact hostnames, literal IPs, or CIDRs.
     pub allow_hosts: Vec<String>,
+    /// Resolve-at-connect (anti-DNS-rebinding). Default `off`.
+    pub rebind: Mode,
+    /// Egress scheme denial. Default `off`.
+    pub scheme: Mode,
+    /// curl internal-redirect guard. Default `off`.
+    pub redirect: Mode,
 }
 
 impl Default for SsrfConfig {
     fn default() -> Self {
-        SsrfConfig { mode: Some(Mode::Off), allow_hosts: Vec::new() }
+        SsrfConfig {
+            mode: Some(Mode::Off),
+            allow_hosts: Vec::new(),
+            rebind: Mode::Off,
+            scheme: Mode::Off,
+            redirect: Mode::Off,
+        }
     }
 }
 
@@ -544,6 +571,33 @@ impl SinkConfig {
         } else {
             self.include.poison
         }
+    }
+
+    /// Effective mode of an SSRF hardening knob (`rebind`/`scheme`/`redirect`):
+    /// Off if the global mode is off or sinks are disabled, else the knob's own
+    /// mode. Independent of `[sinks.ssrf] mode`, `sinks.mode` and the global
+    /// `detect`/`block`.
+    fn ssrf_knob_mode(&self, own: Mode, global: Mode) -> Mode {
+        if global == Mode::Off || !self.enabled {
+            Mode::Off
+        } else {
+            own
+        }
+    }
+
+    /// Effective mode of the SSRF resolve-at-connect (anti-rebinding) guard.
+    pub fn ssrf_rebind_mode(&self, global: Mode) -> Mode {
+        self.ssrf_knob_mode(self.ssrf.rebind, global)
+    }
+
+    /// Effective mode of the SSRF egress-scheme denial.
+    pub fn ssrf_scheme_mode(&self, global: Mode) -> Mode {
+        self.ssrf_knob_mode(self.ssrf.scheme, global)
+    }
+
+    /// Effective mode of the SSRF curl internal-redirect guard.
+    pub fn ssrf_redirect_mode(&self, global: Mode) -> Mode {
+        self.ssrf_knob_mode(self.ssrf.redirect, global)
     }
 
     /// True iff the include firewall (wrapper or poison) is armed. On by
@@ -1345,6 +1399,53 @@ self_test = "off"
         assert_eq!(c.sinks.ssrf.mode, Some(Mode::Off));
         assert!(c.sinks.ssrf.allow_hosts.is_empty());
         assert_eq!(c.sinks.effective_mode(SinkId::Ssrf, Mode::Detect), Mode::Off);
+    }
+
+    #[test]
+    fn ssrf_hardening_knobs_default_off_and_are_independent() {
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.sinks.ssrf.rebind, Mode::Off);
+        assert_eq!(c.sinks.ssrf.scheme, Mode::Off);
+        assert_eq!(c.sinks.ssrf.redirect, Mode::Off);
+        for g in [Mode::Detect, Mode::Block] {
+            assert_eq!(c.sinks.ssrf_rebind_mode(g), Mode::Off);
+            assert_eq!(c.sinks.ssrf_scheme_mode(g), Mode::Off);
+            assert_eq!(c.sinks.ssrf_redirect_mode(g), Mode::Off);
+        }
+        // Each knob is set on its own, and `mode` / the others do not move it.
+        let c = Config::from_toml(
+            "[sinks.ssrf]\nrebind=\"block\"\nscheme=\"detect\"\nredirect=\"block\"",
+        )
+        .unwrap();
+        assert_eq!(c.sinks.ssrf_rebind_mode(Mode::Detect), Mode::Block);
+        assert_eq!(c.sinks.ssrf_scheme_mode(Mode::Detect), Mode::Detect);
+        assert_eq!(c.sinks.ssrf_redirect_mode(Mode::Block), Mode::Block);
+        // The range guard stays off: the knobs do not arm it.
+        use crate::sinks::SinkId;
+        assert_eq!(c.sinks.effective_mode(SinkId::Ssrf, Mode::Block), Mode::Off);
+        // A global off and `enabled = false` silence every knob.
+        assert_eq!(c.sinks.ssrf_rebind_mode(Mode::Off), Mode::Off);
+        assert_eq!(c.sinks.ssrf_scheme_mode(Mode::Off), Mode::Off);
+        assert_eq!(c.sinks.ssrf_redirect_mode(Mode::Off), Mode::Off);
+        let c = Config::from_toml(
+            "[sinks]\nenabled=false\n[sinks.ssrf]\nrebind=\"block\"\nscheme=\"block\"\nredirect=\"block\"",
+        )
+        .unwrap();
+        assert_eq!(c.sinks.ssrf_rebind_mode(Mode::Detect), Mode::Off);
+        assert_eq!(c.sinks.ssrf_scheme_mode(Mode::Detect), Mode::Off);
+        assert_eq!(c.sinks.ssrf_redirect_mode(Mode::Detect), Mode::Off);
+    }
+
+    #[test]
+    fn ssrf_hardening_knob_values_are_validated() {
+        for k in ["rebind", "scheme", "redirect"] {
+            for ok in ["off", "detect", "block"] {
+                Config::from_toml(&format!("[sinks.ssrf]\n{k}=\"{ok}\"")).unwrap();
+            }
+            assert!(Config::from_toml(&format!("[sinks.ssrf]\n{k}=\"observe\"")).is_err(), "{k}");
+            assert!(Config::from_toml(&format!("[sinks.ssrf]\n{k}=true")).is_err(), "{k}");
+        }
+        assert!(Config::from_toml("[sinks.ssrf]\nrebinds=\"block\"").is_err());
     }
 
     #[test]

@@ -88,6 +88,12 @@ extern "C" {
     /// `decide` is the Rust verdict. Call once at MINIT.
     pub fn howdah_install_ssrf_hooks(decide: HowdahSsrfDecide, armed: HowdahSsrfArmed);
 
+    /// Register the SSRF redirect / scheme guard (`howdah_curl_header_guard`), a
+    /// PHP-callable internal function a curl handle can use as its header callback.
+    /// MUST be called from MINIT (a function registered at request time dangles on
+    /// PHP 7.x); call only when the redirect or scheme knob is armed. Idempotent.
+    pub fn howdah_register_ssrf_guard_fn();
+
     /// Clear the C-owned per-request curl handle->URL map and resolution cache.
     /// Called from the ext's `clear_request_state` (RSHUTDOWN and bailout paths).
     pub fn howdah_ssrf_request_reset();
@@ -251,7 +257,9 @@ pub type HowdahXmlDecide = unsafe extern "C" fn(
     caps: ::std::ffi::c_int,
 ) -> ::std::ffi::c_int;
 
-/// `howdah_sink_ssrf_armed`-shaped callback: 1 iff SSRF guarding is armed.
+/// SSRF armed-mask callback: the `HOWDAH_SSRF_ARM_*` bits of which parts of the
+/// SSRF path the shim must run (0 = nothing: the zero-overhead chain). Any
+/// non-zero value means "armed" to a caller that only tests truthiness.
 pub type HowdahSsrfArmed = unsafe extern "C" fn(ctx: *mut ::std::ffi::c_void) -> ::std::ffi::c_int;
 
 /// The §4.1 read_post decide callback (see `read_post_hook.c`). Given the body
@@ -280,10 +288,12 @@ pub type HowdahOomDecide = unsafe extern "C" fn(
     line: u32,
 ) -> ::std::ffi::c_int;
 
-/// `howdah_sink_check_ssrf`-shaped callback. `ips` is `ips_count` x 17-byte
-/// records `[family 4|6][16 addr bytes]`. Returns 0 ALLOW / 1 LOG / 2 BLOCK.
+/// `howdah_sink_check_ssrf_kind_at`-shaped callback. `kind` is a
+/// `HOWDAH_SSRF_KIND_*` code (range / rebind / redirect). `ips` is `ips_count` x
+/// 17-byte records `[family 4|6][16 addr bytes]`. Returns 0 ALLOW / 1 LOG / 2 BLOCK.
 pub type HowdahSsrfDecide = unsafe extern "C" fn(
     ctx: *mut ::std::ffi::c_void,
+    kind: ::std::ffi::c_int,
     scheme: *const ::std::ffi::c_char,
     scheme_len: usize,
     host: *const ::std::ffi::c_char,

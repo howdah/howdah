@@ -193,6 +193,7 @@ typedef struct {
     size_t host_len;
     char host[HOWDAH_HOST_MAX];
     size_t count; /* 0 = lookup failed (also cached: never retry a slow failure) */
+    int truncated; /* getaddrinfo returned more than HOWDAH_MAX_IPS records */
     unsigned char recs[HOWDAH_MAX_IPS * HOWDAH_REC];
 } howdah_cache_ent;
 static howdah_cache_ent g_cache[HOWDAH_CACHE_SLOTS];
@@ -208,10 +209,15 @@ static howdah_cache_ent *cache_find(const char *host, size_t len) {
 }
 
 /* Resolve `host` (NUL-terminated, length hlen) into recs; returns the count
- * (0 on failure). */
-static size_t resolve_host(const char *host, size_t hlen, unsigned char *recs) {
+ * (0 on failure). Sets `*truncated` when getaddrinfo returned MORE than
+ * HOWDAH_MAX_IPS records, so the caller can treat the set as unverifiable: an
+ * attacker DNS answer of 32 public addresses followed by an internal one would
+ * otherwise classify clean while PHP's connect loop reaches the internal
+ * address we never stored. */
+static size_t resolve_host(const char *host, size_t hlen, unsigned char *recs, int *truncated) {
     struct addrinfo hints, *res = NULL, *a;
     size_t n = 0;
+    *truncated = 0;
     if (memchr(host, '\0', hlen)) return 0; /* embedded NUL: do not truncate-resolve */
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_UNSPEC;
@@ -231,6 +237,7 @@ static size_t resolve_host(const char *host, size_t hlen, unsigned char *recs) {
             n++;
         }
     }
+    if (a != NULL) *truncated = 1; /* stopped at the cap with records remaining */
     freeaddrinfo(res);
     return n;
 }
@@ -242,6 +249,7 @@ typedef struct {
     size_t hlen;
     uint16_t port;
     size_t count; /* resolved records in `recs` (0: lookup failed, or not asked) */
+    int truncated; /* resolution hit the cap with more records remaining */
     unsigned char recs[HOWDAH_MAX_IPS * HOWDAH_REC];
 } howdah_target;
 
@@ -258,6 +266,7 @@ static int ssrf_target(const char *arg, size_t arglen, int scheme_required, int 
     t->hlen = 0;
     t->port = 0;
     t->count = 0;
+    t->truncated = 0;
     prep = howdah_ssrf_prepare((const unsigned char *)arg, arglen, scheme_required,
                                t->host, HOWDAH_HOST_MAX, &hlen, &port);
     if (prep != 1) return prep == 2 ? 2 : 0;
@@ -269,21 +278,27 @@ static int ssrf_target(const char *arg, size_t arglen, int scheme_required, int 
     ce = cache_find((const char *)t->host, hlen);
     if (ce) {
         t->count = ce->count;
+        t->truncated = ce->truncated;
         memcpy(t->recs, ce->recs, ce->count * HOWDAH_REC);
     } else {
-        t->count = resolve_host((const char *)t->host, hlen, t->recs);
+        t->count = resolve_host((const char *)t->host, hlen, t->recs, &t->truncated);
         for (i = 0; i < HOWDAH_CACHE_SLOTS; i++) {
             if (!g_cache[i].used) {
                 g_cache[i].used = 1;
                 g_cache[i].host_len = hlen;
                 memcpy(g_cache[i].host, t->host, hlen);
                 g_cache[i].count = t->count;
+                g_cache[i].truncated = t->truncated;
                 memcpy(g_cache[i].recs, t->recs, t->count * HOWDAH_REC);
                 break;
             }
         }
         /* cache full: just don't cache (bounded, drop on overflow) */
     }
+    /* A truncated resolution is unverifiable: report it as the oversize/
+     * suspicious verdict (2) so the range and redirect guards block it when
+     * armed, rather than classifying only the first HOWDAH_MAX_IPS records. */
+    if (t->truncated) return 2;
     return 1;
 }
 
@@ -788,22 +803,28 @@ static void map_unset_url(long key) {
     }
 }
 
-/* Set/replace the URL for `key`, keeping its option flags. Over-long URLs are
- * not stored (URL cleared); a full table drops the new entry. */
+/* Set/replace the URL for `key`, keeping its option flags. An over-long URL is
+ * TRUNCATED to its first HOWDAH_URL_MAX bytes, never dropped: a URL's authority
+ * is at its front, so the host still reaches the classifier, and a URL long
+ * enough to be cut mid-authority parses as oversize (suspicious) on the Rust
+ * side. Dropping it instead would leave the handle untracked, and an attacker
+ * who appends a long `#fragment` (which libcurl ignores but still connects
+ * past) could then skip every curl guard. A full table drops the new entry. */
 static void map_set(long key, const char *u, size_t len) {
     howdah_cent *e = map_slot(key);
     char *copy;
+    size_t keep;
     if (!e) return;
     free(e->url); /* clear first: an OOM or overflow must not leave a stale URL */
     e->url = NULL;
     e->len = 0;
-    if (len > HOWDAH_URL_MAX) return;
-    copy = (char *)malloc(len + 1);
+    keep = len > HOWDAH_URL_MAX ? HOWDAH_URL_MAX : len;
+    copy = (char *)malloc(keep + 1);
     if (!copy) return;
-    memcpy(copy, u, len);
-    copy[len] = '\0';
+    memcpy(copy, u, keep);
+    copy[keep] = '\0';
     e->url = copy;
-    e->len = len;
+    e->len = keep;
 }
 
 static void map_flag(long key, unsigned f, int on) {

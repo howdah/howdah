@@ -183,8 +183,14 @@ unsafe fn loc(file: *const c_char, file_len: usize, line: u32) -> Option<String>
     }
     let raw = std::slice::from_raw_parts(file as *const u8, file_len);
     let path: String = String::from_utf8_lossy(raw).chars().filter(|c| !c.is_control()).collect();
-    if path.is_empty() {
+    // Only an absolute path is a real script file (Howdah is Linux-only, so that
+    // means a leading `/`, as `origin` also requires). A non-absolute "filename"
+    // is engine-synthesised from a wrapper such as `data://...` or `php://...`
+    // and can carry request content, which must never be logged (F10). Cap the
+    // length so even a legitimate long path stays one clean log token.
+    if !path.starts_with('/') {
         return None;
     }
+    let path: String = path.chars().take(256).collect();
     Some(format!("{path}:{line}"))
 }

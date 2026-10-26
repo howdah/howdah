@@ -1132,7 +1132,7 @@ impl howdah_ctx {
         self.sink_log = Some(self.record(
             RuleId::Ssrf,
             action,
-            format!("{lead}: oversize host (>256 bytes), not resolvable - treated as suspicious"),
+            format!("{lead}: oversize host (>256 bytes) or more than 32 resolved addresses - treated as suspicious"),
         ));
         action
     }

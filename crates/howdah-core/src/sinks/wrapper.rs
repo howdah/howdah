@@ -217,11 +217,35 @@ fn owned(v: Vec<&[u8]>) -> Vec<Vec<u8>> {
     v.into_iter().map(|c| c.to_vec()).collect()
 }
 
+/// Longest target we classify. The kernel rejects a path past `PATH_MAX`
+/// (`ENAMETOOLONG`), so PHP never opens one; a megabytes-long `a/a/a/…` would
+/// otherwise cost one `Vec` entry and a heap copy per component (F7).
+const POISON_MAX_LEN: usize = 4096;
+
+/// Strip a leading `file://[authority]` wrapper so the path is classified:
+/// `file:///proc/self/environ` -> `/proc/self/environ`,
+/// `file://localhost/var/.../sess_x` -> `/var/.../sess_x`. The `file` scheme is
+/// allowed by the wrapper key, so the poison check must see through it (F5a).
+fn strip_file_wrapper(t: &[u8]) -> &[u8] {
+    if t.len() >= 7 && t[..4].eq_ignore_ascii_case(b"file") && &t[4..7] == b"://" {
+        let after = &t[7..];
+        return match after.iter().position(|&b| b == b'/') {
+            Some(i) => &after[i..],
+            None => after,
+        };
+    }
+    t
+}
+
 /// Flag a poisonable LOCAL target. `session` is the runtime `session.save_path`
 /// and `error_log` PHP's configured `error_log` (either empty when unknown —
 /// the glue passes them per request). Matching is anchored at the root and the
 /// `error_log` match is exact, so benign relative/absolute app paths never hit.
 pub fn classify_poison(target: &[u8], session: &[u8], error_log: &[u8]) -> Option<PoisonKind> {
+    if target.len() > POISON_MAX_LEN {
+        return None;
+    }
+    let target = strip_file_wrapper(target);
     // `/proc` (and traversal into it): anchored, so `templates/proc/x` is safe.
     let comps = resolve_anchored(target);
     if comps.first().map(|c| c.as_ref()) == Some(b"proc".as_ref()) {
@@ -230,15 +254,22 @@ pub fn classify_poison(target: &[u8], session: &[u8], error_log: &[u8]) -> Optio
             && (comps[1] == b"self" || comps[1].iter().all(u8::is_ascii_digit));
         return Some(if is_environ { PoisonKind::ProcEnviron } else { PoisonKind::Proc });
     }
-    // session.save_path and error_log are absolute config paths; the attack
-    // target must be absolute to be "under" them. Relative targets are skipped.
-    let tgt = owned(normalize_abs(target)?);
+    // session.save_path and error_log are absolute config paths. Anchor the
+    // target at the root (not absolute-only) so a `..` traversal into the
+    // session dir is caught as well (F5b:
+    // `../../../var/lib/php/sessions/sess_x`); a shallow relative app path
+    // never climbs far enough to land under an absolute config base.
+    let tgt = owned(resolve_anchored(target));
     if !session.is_empty() {
         // session.save_path may be `N;/path` or `N;MODE;/path` (the depth/mode
         // prefix); take the trailing path component.
         let path = session.rsplit(|&b| b == b';').next().unwrap_or(session);
         if let Some(base) = normalize_abs(path) {
-            if under(&tgt, &owned(base)) {
+            // Require the `sess_` prefix PHP's file handler always writes, so a
+            // broad base (e.g. the temp-dir fallback from F5c) flags only
+            // session files, never every include under /tmp.
+            let is_sess = tgt.last().is_some_and(|n| n.starts_with(b"sess_"));
+            if is_sess && under(&tgt, &owned(base)) {
                 return Some(PoisonKind::Session);
             }
         }
@@ -388,5 +419,27 @@ mod tests {
         }
         // No runtime paths known: session/log never fire, only /proc.
         assert_eq!(classify_poison(b"/var/lib/php/sessions/sess_abc", b"", b""), None);
+    }
+    #[test]
+    fn poison_sec_review_fixes() {
+        // F5a: a file:// wrapper is stripped before classifying.
+        assert_eq!(classify_poison(b"file:///proc/self/environ", b"", b""), Some(PoisonKind::ProcEnviron));
+        assert_eq!(classify_poison(b"file://localhost/proc/self/environ", b"", b""), Some(PoisonKind::ProcEnviron));
+        assert_eq!(
+            classify_poison(b"file:///var/lib/php/sessions/sess_x", b"/var/lib/php/sessions", b""),
+            Some(PoisonKind::Session)
+        );
+        // F5b: a relative traversal into the session dir is caught.
+        assert_eq!(
+            classify_poison(b"../../../../var/lib/php/sessions/sess_x", b"/var/lib/php/sessions", b""),
+            Some(PoisonKind::Session)
+        );
+        // sess_ precision: a non-session file under the base is not flagged (so a
+        // broad temp-dir base from the F5c fallback never over-blocks).
+        assert_eq!(classify_poison(b"/var/lib/php/sessions/notes.txt", b"/var/lib/php/sessions", b""), None);
+        // F7: an over-long path is not classified (the kernel rejects it anyway;
+        // this avoids the per-component allocation blow-up).
+        let long = [b'a'; 5000];
+        assert_eq!(classify_poison(&long, b"", b""), None);
     }
 }

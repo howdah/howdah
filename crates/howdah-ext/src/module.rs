@@ -319,7 +319,16 @@ unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
                     crate::file_filter::decide,
                     if delete_armed { sys::HOWDAH_FILE_HOOK_DELETE } else { 0 },
                 );
-                let session = ini_string(b"session.save_path\0").unwrap_or_default();
+                let mut session = ini_string(b"session.save_path\0").unwrap_or_default();
+                if session.is_empty() {
+                    // Empty save_path: PHP's file session handler writes sess_*
+                    // into the temporary directory, so give the poison check
+                    // that base rather than leaving the category inert (F5c).
+                    let p = sys::howdah_sys_temp_dir();
+                    if !p.is_null() {
+                        session = CStr::from_ptr(p).to_string_lossy().into_owned();
+                    }
+                }
                 let error_log = ini_string(b"error_log\0").unwrap_or_default();
                 core::howdah_set_runtime_paths(
                     CTX,

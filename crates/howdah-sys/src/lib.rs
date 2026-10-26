@@ -23,6 +23,11 @@ extern "C" {
     /// Write one line to the SAPI error log (`php_log_err`, see `shim.c`).
     pub fn howdah_sys_log_err(msg: *const ::std::ffi::c_char);
 
+    /// The resolved temporary directory (`php_get_temporary_directory`, see
+    /// `shim.c`): PHP's file session handler's base when `session.save_path`
+    /// is empty. Engine-owned static string, or NULL very early; never freed.
+    pub fn howdah_sys_temp_dir() -> *const ::std::ffi::c_char;
+
     /// The executing PHP script's path (`zend_get_executed_filename()`, the
     /// Layer-4 origin capture in `sink_hook.c`), exported so the glue can hand
     /// it to the core for `[[exceptions]]` `script` facets. Engine-owned

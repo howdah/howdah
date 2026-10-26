@@ -98,6 +98,16 @@ closed either way. Set `recycle_observe = true` to log a would-recycle event
 without ending the worker, to size your fatal rate before enforcing. Both are
 TOML keys, not php.ini directives.
 
+Known limitation: on **PHP 7.0 and earlier**, a `max_execution_time` timeout
+raises its fatal from the `SIGPROF` signal handler, so with `recycle_on_fatal`
+enforcing, Howdah's event-logging on that path can run in signal context; if the
+signal interrupts libc `malloc`, the log write can stall. The timeout still ends
+the worker. The window is narrow (opt-in facet, PHP &le; 7.0, a timeout mid-`malloc`);
+a future release will move that log to an async-signal-safe write. Likewise, a
+genuine *system* out-of-memory (not a `memory_limit` hit, which leaves the system
+allocator working) can abort the worker with `SIGABRT` rather than the clean
+`_exit`; the worker still dies and is replaced.
+
 ## Build a config in the browser
 
 [howdah.org/config/](https://howdah.org/config/) builds `howdah.ini` and
@@ -597,10 +607,25 @@ is checked, and a hit on a reserved or internal range is a match.
 - **Side effects of a block:** a blocked `fsockopen` / `stream_socket_client`
   leaves `$errno` and `$errstr` unset; a blocked `curl_exec` returns false with
   `curl_errno` 0 and an empty `curl_error`.
-- More than 32 resolved addresses for one host are capped; a host longer than
-  256 bytes is treated as suspicious. Literal-IP decoding mirrors glibc
-  `inet_aton`; libcurl and musl parse some encoded forms differently, so the
-  resolved addresses are the authority.
+- A host that resolves to **more than 32 addresses**, or a host longer than 256
+  bytes, is treated as suspicious — logged, and blocked when armed — never
+  silently skipped, so an attacker DNS answer cannot hide an internal address
+  past the cap. Literal-IP decoding mirrors glibc `inet_aton`; libcurl and musl
+  parse some encoded forms differently, so the resolved addresses are the
+  authority. The host parse matches PHP and libcurl on the tricky shapes: a
+  `\` before `@` stays in the userinfo (the host is taken after the last `@`), a
+  host is cut at the first NUL byte, and an unknown or nesting scheme
+  (`dict://`, `compress.zlib://http://…`) is peeled so the inner host is still
+  classified.
+- **`allow_hosts` requires every resolved address.** A name is allowed by an IP
+  or CIDR entry only when *all* of its resolved addresses match it; a name that
+  answers `[an allowed address, 169.254.169.254]` is **not** allowed (PHP could
+  connect to the internal one). A hostname entry trusts the name itself — pair
+  it with the `rebind` knob for resolve-time safety.
+- **Not tracked:** a URL passed as a `Stringable` object instead of a string, a
+  `curl_setopt` using the numeric option id (`10002`) instead of the
+  `CURLOPT_URL` constant, and more than 256 live curl handles at once (the
+  per-request handle map is bounded and fails open when full).
 
 #### SSRF hardening: `rebind`, `scheme`, `redirect`
 

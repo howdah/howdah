@@ -308,6 +308,52 @@ grep -q 'oversize host' "$LOG" || fail "B9: oversize host not logged as suspicio
 grep -q '"action":"block"' "$LOG" || fail "B9: oversize host not blocked"
 grep -q 'RET\[false\]' "$WORK/out.txt" || fail "B9: oversize host request not blocked"
 grep -q CONT "$WORK/out.txt" || fail "B9: script did not continue"
+
+# --- security-review fixes (F1-F4): bypasses that must now be blocked ---------
+# B10 (F1): a curl URL over 8192 bytes must not skip the guard. The attacker
+# appends '#' + padding (libcurl ignores the fragment but still connects); the
+# URL is truncated, not dropped, so the loopback host is still classified.
+: > "$LOG"
+run_php '[sinks.ssrf]\nmode="block"\n' '$c=curl_init(getenv("URL")."#".str_repeat("A",9000)); curl_setopt($c,CURLOPT_RETURNTRANSFER,1); $r=@curl_exec($c); echo "RET[".var_export($r,true)."]\nCONT\n";'
+grep -q 'RET\[false\]' "$WORK/out.txt" || fail "B10(F1): a >8192-byte (fragment-padded) curl URL bypassed the guard"
+grep -q '"action":"block"' "$LOG" || fail "B10(F1): no block event for the padded URL"
+if grep -q SERVED "$WORK/out.txt"; then fail "B10(F1): the padded URL request was served"; fi
+grep -q CONT "$WORK/out.txt" || fail "B10(F1): script did not continue"
+echo "  ok   - F1: a curl URL >8192 bytes is truncated not dropped; the loopback host is still blocked"
+
+# B11 (F2): a backslash before '@' stays in the userinfo for PHP and libcurl,
+# which connect to the host after the last '@'. The parser must read that host.
+: > "$LOG"
+export BSURL='http://public.example\@127.0.0.1:'"$PORT"'/SECRETPATH'
+run_php '[sinks.ssrf]\nmode="block"\n' '$r=@file_get_contents(getenv("BSURL")); echo "RET[".var_export($r,true)."]\nCONT\n";'
+grep -q 'RET\[false\]' "$WORK/out.txt" || fail "B11(F2): backslash-userinfo URL bypassed via file_get_contents"
+if grep -q SERVED "$WORK/out.txt"; then fail "B11(F2): the backslash URL reached the internal server"; fi
+run_php '[sinks.ssrf]\nmode="block"\n' '$c=curl_init(getenv("BSURL")); curl_setopt($c,CURLOPT_RETURNTRANSFER,1); $r=@curl_exec($c); echo "RET[".var_export($r,true)."]\nCONT\n";'
+grep -q 'RET\[false\]' "$WORK/out.txt" || fail "B11(F2): backslash-userinfo URL bypassed via curl"
+echo "  ok   - F2: http://public.example\\@127.0.0.1 is classified by the host after '@' (stream + curl)"
+
+# B12 (F4): a curl scheme and a nesting wrapper must not slip past the RANGE
+# check with the scheme knob off; the parser peels the outer scheme.
+: > "$LOG"
+run_php '[sinks.ssrf]\nmode="block"\n' '$c=curl_init("dict://127.0.0.1:'"$PORT"'/d:x"); curl_setopt($c,CURLOPT_RETURNTRANSFER,1); $r=@curl_exec($c); echo "RET[".var_export($r,true)."]\nCONT\n";'
+grep -q '"action":"block"' "$LOG" || fail "B12(F4): dict://loopback not range-blocked"
+grep -q CONT "$WORK/out.txt" || fail "B12(F4): script did not continue after the dict block"
+: > "$LOG"
+run_php '[sinks.ssrf]\nmode="block"\n' '$r=@file_get_contents("compress.zlib://http://127.0.0.1:'"$PORT"'/SECRETPATH"); echo "RET[".var_export($r,true)."]\nCONT\n";'
+grep -q '"action":"block"' "$LOG" || fail "B12(F4): compress.zlib://http nesting not range-blocked"
+if grep -q SERVED "$WORK/out.txt"; then fail "B12(F4): the nested wrapper reached the internal server"; fi
+echo "  ok   - F4: dict://loopback and compress.zlib://http://loopback are range-checked (scheme knob off)"
+
+# B13 (F3): a NUL terminates the host for libc and PHP < 7, so
+# 127.0.0.1\0.example.com connects to 127.0.0.1. The parser classifies the bytes
+# before the NUL. PHP >= 7 rejects the NUL itself, so this is a php5 check.
+if [ "$FEATURE" = php5 ]; then
+  : > "$LOG"
+  run_php '[sinks.ssrf]\nmode="block"\n' '$f=@fsockopen("127.0.0.1\0.example.com", '"$PORT"', $en, $es, 2); echo "F[".(is_resource($f)?"res":"no")."]\nCONT\n"; if(is_resource($f)) fclose($f);'
+  grep -q 'F\[no\]' "$WORK/out.txt" || fail "B13(F3): NUL-host fsockopen connected on php5 (bypass still open)"
+  grep -q CONT "$WORK/out.txt" || fail "B13(F3): script did not continue"
+  echo "  ok   - F3: fsockopen(\"127.0.0.1\\0.example.com\") blocked on php5 (host truncated at NUL)"
+fi
 run_php '[sinks.ssrf]\nmode="detect"\n' '$h=str_repeat("0",300)."177.0.0.1"; $r=@file_get_contents("http://$h:'$PORT'/x"); echo "CONT\n";'
 grep -q 'oversize host' "$LOG" || fail "B9: oversize host not logged in detect"
 grep -q '"action":"log"' "$LOG" || fail "B9: oversize detect should be action:log"

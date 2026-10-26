@@ -80,6 +80,10 @@ poison_block() {
 poison_block "/proc/self/environ" "/proc/self/environ"
 poison_block "session file"        "$SESS/sess_deadbeef"
 poison_block "error_log"           "$ERRLOG"
+# sec-review F5: evasions the poison classifier must now catch.
+poison_block "file:// wrapper on /proc"   "file:///proc/self/environ"
+poison_block "file:// wrapper on session" "file://$SESS/sess_filecafe"
+poison_block "relative traversal to session" "..$SESS/sess_relcafe"
 
 # ---- opcode mechanism (PHP 7.0+): the firewall must also enforce there --------
 if [ "$FEATURE" != "php5" ]; then

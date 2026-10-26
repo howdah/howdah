@@ -70,32 +70,57 @@ pub fn parse_host(input: &[u8], form: HostForm) -> Option<Host> {
     {
         return None;
     }
-    // `://` is a scheme delimiter only before any `/`, `?` or `#`; otherwise it
-    // is part of a path/query (e.g. `127.0.0.1/?u=http://x`) of a bare host.
-    let delim = find_sub(input, b"://")
-        .filter(|&i| !input[..i].iter().any(|b| matches!(b, b'/' | b'?' | b'#')));
-    let (scheme, rest) = match delim {
-        Some(i) => {
-            let sch = &input[..i];
-            if sch.is_empty()
-                || !sch
-                    .iter()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
-            {
-                return None;
+    // Peel leading `scheme://` prefixes. `://` is a delimiter only before any
+    // `/`, `?` or `#` (otherwise it is part of a bare host's path/query, e.g.
+    // `127.0.0.1/?u=http://x`). A known network scheme fixes the scheme and what
+    // follows is the authority. An UNKNOWN scheme is peeled and we retry on the
+    // remainder, so a curl scheme (`dict://127.0.0.1`) and a nesting wrapper
+    // (`compress.zlib://http://169.254.169.254/`) both classify the inner host
+    // instead of slipping past the range check as "not a network target" (F4).
+    // Iterative, not recursive: every step drops a `scheme://`, so a crafted
+    // `a://a://a://…` cannot overflow the stack.
+    let mut rest = input;
+    let scheme = loop {
+        let delim = find_sub(rest, b"://")
+            .filter(|&i| !rest[..i].iter().any(|b| matches!(b, b'/' | b'?' | b'#')));
+        match delim {
+            Some(i) => {
+                let sch = &rest[..i];
+                if sch.is_empty()
+                    || !sch
+                        .iter()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+                {
+                    return None;
+                }
+                match scheme_from(sch) {
+                    Some(s) => {
+                        rest = &rest[i + 3..];
+                        break Some(s);
+                    }
+                    None => {
+                        rest = &rest[i + 3..];
+                        continue;
+                    }
+                }
             }
-            (Some(scheme_from(sch)?), &input[i + 3..])
-        }
-        None => {
-            if form == HostForm::SchemeRequired {
-                return None;
+            None => {
+                if form == HostForm::SchemeRequired {
+                    return None;
+                }
+                break None;
             }
-            (None, input)
         }
     };
+    // Authority ends at `/`, `?` or `#` only. A backslash is NOT a terminator:
+    // PHP's `php_url_parse` (the http/ftp stream wrappers) and libcurl both keep
+    // `\` in the userinfo and take the host after the last `@`, so
+    // `http://public.example\@169.254.169.254/` connects to 169.254.169.254 on
+    // both (PoC-confirmed, PHP 5.6 and 8.3). Terminating at `\` here would make
+    // us read `public.example` and allow the request.
     let end = rest
         .iter()
-        .position(|b| matches!(b, b'/' | b'?' | b'#' | b'\\'))
+        .position(|b| matches!(b, b'/' | b'?' | b'#'))
         .unwrap_or(rest.len());
     let mut auth = &rest[..end];
     if let Some(at) = auth.iter().rposition(|&b| b == b'@') {
@@ -129,6 +154,15 @@ pub fn parse_host(input: &[u8], form: HostForm) -> Option<Host> {
     let name = match name.iter().position(|&b| b == b'%') {
         Some(z) if name.contains(&b':') => &name[..z],
         _ => name,
+    };
+    // A host is NUL-terminated to libc and to PHP < 7: `127.0.0.1\0.evil.com`
+    // connects to 127.0.0.1 (PoC-confirmed on 5.6, where fsockopen /
+    // stream_socket_client connect; 8.x rejects the NUL itself). Classify only
+    // the bytes before the first NUL so a NUL cannot smuggle an internal host
+    // past the check.
+    let name = match name.iter().position(|&b| b == 0) {
+        Some(z) => &name[..z],
+        None => name,
     };
     let mut name = name.to_ascii_lowercase();
     while name.last() == Some(&b'.') {
@@ -577,22 +611,32 @@ pub fn host_allowed(
     literal: Option<IpRepr>,
     allow: &[String],
 ) -> bool {
-    allow.iter().any(|entry| {
-        if entry.is_empty() {
-            return false;
-        }
-        let mut ips = resolved.iter().copied().chain(literal);
-        if entry.contains('/') {
-            return match parse_cidr(entry) {
-                Some((net, p)) => ips.any(|ip| cidr_contains(net, p, ip)),
-                None => false,
-            };
-        }
-        if let Some(ip) = decode_literal_ip(entry.as_bytes()) {
-            return ips.any(|x| norm(x) == norm(ip));
-        }
-        entry.as_bytes().eq_ignore_ascii_case(host)
-    })
+    // Name-based trust: the operator allowlisted this hostname by name. (The
+    // `rebind` knob is the resolve-time defence for a name that answers internal.)
+    let name_allowed = allow.iter().any(|e| {
+        !e.is_empty()
+            && !e.contains('/')
+            && decode_literal_ip(e.as_bytes()).is_none()
+            && e.as_bytes().eq_ignore_ascii_case(host)
+    });
+    if name_allowed {
+        return true;
+    }
+    // IP-based: EVERY resolved/literal address must be covered by an IP or CIDR
+    // allow entry. Requiring all, not any, stops an attacker-controlled name
+    // that resolves to [an allowed address, 169.254.169.254] from passing while
+    // PHP connects to the internal one (F6).
+    let covers = |ip: IpRepr| {
+        allow.iter().any(|e| {
+            if e.contains('/') {
+                matches!(parse_cidr(e), Some((net, p)) if cidr_contains(net, p, ip))
+            } else {
+                matches!(decode_literal_ip(e.as_bytes()), Some(x) if norm(x) == norm(ip))
+            }
+        })
+    };
+    let mut ips = resolved.iter().copied().chain(literal).peekable();
+    ips.peek().is_some() && ips.all(covers)
 }
 
 /// True iff `entry` is a well-formed `allow_hosts` entry: a non-empty,
@@ -696,6 +740,24 @@ mod tests {
         assert_eq!(h.name, b"127.0.0.1");
     }
     #[test]
+    fn parse_host_after_backslash_userinfo() {
+        // F2: PHP/curl keep `\` in the userinfo and take the host after the last
+        // `@`, so the authority must not terminate at `\`.
+        let h = ph("http://public.example\\@127.0.0.1/x", HostForm::SchemeRequired).unwrap();
+        assert_eq!(h.name, b"127.0.0.1");
+        let h = ph("http://public.example\\@169.254.169.254/latest", HostForm::SchemeRequired).unwrap();
+        assert_eq!(h.name, b"169.254.169.254");
+    }
+    #[test]
+    fn parse_truncates_host_at_nul() {
+        // F3: a host is NUL-terminated to libc / PHP < 7, so classify only the
+        // bytes before the first NUL.
+        let h = ph("http://127.0.0.1\0.example.com/", HostForm::SchemeRequired).unwrap();
+        assert_eq!(h.name, b"127.0.0.1");
+        let h = ph("127.0.0.1\0.evil.com", HostForm::BareHostOk).unwrap();
+        assert_eq!(h.name, b"127.0.0.1");
+    }
+    #[test]
     fn parse_strips_zone_and_trailing_dot() {
         let h = ph("http://[fe80::1%eth0]:80/", HostForm::SchemeRequired).unwrap();
         assert_eq!(h.name, b"fe80::1");
@@ -721,6 +783,19 @@ mod tests {
     #[test]
     fn parse_skips_unix_scheme() {
         assert!(ph("unix:///var/run/x.sock", HostForm::BareHostOk).is_none());
+        assert!(ph("file:///etc/passwd", HostForm::SchemeRequired).is_none());
+    }
+    #[test]
+    fn parse_peels_unknown_and_nesting_schemes() {
+        // F4: a curl scheme classifies the bare host after it.
+        let h = ph("dict://127.0.0.1:6379/x", HostForm::BareHostOk).unwrap();
+        assert_eq!(h.name, b"127.0.0.1");
+        assert_eq!(h.port, Some(6379));
+        // A nesting wrapper classifies the inner URL's host.
+        let h = ph("compress.zlib://http://169.254.169.254/latest", HostForm::SchemeRequired).unwrap();
+        assert_eq!(h.name, b"169.254.169.254");
+        assert_eq!(h.scheme, Some(Scheme::Http));
+        // A non-network wrapper still yields no host.
         assert!(ph("file:///etc/passwd", HostForm::SchemeRequired).is_none());
     }
     #[test]
@@ -760,6 +835,18 @@ mod tests {
             None,
             &al(&["1.2.3.4/30"])
         ));
+    }
+    #[test]
+    fn allow_requires_every_resolved_ip() {
+        // F6: a name resolving to [allowed, internal] is NOT allowed by an
+        // IP/CIDR allowlist (PHP could connect to the internal address).
+        let good = IpRepr::V4([8, 8, 8, 8]);
+        let meta = IpRepr::V4([169, 254, 169, 254]);
+        assert!(host_allowed(b"x", &[good], None, &al(&["8.8.8.8"])));
+        assert!(!host_allowed(b"x", &[good, meta], None, &al(&["8.8.8.8"])));
+        assert!(!host_allowed(b"x", &[good, meta], None, &al(&["0.0.0.0/1"])));
+        // A hostname allow entry still trusts the name regardless of its IPs.
+        assert!(host_allowed(b"trusted.example", &[good, meta], None, &al(&["trusted.example"])));
     }
     #[test]
     fn cidr_rejects_bad_prefixlen() {

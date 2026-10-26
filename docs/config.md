@@ -610,7 +610,9 @@ is checked, and a hit on a reserved or internal range is a match.
 - A host that resolves to **more than 32 addresses**, or a host longer than 256
   bytes, is treated as suspicious — logged, and blocked when armed — never
   silently skipped, so an attacker DNS answer cannot hide an internal address
-  past the cap. Literal-IP decoding mirrors glibc `inet_aton`; libcurl and musl
+  past the cap. A curl URL longer than 8192 bytes is likewise treated as
+  suspicious rather than parsed from a truncated copy, so a padded `#fragment`
+  or a long userinfo cannot steer the cut to drop the handle out of the guard. Literal-IP decoding mirrors glibc `inet_aton`; libcurl and musl
   parse some encoded forms differently, so the resolved addresses are the
   authority. The host parse matches PHP and libcurl on the tricky shapes: a
   `\` before `@` stays in the userinfo (the host is taken after the last `@`), a

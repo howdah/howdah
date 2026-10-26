@@ -320,6 +320,15 @@ grep -q '"action":"block"' "$LOG" || fail "B10(F1): no block event for the padde
 if grep -q SERVED "$WORK/out.txt"; then fail "B10(F1): the padded URL request was served"; fi
 grep -q CONT "$WORK/out.txt" || fail "B10(F1): script did not continue"
 echo "  ok   - F1: a curl URL >8192 bytes is truncated not dropped; the loopback host is still blocked"
+# B10b (F1 re-review): USERINFO padding must not steer the truncation so the cut
+# lands at the '@' (empty/wrong host). An over-long URL is treated as suspicious,
+# never parsed from the truncated text.
+: > "$LOG"
+run_php '[sinks.ssrf]\nmode="block"\n' '$u="http://".str_repeat("a",8184)."@127.0.0.1:'"$PORT"'/SECRETPATH"; $c=curl_init($u); curl_setopt($c,CURLOPT_RETURNTRANSFER,1); $r=@curl_exec($c); echo "RET[".var_export($r,true)."]\nCONT\n";'
+grep -q 'RET\[false\]' "$WORK/out.txt" || fail "B10b(F1): a userinfo-padded >8192 URL bypassed the guard"
+if grep -q SERVED "$WORK/out.txt"; then fail "B10b(F1): the userinfo-padded URL was served"; fi
+grep -q CONT "$WORK/out.txt" || fail "B10b(F1): script did not continue"
+echo "  ok   - F1 re-review: a userinfo-padded >8192 curl URL is treated as suspicious, not parsed"
 
 # B11 (F2): a backslash before '@' stays in the userinfo for PHP and libcurl,
 # which connect to the host after the last '@'. The parser must read that host.

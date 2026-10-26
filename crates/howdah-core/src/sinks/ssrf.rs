@@ -91,7 +91,15 @@ pub fn parse_host(input: &[u8], form: HostForm) -> Option<Host> {
                         .iter()
                         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
                 {
-                    return None;
+                    // Not a valid scheme, so this `://` is not a delimiter. A
+                    // bare host (curl) takes the authority as the text BEFORE it
+                    // (`127.0.0.1:80://x` connects to 127.0.0.1:80); a stream URL
+                    // needs a real scheme (F3 re-review).
+                    if form == HostForm::SchemeRequired {
+                        return None;
+                    }
+                    rest = &rest[..i];
+                    break None;
                 }
                 match scheme_from(sch) {
                     Some(s) => {
@@ -126,6 +134,13 @@ pub fn parse_host(input: &[u8], form: HostForm) -> Option<Host> {
     if let Some(at) = auth.iter().rposition(|&b| b == b'@') {
         auth = &auth[at + 1..];
     }
+    // A NUL terminates the authority for libc and PHP < 7, covering both the
+    // host (`127.0.0.1\0.evil`) and the port (`127.0.0.1:80\0x` connects to
+    // 127.0.0.1:80). Cut it before the host:port split so both are classified
+    // as the engine connects (F3).
+    if let Some(z) = auth.iter().position(|&b| b == 0) {
+        auth = &auth[..z];
+    }
     let (name, port_s): (&[u8], &[u8]) = if auth.first() == Some(&b'[') {
         let close = auth.iter().position(|&b| b == b']')?;
         let after = &auth[close + 1..];
@@ -154,15 +169,6 @@ pub fn parse_host(input: &[u8], form: HostForm) -> Option<Host> {
     let name = match name.iter().position(|&b| b == b'%') {
         Some(z) if name.contains(&b':') => &name[..z],
         _ => name,
-    };
-    // A host is NUL-terminated to libc and to PHP < 7: `127.0.0.1\0.evil.com`
-    // connects to 127.0.0.1 (PoC-confirmed on 5.6, where fsockopen /
-    // stream_socket_client connect; 8.x rejects the NUL itself). Classify only
-    // the bytes before the first NUL so a NUL cannot smuggle an internal host
-    // past the check.
-    let name = match name.iter().position(|&b| b == 0) {
-        Some(z) => &name[..z],
-        None => name,
     };
     let mut name = name.to_ascii_lowercase();
     while name.last() == Some(&b'.') {
@@ -750,12 +756,30 @@ mod tests {
     }
     #[test]
     fn parse_truncates_host_at_nul() {
-        // F3: a host is NUL-terminated to libc / PHP < 7, so classify only the
-        // bytes before the first NUL.
+        // F3: a NUL terminates the authority (host AND port) for libc / PHP < 7,
+        // so classify only the bytes before the first NUL.
         let h = ph("http://127.0.0.1\0.example.com/", HostForm::SchemeRequired).unwrap();
         assert_eq!(h.name, b"127.0.0.1");
         let h = ph("127.0.0.1\0.evil.com", HostForm::BareHostOk).unwrap();
         assert_eq!(h.name, b"127.0.0.1");
+        // Re-review: a NUL in the PORT field also terminates the authority.
+        let h = ph("http://127.0.0.1:80\0x/", HostForm::SchemeRequired).unwrap();
+        assert_eq!(h.name, b"127.0.0.1");
+        assert_eq!(h.port, Some(80));
+        // A NUL in the userinfo: the host after `@` is still classified.
+        let h = ph("http://public\0@127.0.0.1/", HostForm::SchemeRequired).unwrap();
+        assert_eq!(h.name, b"127.0.0.1");
+    }
+    #[test]
+    fn parse_bare_host_with_invalid_scheme() {
+        // Re-review (2b): `host:port://path` is not a scheme (`:` is not a
+        // scheme char), and curl connects to the host:port, so a bare host
+        // classifies it rather than returning None (fail-open).
+        let h = ph("127.0.0.1:80://x", HostForm::BareHostOk).unwrap();
+        assert_eq!(h.name, b"127.0.0.1");
+        assert_eq!(h.port, Some(80));
+        // A stream URL with an invalid scheme is still rejected.
+        assert!(ph("127.0.0.1:80://x", HostForm::SchemeRequired).is_none());
     }
     #[test]
     fn parse_strips_zone_and_trailing_dot() {

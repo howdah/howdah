@@ -350,8 +350,16 @@ static int ssrf_should_block(const char *arg, size_t arglen, int scheme_required
     /* Oversize host (could hide a zero-padded numeric IP): an SSRF-specific
      * decision. With no usable host string, the egress string match cannot run,
      * so this path is SSRF-only (fail-open for egress-only mode). */
-    if (prep == 2)
-        return ssrf_on && howdah_ssrf_oversize_glue(g_ctx, HOWDAH_SSRF_KIND_RANGE) == HOWDAH_ACTION_BLOCK;
+    if (prep == 2) {
+        /* Suspicious: an over-256 host (no usable string, t.hlen == 0) or a
+         * truncated >32-record resolution (a usable host, t.hlen > 0, so the
+         * Layer-4 egress string match can still run on it — F8 re-review). */
+        int ov = ssrf_on && howdah_ssrf_oversize_glue(g_ctx, HOWDAH_SSRF_KIND_RANGE) == HOWDAH_ACTION_BLOCK;
+        int eg = egress_on && t.hlen > 0
+                 && howdah_g_behavior_egress(g_ctx, origin, origin_len,
+                        (const char *)t.host, t.hlen) == HOWDAH_ACTION_BLOCK;
+        return ov || eg;
+    }
 
     if (ssrf_on) {
         ssrf_cosmetic_scheme(arg, arglen, &scheme, &scheme_len);
@@ -738,6 +746,8 @@ typedef struct {
     char *url;
     size_t len;
     unsigned flags;
+    int overlong; /* URL exceeded HOWDAH_URL_MAX: the stored copy is truncated, so
+                   * its parse is untrusted — the guard treats it as suspicious */
 } howdah_cent;
 static howdah_cent g_map[HOWDAH_MAP_SLOTS];
 
@@ -818,6 +828,10 @@ static void map_set(long key, const char *u, size_t len) {
     free(e->url); /* clear first: an OOM or overflow must not leave a stale URL */
     e->url = NULL;
     e->len = 0;
+    /* Set before the malloc, so an over-long URL is flagged suspicious even if
+     * the (truncated) copy cannot be stored. A later short URL on the same
+     * handle clears it. */
+    e->overlong = len > HOWDAH_URL_MAX;
     keep = len > HOWDAH_URL_MAX ? HOWDAH_URL_MAX : len;
     copy = (char *)malloc(keep + 1);
     if (!copy) return;
@@ -951,11 +965,12 @@ static void howdah_hook_curl_copy_handle(INTERNAL_FUNCTION_PARAMETERS) {
     char *url = NULL;
     size_t ulen = 0;
     unsigned flags = 0;
-    int have = 0;
+    int have = 0, overlong = 0;
     HOWDAH_ARG(1, h);
     if (handle_key(h, &src) && (se = map_find(src)) != NULL) {
         have = 1;
         flags = se->flags;
+        overlong = se->overlong;
         if (se->url) {
             url = (char *)malloc(se->len + 1);
             if (url) {
@@ -969,9 +984,13 @@ static void howdah_hook_curl_copy_handle(INTERNAL_FUNCTION_PARAMETERS) {
     if (handle_key(return_value, &dst)) {
         map_del(dst);
         if (have) {
-            howdah_cent *de = map_slot(dst);
-            if (de) de->flags = flags;
-            if (url) map_set(dst, url, ulen);
+            howdah_cent *de;
+            if (url) map_set(dst, url, ulen); /* resets the entry's overlong */
+            de = map_slot(dst);
+            if (de) {
+                de->flags = flags;
+                de->overlong = overlong; /* carry the source's over-long flag (map_set cleared it) */
+            }
         }
     }
     free(url);
@@ -1161,7 +1180,14 @@ static int curl_prepare(zval *h, unsigned flags, int mask, const char *u, size_t
     if ((mask & HOWDAH_SSRF_ARM_PIN) && g_decide
         && !(flags & (HCF_USER_RESOLVE | HCF_USER_CONNECT_TO | HCF_PROXY)) && !env_proxy()) {
         howdah_target t;
-        if (ssrf_target(u, ulen, 0, 1, &t) == 1) {
+        int pr = ssrf_target(u, ulen, 0, 1, &t);
+        if (pr == 2) {
+            /* Truncated/oversize resolution: an unverifiable set that cannot be
+             * pinned; rebind=block refuses it rather than letting it connect
+             * unpinned (F8 re-review). */
+            if (howdah_ssrf_oversize_glue(g_ctx, HOWDAH_SSRF_KIND_REBIND) == HOWDAH_ACTION_BLOCK)
+                return 1;
+        } else if (pr == 1) {
             if (g_decide(g_ctx, HOWDAH_SSRF_KIND_REBIND, "curl-resolve", sizeof("curl-resolve") - 1,
                          (const char *)t.host, t.hlen, t.port, t.count ? t.recs : NULL, t.count)
                 == HOWDAH_ACTION_BLOCK)
@@ -1251,30 +1277,53 @@ static void howdah_hook_curl_exec(INTERNAL_FUNCTION_PARAMETERS) {
     int post = 0;
     HOWDAH_ARG(1, h);
     /* No URL known for the handle: chain unguarded (documented gap). */
-    if (handle_key(h, &k) && (e = map_find(k)) != NULL && e->url) {
+    if (handle_key(h, &k) && (e = map_find(k)) != NULL && (e->url || e->overlong)) {
         const char *org = howdah_current_script();
         size_t orglen = org ? strlen(org) : 0;
         int mask = ssrf_mask();
-        if (ssrf_scheme_blocked(e->url, e->len, HOWDAH_SSRF_VIA_CURL)
-            || ssrf_should_block(e->url, e->len, 0, org, orglen)) {
-            RETVAL_FALSE;
-            return;
-        }
-        flags = e->flags;
-        if (mask & (HOWDAH_SSRF_ARM_PROTOCOLS | HOWDAH_SSRF_ARM_PIN | HOWDAH_SSRF_ARM_REDIRECT
-                    | HOWDAH_SSRF_ARM_SCHEME)) {
-            /* Private copy: the calls below run PHP code paths that could, in
-             * theory, rewrite the map entry. */
-            char ubuf[HOWDAH_URL_MAX + 1];
-            size_t ulen = e->len;
-            memcpy(ubuf, e->url, ulen);
-            ubuf[ulen] = '\0';
-            if (curl_prepare(h, flags, mask, ubuf, ulen)) {
+        if (e->overlong) {
+            /* Over-long URL (> HOWDAH_URL_MAX): a long userinfo can steer the
+             * truncation so the stored text parses to an empty or wrong host, so
+             * never infer the host from it. The scheme is at the front (the
+             * stored prefix is still valid for the scheme check); the range
+             * verdict is the oversize/suspicious one (F1 re-review). */
+            if (e->url && ssrf_scheme_blocked(e->url, e->len, HOWDAH_SSRF_VIA_CURL)) {
                 RETVAL_FALSE;
                 return;
             }
+            if ((mask & HOWDAH_SSRF_ARM_RANGE) && g_decide
+                && howdah_ssrf_oversize_glue(g_ctx, HOWDAH_SSRF_KIND_RANGE) == HOWDAH_ACTION_BLOCK) {
+                RETVAL_FALSE;
+                return;
+            }
+            /* scheme=block: have libcurl itself refuse non-http(s) (host-independent). */
+            if (mask & HOWDAH_SSRF_ARM_PROTOCOLS)
+                howdah_curl_setopt(h, HOWDAH_CURLOPT_PROTOCOLS, 0, HOWDAH_CURLPROTO_HTTP_HTTPS, NULL, 0);
+            /* No trusted host to pin; the after-the-fact rebind post-check still
+             * judges the address libcurl actually connects to. */
+            post = (mask & HOWDAH_SSRF_ARM_REBIND) != 0;
+        } else {
+            if (ssrf_scheme_blocked(e->url, e->len, HOWDAH_SSRF_VIA_CURL)
+                || ssrf_should_block(e->url, e->len, 0, org, orglen)) {
+                RETVAL_FALSE;
+                return;
+            }
+            flags = e->flags;
+            if (mask & (HOWDAH_SSRF_ARM_PROTOCOLS | HOWDAH_SSRF_ARM_PIN | HOWDAH_SSRF_ARM_REDIRECT
+                        | HOWDAH_SSRF_ARM_SCHEME)) {
+                /* Private copy: the calls below run PHP code paths that could, in
+                 * theory, rewrite the map entry. */
+                char ubuf[HOWDAH_URL_MAX + 1];
+                size_t ulen = e->len;
+                memcpy(ubuf, e->url, ulen);
+                ubuf[ulen] = '\0';
+                if (curl_prepare(h, flags, mask, ubuf, ulen)) {
+                    RETVAL_FALSE;
+                    return;
+                }
+            }
+            post = (mask & HOWDAH_SSRF_ARM_REBIND) != 0;
         }
-        post = (mask & HOWDAH_SSRF_ARM_REBIND) != 0;
     }
     howdah_orig_curl_exec(INTERNAL_FUNCTION_PARAM_PASSTHRU);
     if (post) curl_postcheck(h, return_value, flags);
@@ -1353,7 +1402,21 @@ static void howdah_curl_header_guard(INTERNAL_FUNCTION_PARAMETERS) {
         while (vlen && (*v == ' ' || *v == '\t')) { v++; vlen--; }
         while (vlen && (v[vlen - 1] == '\r' || v[vlen - 1] == '\n' || v[vlen - 1] == ' '
                         || v[vlen - 1] == '\t')) vlen--;
-        if (vlen > HOWDAH_URL_MAX) vlen = HOWDAH_URL_MAX; /* the host is at the front */
+        if (vlen > HOWDAH_URL_MAX) {
+            /* Over-long Location: the scheme is at the front (checkable), but a
+             * long userinfo could steer a truncation into a wrong/relative host
+             * parse, so the redirect target is the suspicious verdict, not a
+             * parse of the truncated text (F1 re-review). */
+            if ((mask & HOWDAH_SSRF_ARM_SCHEME)
+                && howdah_ssrf_scheme_glue(g_ctx, HOWDAH_SSRF_VIA_CURL, v, HOWDAH_URL_MAX) == HOWDAH_ACTION_BLOCK) {
+                RETVAL_LONG(0);
+                return;
+            }
+            if ((mask & HOWDAH_SSRF_ARM_REDIRECT) && g_decide
+                && howdah_ssrf_oversize_glue(g_ctx, HOWDAH_SSRF_KIND_REDIRECT) == HOWDAH_ACTION_BLOCK)
+                RETVAL_LONG(0);
+            return;
+        }
         if (vlen && hop_blocked(v, vlen, mask)) RETVAL_LONG(0); /* abort: do not follow */
     }
 }

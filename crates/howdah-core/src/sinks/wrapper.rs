@@ -242,10 +242,14 @@ fn strip_file_wrapper(t: &[u8]) -> &[u8] {
 /// the glue passes them per request). Matching is anchored at the root and the
 /// `error_log` match is exact, so benign relative/absolute app paths never hit.
 pub fn classify_poison(target: &[u8], session: &[u8], error_log: &[u8]) -> Option<PoisonKind> {
+    // Strip the wrapper first, then bound: the limit mirrors the kernel's
+    // PATH_MAX on the PATH (after the wrapper), so a `file://<long host>/`
+    // prefix cannot pad a short poison path past the limit to evade it (F7
+    // re-review). strip_file_wrapper only scans for the first `/`, no alloc.
+    let target = strip_file_wrapper(target);
     if target.len() > POISON_MAX_LEN {
         return None;
     }
-    let target = strip_file_wrapper(target);
     // `/proc` (and traversal into it): anchored, so `templates/proc/x` is safe.
     let comps = resolve_anchored(target);
     if comps.first().map(|c| c.as_ref()) == Some(b"proc".as_ref()) {
@@ -441,5 +445,11 @@ mod tests {
         // this avoids the per-component allocation blow-up).
         let long = [b'a'; 5000];
         assert_eq!(classify_poison(&long, b"", b""), None);
+        // F7 re-review: a long file:// authority padding the TOTAL over the
+        // limit must not hide a short poison path (strip before the bound).
+        let mut padded = b"file://".to_vec();
+        padded.extend_from_slice(&[b'h'; 5000]);
+        padded.extend_from_slice(b"/proc/self/environ");
+        assert_eq!(classify_poison(&padded, b"", b""), Some(PoisonKind::ProcEnviron));
     }
 }

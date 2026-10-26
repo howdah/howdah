@@ -160,14 +160,12 @@ pub fn parse_host(input: &[u8], form: HostForm) -> Option<Host> {
     } else {
         (auth, &[][..])
     };
-    let port = if port_s.is_empty() {
-        None
-    } else {
-        if port_s.len() > 5 || !port_s.iter().all(u8::is_ascii_digit) {
-            return None;
-        }
-        Some(std::str::from_utf8(port_s).ok()?.parse::<u16>().ok()?)
-    };
+    // An unparseable or out-of-range port does NOT drop the host: classify it
+    // with port None. Otherwise `127.0.0.1:99999` (out of u16 range) or a
+    // leading-zero port would fail the whole parse and slip the host past the
+    // check (round-5). The port only narrows the match; the host is what must
+    // not be lost.
+    let port = std::str::from_utf8(port_s).ok().and_then(|s| s.parse::<u16>().ok());
     // Zone-id only exists on IPv6; elsewhere `%` is percent-encoding, so never
     // truncate a non-IPv6 name at it.
     let name = match name.iter().position(|&b| b == b'%') {
@@ -796,6 +794,21 @@ mod tests {
         assert_eq!(h.port, Some(80));
         // A stream URL with an invalid scheme is still rejected.
         assert!(ph("127.0.0.1:80://x", HostForm::SchemeRequired).is_none());
+    }
+    #[test]
+    fn parse_bad_port_still_classifies_host() {
+        // Round-5: an out-of-range or garbage port must not drop the host (that
+        // would fail open on the range check); classify it with port None.
+        let h = ph("http://127.0.0.1:99999/", HostForm::SchemeRequired).unwrap();
+        assert_eq!(h.name, b"127.0.0.1");
+        assert_eq!(h.port, None);
+        let h = ph("127.0.0.1:8080abc", HostForm::BareHostOk).unwrap();
+        assert_eq!(h.name, b"127.0.0.1");
+        assert_eq!(h.port, None);
+        // A leading-zero port (libcurl accepts it) still parses.
+        assert_eq!(ph("http://127.0.0.1:000080/", HostForm::SchemeRequired).unwrap().port, Some(80));
+        // A valid port still parses.
+        assert_eq!(ph("http://127.0.0.1:8080/", HostForm::SchemeRequired).unwrap().port, Some(8080));
     }
     #[test]
     fn parse_strips_zone_and_trailing_dot() {

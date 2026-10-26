@@ -616,9 +616,15 @@ is checked, and a hit on a reserved or internal range is a match.
   parse some encoded forms differently, so the resolved addresses are the
   authority. The host parse matches PHP and libcurl on the tricky shapes: a
   `\` before `@` stays in the userinfo (the host is taken after the last `@`), a
-  host is cut at the first NUL byte, and an unknown or nesting scheme
-  (`dict://`, `compress.zlib://http://…`) is peeled so the inner host is still
-  classified.
+  host is cut at the first NUL byte, an unknown or nesting scheme (`dict://`,
+  `compress.zlib://http://…`) is peeled so the inner host is still classified,
+  and an out-of-range or garbage port classifies the host with no port rather
+  than dropping it. One residual: a NUL placed *before* an `@`
+  (`127.0.0.1\0@public`) is read as the host after the `@` (`public`, the
+  URL-parser view); a bare-host socket call that instead stops at the NUL would
+  see `127.0.0.1`. Such NUL-in-host values are malformed and the mirror case
+  (`public\0@127.0.0.1`) is caught; closing this one needs classifying both
+  interpretations.
 - **`allow_hosts` requires every resolved address.** A name is allowed by an IP
   or CIDR entry only when *all* of its resolved addresses match it; a name that
   answers `[an allowed address, 169.254.169.254]` is **not** allowed (PHP could

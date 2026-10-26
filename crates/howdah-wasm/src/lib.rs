@@ -240,6 +240,9 @@ mod tests {
         assert_eq!(v["config"]["mode"], "block");
         assert_eq!(v["config"]["limits"]["max_parts"], 2000);
         assert_eq!(v["config"]["sinks"]["unserialize"]["mode"], "off");
+        // xxe is enforced by default with its own mode (the editor reads this default).
+        assert_eq!(v["config"]["sinks"]["xml"]["mode"], "block");
+        assert_eq!(v["config"]["sinks"]["mode"], "detect");
         assert!(v["config"]["rules"].is_object());
     }
 

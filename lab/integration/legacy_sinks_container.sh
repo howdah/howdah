@@ -143,52 +143,232 @@ else
   echo "  ok   - call_user_func on 7.0+: global-namespace literal call NOT seen (ZEND_INIT_USER_CALL, documented); namespaced and dynamic calls logged"
 fi
 
-# ============================================================= xml (XXE)
-XXE='<?xml version="1.0"?><!DOCTYPE r [<!ENTITY x SYSTEM "file:///etc/SECRETPATH">]><r>&x;</r>'
-run_php '[sinks.xml]\nmode="detect"\n' '$d = @simplexml_load_string(getenv("DOC")); echo "PARSED\n";' -d "auto_prepend_file="
-export DOC="$XXE"
-run_php '[sinks.xml]\nmode="detect"\n' '$d = @simplexml_load_string(getenv("DOC")); echo "PARSED\n";'
-grep -q '"rule":"xxe"' "$LOG" || fail "C1: no xxe event in detect"
-grep -q '"action":"log"' "$LOG" || fail "C1: xxe detect not action:log"
-if grep -q 'SECRETPATH' "$LOG"; then fail "C1: log leaked the XML document"; fi
-grep -q PARSED "$WORK/out.txt" || fail "C1: script did not continue after xml parse"
-echo "  ok   - xml detect: external-entity DOCTYPE logged (rule=xxe), document not logged"
+# ============================================================= xml (XXE), flag-aware
+# On by default: with no config at all, an external entity in an XML string
+# parsed with a dangerous libxml flag (NOENT/DTDLOAD/DTDATTR/DTDVALID) has the
+# flag stripped and the parse goes on; no flag, or no external entity, is left
+# alone. XXE-ROW lines feed the per-version table the host driver prints.
+XE=/src/lab/integration/xxe
+SECRET=CANARY_SECRET_9731
+printf '%s' "$SECRET" > "$WORK/secret.txt"
+export XXE_DOC="<?xml version=\"1.0\"?><!DOCTYPE r [<!ENTITY x SYSTEM \"file://$WORK/secret.txt\">]><r>&x;</r>"
+LV=$(php -r 'echo defined("LIBXML_VERSION") ? LIBXML_VERSION : 0;')
+ENTRIES="simplexml_load_string"
+php -r 'exit(class_exists("SimpleXMLElement") ? 0 : 1);' && ENTRIES="$ENTRIES simplexmlelement"
+php -r 'exit(class_exists("DOMDocument") ? 0 : 1);' && ENTRIES="$ENTRIES domdocument"
+php -r 'exit(class_exists("XMLReader") ? 0 : 1);' && ENTRIES="$ENTRIES xmlreader"
+php -r 'exit(class_exists("Dom\\XMLDocument") ? 0 : 1);' && ENTRIES="$ENTRIES dom84"
+NENT=$(echo $ENTRIES | wc -w)
+fn_of() {
+  case "$1" in
+    simplexml_load_string) echo 'via simplexml_load_string' ;;
+    domdocument) echo 'via DOMDocument::loadXML' ;;
+    simplexmlelement) echo 'via SimpleXMLElement::__construct' ;;
+    xmlreader) echo 'via XMLReader::XML' ;;
+    dom84) printf '%s\n' 'via Dom\\XMLDocument::createFromString' ;;
+  esac
+}
+# xe <config> <entry> <flags> [<env var>] -> "<PARSED|REFUSED> <LEAK|NOLEAK>" in out.txt, log in $LOG.
+# <config>: SHIPPED = no howdah.config file and the packaged ini default
+# howdah.mode=detect (the real default install); INIOFF = howdah.mode=off; else
+# the TOML text of a howdah.config file.
+xe() {
+  case "$1" in
+    SHIPPED) CFGARG="-d howdah.mode=detect" ;;
+    INIOFF) CFGARG="-d howdah.mode=off" ;;
+    *) printf '%b' "$1" > "$WORK/l.toml"; CFGARG="-d howdah.config=$WORK/l.toml" ;;
+  esac
+  : > "$LOG"
+  # shellcheck disable=SC2086
+  php -d extension="$WORK/howdah.so" $CFGARG -d howdah.log="$LOG" \
+      -d display_errors=0 -d error_reporting=-1 -d date.timezone=UTC \
+      "$XE/xe.php" "$2" "$3" ${4:-} > "$WORK/out.txt" 2>"$WORK/err.txt" || true
+}
+xe_plain() { # the same parse with Howdah not loaded (the control)
+  php -d display_errors=0 -d date.timezone=UTC "$XE/xe.php" "$1" "$2" ${3:-} 2>/dev/null || true
+}
+nblock() { grep '"rule":"xxe"' "$LOG" | grep -c '"action":"block"' || true; }
+nlog() { grep '"rule":"xxe"' "$LOG" | grep -c '"action":"log"' || true; }
+nxxe() { grep -c '"rule":"xxe"' "$LOG" || true; }
 
-run_php '[sinks.xml]\nmode="detect"\n' '$d = @simplexml_load_string("<r><a>1</a></r>"); echo "PARSED\n";'
-no_events || fail "C2: a benign XML document produced an xxe event"
-echo "  ok   - xml: a document with no DOCTYPE is silent"
+# --- control: is the vector live on this PHP / libxml, without Howdah? -------
+LIVE=0
+for e in $ENTRIES; do
+  r=$(xe_plain "$e" 2)
+  case "$r" in "PARSED LEAK") LIVE=$((LIVE + 1)) ;; esac
+done
+echo "  note - libxml $LV: external entity + LIBXML_NOENT leaks the canary through $LIVE of $NENT entry points with Howdah NOT loaded"
+[ "$LIVE" -ge 1 ] || fail "C0: the XXE vector is not live on this image (no entry point leaked the canary without Howdah); the block proof below would be vacuous"
 
-run_php '[sinks.xml]\nmode="block"\n' '$d = @simplexml_load_string(getenv("DOC")); echo "RET[".var_export($d,true)."]\nCONT\n";'
-grep -q 'RET\[false\]' "$WORK/out.txt" || fail "C3: blocked xml did not return false"
-grep -q CONT "$WORK/out.txt" || fail "C3: script did not continue after xml block"
-grep -q '"action":"block"' "$LOG" || fail "C3: no action:block for xml"
-echo "  ok   - xml block: simplexml_load_string of an XXE doc refused (false), script continued"
+# --- the default: no howdah.config, the packaged howdah.mode=detect -------------
+BLOCKED=0
+for e in $ENTRIES; do
+  xe SHIPPED "$e" 2
+  r=$(cat "$WORK/out.txt")
+  [ "$r" = "PARSED NOLEAK" ] || fail "C1[$e]: default config, NOENT + external entity: expected 'PARSED NOLEAK' (flags stripped, parse continues), got '$r'"
+  [ "$(nblock)" = 1 ] || fail "C1[$e]: expected exactly one xxe block event, got $(nblock)"
+  grep -qF "$(fn_of "$e")" "$LOG" || fail "C1[$e]: event does not name the guarded function ($(fn_of "$e"))"
+  grep -q 'dangerous flags removed, parse continued' "$LOG" || fail "C1[$e]: event does not say the flags were removed"
+  grep -q 'LIBXML_NOENT' "$LOG" || fail "C1[$e]: event does not name the flag"
+  if grep -q "$SECRET\|secret.txt\|howdah-legacy" "$LOG"; then fail "C1[$e]: log leaked the XML document / path"; fi
+  BLOCKED=$((BLOCKED + 1))
+done
+echo "  ok   - xml shipped default (no howdah.config, howdah.mode=detect): NOENT + external entity stripped and parse continued on $BLOCKED of $NENT entry points ($ENTRIES), canary not read, document not logged"
+
+# Every dangerous flag, not only NOENT; benign flags ride along untouched.
+for f in 4 8 16 6 14 30 16386; do
+  xe SHIPPED simplexml_load_string "$f"
+  [ "$(cat "$WORK/out.txt")" = "PARSED NOLEAK" ] || fail "C2: flags $f: expected PARSED NOLEAK, got '$(cat "$WORK/out.txt")'"
+  [ "$(nblock)" = 1 ] || fail "C2: flags $f: expected one block event, got $(nblock)"
+done
+echo "  ok   - xml: DTDLOAD, DTDATTR, DTDVALID, NOENT|DTDLOAD, NOENT|DTDLOAD|DTDATTR, all four, NOENT|NOCDATA: each stripped (one block event each)"
+
+# No dangerous flag: silent, whatever the document says (libxml 2.9+ neither
+# expands nor fetches it). On libxml < 2.9 flags prove nothing and the call is refused.
+for f in 0 1 64 256 2048 16384 524288; do
+  xe SHIPPED simplexml_load_string "$f"
+  if [ "$LV" -ge 20900 ]; then
+    [ "$(nxxe)" = 0 ] || fail "C3: flags $f without a dangerous flag raised an xxe event"
+    grep -q "$SECRET" "$WORK/out.txt" && fail "C3: flags $f leaked the canary"
+  fi
+done
+if [ "$LV" -ge 20900 ]; then
+  echo "  ok   - xml: external entity with no dangerous flag (0, RECOVER, NOWARNING, NOBLANKS, NONET, NOCDATA, PARSEHUGE) is silent and reads nothing"
+else
+  echo "  note - libxml $LV is older than 2.9: flags do not gate the check there (not asserted)"
+fi
+
+# The caller's own variable is never changed, even when it is a reference or a numeric string.
+xe SHIPPED simplexml_load_string_var 2
+[ "$(cat "$WORK/out.txt")" = "OPTS=2 PARSED NOLEAK" ] || fail "C4: flags variable / reference changed or leaked: '$(cat "$WORK/out.txt")'"
+xe SHIPPED simplexml_load_string_str 2
+[ "$(cat "$WORK/out.txt")" = "PARSED NOLEAK" ] || fail "C4: numeric-string flags: '$(cat "$WORK/out.txt")'"
+[ "$(nblock)" = 1 ] || fail "C4: numeric-string flags did not raise one event"
+echo "  ok   - xml: the caller's flags variable (also by reference) is untouched after a strip; numeric-string flags are stripped too"
+
+if [ "$PHPV" -ge 8 ]; then
+  : > "$LOG"
+  r=$(php -d extension="$WORK/howdah.so" -d howdah.mode=detect -d howdah.log="$LOG" -d display_errors=0 "$XE/xe_named.php" 2 2>/dev/null)
+  [ "$r" = "PARSED NOLEAK" ] || fail "C5: named arguments: expected PARSED NOLEAK, got '$r'"
+  [ "$(nblock)" = 2 ] || fail "C5: named arguments: expected two block events (simplexml + dom), got $(nblock)"
+  echo "  ok   - xml (PHP 8): named arguments (options: before data:) are stripped too"
+fi
+
+# --- modes ------------------------------------------------------------------------
+xe '[sinks.xml]\nmode="detect"\n' simplexml_load_string 2
+[ "$(cat "$WORK/out.txt")" = "PARSED LEAK" ] || fail "C6: detect mode must only log (control: the entity is read), got '$(cat "$WORK/out.txt")'"
+[ "$(nlog)" = 1 ] && [ "$(nblock)" = 0 ] || fail "C6: detect mode: expected one log event and no block"
+echo "  ok   - xml mode=detect: logged (action:log), flags left alone"
+
+xe '[sinks.xml]\nmode="off"\n' simplexml_load_string 2
+[ "$(nxxe)" = 0 ] || fail "C7: [sinks.xml] mode=off raised an event"
+echo "  ok   - xml mode=off: silent"
+
+xe INIOFF simplexml_load_string 2
+[ "$(nxxe)" = 0 ] && [ "$(cat "$WORK/out.txt")" = "PARSED LEAK" ] || fail "C7: howdah.mode=off must silence the rule"
+echo "  ok   - howdah.mode=off: silent"
+
+xe '[sinks]\nenabled=false\n' simplexml_load_string 2
+[ "$(nxxe)" = 0 ] || fail "C7: [sinks] enabled=false must silence the rule"
+echo "  ok   - [sinks] enabled=false: silent"
+
+# The shipped state: howdah.mode = detect on the ini line AND a [sinks] detect
+# do not soften an on-by-default rule (it has its own mode).
+xe '[sinks]\nmode="detect"\n' simplexml_load_string 2
+[ "$(nblock)" = 1 ] || fail "C8: [sinks] mode=detect softened the xxe rule"
+echo "  ok   - [sinks] mode=detect does not soften xxe (its own knob is [sinks.xml] mode)"
+
+# --- entity bomb (billion laughs): same class, stripped --------------------------
+BOMB=$(php -r '$s="<?xml version=\"1.0\"?><!DOCTYPE l [<!ENTITY a0 \"lol\">"; for($k=1;$k<=7;$k++){$s.="<!ENTITY a$k \"".str_repeat("&a".($k-1).";",10)."\">";} echo $s."]><l>&a7;</l>";')
+export BOMB
+xe SHIPPED simplexml_load_string 2 BOMB
+# After the strip libxml's own amplification guard may still refuse the document
+# (2.9+ does for this one); either way nothing was substituted.
+case "$(cat "$WORK/out.txt")" in "PARSED NOLEAK"|"REFUSED NOLEAK") ;; *) fail "C9: entity bomb: unexpected result '$(cat "$WORK/out.txt")'" ;; esac
+grep -q 'expand past 1 MiB' "$LOG" || fail "C9: bomb event missing"
+[ "$(nblock)" = 1 ] || fail "C9: bomb: expected one block event"
+echo "  ok   - xml: a billion-laughs chain (7 levels of 10) with LIBXML_NOENT has the flag stripped (rule=xxe, 'expand past 1 MiB'); nothing substituted"
+xe SHIPPED simplexml_load_string 0 BOMB
+[ "$(nxxe)" = 0 ] || fail "C9: bomb without a dangerous flag raised an event"
+
+# --- bare DOCTYPE / external DTD: never blocked --------------------------------
+export SVG='<?xml version="1.0"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg xmlns="http://www.w3.org/2000/svg"/>'
+export BARE='<?xml version="1.0"?><!DOCTYPE note [<!ELEMENT note (#PCDATA)>]><note>hi</note>'
+for e in $ENTRIES; do
+  for f in 0 2 4 6 14 30; do
+    xe SHIPPED "$e" "$f" BARE
+    [ "$(nxxe)" = 0 ] || fail "C10[$e]: a bare DOCTYPE with flags $f raised an xxe event"
+    xe '[sinks.xml]\nmode="block"\n' "$e" "$f" SVG
+    [ "$(nblock)" = 0 ] || fail "C10[$e]: an SVG doctype with flags $f was blocked"
+    r=$(cat "$WORK/out.txt")
+    case "$r" in PARSED*) ;; *) [ "$f" -ge 4 ] || fail "C10[$e]: SVG doctype with flags $f did not parse ($r)" ;; esac
+  done
+done
+xe SHIPPED simplexml_load_string 2 SVG
+[ "$(nxxe)" = 0 ] || fail "C10: SVG with NOENT only fetches no DTD; expected silence"
+xe SHIPPED simplexml_load_string 4 SVG
+[ "$(nlog)" = 1 ] && grep -q 'external DTD' "$LOG" || fail "C10: SVG with DTDLOAD should log one detect-only line"
+echo "  ok   - xml: a bare DOCTYPE and an SVG doctype are never blocked on any entry point, any flags (SVG + DTDLOAD logs one detect-only line)"
+
+# --- file-based loaders are not covered (documented): no event ---------------------
+printf '%s' "$XXE_DOC" > "$WORK/xxe.xml"
+if php -r 'exit(function_exists("simplexml_load_file") ? 0 : 1);'; then
+  : > "$LOG"
+  php -d extension="$WORK/howdah.so" -d howdah.mode=detect -d howdah.log="$LOG" -d display_errors=0 \
+      -r '$s = @simplexml_load_file(getenv("F"), null, LIBXML_NOENT); echo $s === false ? "FALSE" : "OK"; if (class_exists("DOMDocument")) { $d = new DOMDocument(); echo @$d->load(getenv("F"), LIBXML_NOENT) ? "OK" : "FALSE"; }' \
+      > "$WORK/out.txt" 2>/dev/null || true
+  [ "$(nxxe)" = 0 ] || fail "C11: a file-based loader raised an event (documented as not covered)"
+  echo "  ok   - xml: simplexml_load_file / DOMDocument::load are not hooked (documented gap; external_entities=\"deny\" covers them): no event"
+fi
+
+# --- evasions: the same payload hidden from a scan of the raw bytes ----------------
+# Each shape is something libxml still reads (UTF-7/UTF-32/UTF-16/EBCDIC bodies, a
+# DOCTYPE hidden behind a '>' in its system literal, a parameter entity that
+# declares the entity, a megabyte of padding). The control run must leak where
+# the vector is live on this libxml; Howdah must then leave nothing readable.
+export XXE_FILE="$WORK/secret.txt"
+EV_LIVE=0; EV_STOPPED=0; EV_TOTAL=0
+for v in $(php "$XE/evade.php" list); do
+  EV_TOTAL=$((EV_TOTAL + 1))
+  ctl=$(php -d display_errors=0 "$XE/evade.php" "$v" 2 2>/dev/null || true)
+  [ "$ctl" = "NA" ] && continue
+  case "$ctl" in "PARSED LEAK") ;; *) continue ;; esac   # vector not live on this libxml: nothing to prove
+  EV_LIVE=$((EV_LIVE + 1))
+  : > "$LOG"
+  r=$(php -d extension="$WORK/howdah.so" -d howdah.mode=detect -d howdah.log="$LOG" -d display_errors=0 "$XE/evade.php" "$v" 2 2>/dev/null || true)
+  case "$r" in "REFUSED NOLEAK"|"PARSED NOLEAK") ;; *) fail "C11[$v]: an XXE shape that leaks without Howdah was not neutralized (got '$r')" ;; esac
+  [ "$(nblock)" = 1 ] || fail "C11[$v]: expected one xxe block event, got $(nblock)"
+  if grep -q "$SECRET\|secret.txt" "$LOG"; then fail "C11[$v]: log leaked the document / path"; fi
+  EV_STOPPED=$((EV_STOPPED + 1))
+done
+[ "$EV_LIVE" -ge 5 ] || fail "C11: only $EV_LIVE of $EV_TOTAL evasion shapes were live on this libxml; the evasion proof would be vacuous"
+echo "  ok   - xml evasions: $EV_STOPPED of $EV_LIVE live shapes (of $EV_TOTAL: DOCTYPE literal with > or [, parameter-entity literal incl. char refs, UTF-7/UTF-32/UTF-16/EBCDIC bodies, megabyte padding) neutralized; each leaks without Howdah"
+
+# --- BENIGN corpus: the on-by-default false-positive gate --------------------------
+php -d display_errors=0 -d date.timezone=UTC "$XE/benign.php" > "$WORK/benign-plain.txt" 2>/dev/null || true
+: > "$LOG"
+php -d extension="$WORK/howdah.so" -d howdah.mode=detect -d howdah.log="$LOG" \
+    -d display_errors=0 -d date.timezone=UTC "$XE/benign.php" > "$WORK/benign-howdah.txt" 2>"$WORK/err.txt" || true
+BTOTAL=$(sed -n 's/^TOTAL=//p' "$WORK/benign-howdah.txt")
+BBLOCK=$(nblock)
+BLOG=$(nlog)
+[ -n "$BTOTAL" ] && [ "$BTOTAL" -ge 100 ] || fail "C12: the benign corpus did not run to the end (TOTAL=$BTOTAL)"
+[ "$BBLOCK" = 0 ] || fail "C12: the benign corpus produced $BBLOCK xxe BLOCK event(s)"
+cmp -s "$WORK/benign-plain.txt" "$WORK/benign-howdah.txt" || { diff "$WORK/benign-plain.txt" "$WORK/benign-howdah.txt" | head -10; fail "C12: benign parse results differ with Howdah loaded"; }
+if grep -v '"action":"log"' "$LOG" | grep -q '"rule":"xxe"'; then fail "C12: a benign document produced a non-log xxe event"; fi
+if [ "$BLOG" -gt 0 ] && ! grep '"rule":"xxe"' "$LOG" | grep -q 'external DTD'; then fail "C12: unexpected benign log events"; fi
+echo "  ok   - xml BENIGN corpus: $BTOTAL parses (14 documents incl. SAML/SVG/XHTML/RSS/plist/ODF/Office/bare DOCTYPE/internal entities x 10 flag sets x each entry point): 0 blocks, results byte-identical with and without Howdah ($BLOG detect-only external-DTD log lines)"
+
+echo "XXE-ROW	libxml=$LV	control_leaks=$LIVE/$NENT	blocked=$BLOCKED/$NENT	evasions=$EV_STOPPED/$EV_LIVE	benign_parses=$BTOTAL	benign_blocks=$BBLOCK	benign_identical=yes	benign_log_only=$BLOG"
 
 # external_entities = "deny": the toggle shows in `php --ri` and the loader
 # call is made (verified by the ri row; its runtime effect on loading by path
 # is documented, not asserted here).
 php -d extension="$WORK/howdah.so" -d howdah.config=/dev/stdin --ri howdah 2>/dev/null <<'TOMLRI' | grep -q 'XML external entities => denied' \
-  && echo "  ok   - xml external_entities=deny: shown as denied in php --ri howdah" || fail "C4: deny toggle not surfaced"
+  && echo "  ok   - xml external_entities=deny: shown as denied in php --ri howdah" || fail "C13: deny toggle not surfaced"
 [sinks.xml]
 external_entities = "deny"
 TOMLRI
-
-# DOMDocument::loadXML where the class exists (not on the 5.4 image).
-if php -r 'exit(class_exists("DOMDocument")?0:1);'; then
-  run_php '[sinks.xml]\nmode="detect"\n' '$doc=new DOMDocument(); @$doc->loadXML(getenv("DOC")); echo "DOM\n";'
-  grep -q '"rule":"xxe"' "$LOG" || fail "C5: DOMDocument::loadXML XXE not logged"
-  if grep -q 'SECRETPATH' "$LOG"; then fail "C5: log leaked the XML document"; fi
-  echo "  ok   - xml detect: DOMDocument::loadXML of an XXE doc logged (rule=xxe), document not logged"
-  # A bare external DTD (the SVG doctype) is detect-only: logged, never blocked.
-  export SVG='<?xml version="1.0"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg xmlns="http://www.w3.org/2000/svg"/>'
-  run_php '[sinks.xml]\nmode="block"\n' '$doc=new DOMDocument(); $r=@$doc->loadXML(getenv("SVG")); echo "RET[".var_export($r,true)."]\n";'
-  grep -q 'RET\[true\]' "$WORK/out.txt" || fail "C6: an SVG doctype was refused under block (must be detect-only)"
-  grep -q '"rule":"xxe"' "$LOG" || fail "C6: SVG external DTD not logged"
-  grep -q '"action":"log"' "$LOG" || fail "C6: SVG external DTD must log, not block"
-  echo "  ok   - xml: a bare external DTD (SVG doctype) under block mode is logged only, document loads"
-else
-  echo "  note - DOMDocument not built into this image; loadXML case skipped"
-fi
 
 # ============================================================= tls (detect-only)
 run_php '[sinks.tls]\nmode="block"\n' '$c=curl_init(); curl_setopt($c,CURLOPT_SSL_VERIFYPEER,false); curl_setopt($c,CURLOPT_SSL_VERIFYHOST,0); echo "SET\n";'

@@ -6,6 +6,52 @@ All notable changes to Howdah are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- XXE flag-awareness, **on and enforcing by default**. The Layer 3 `xxe` rule
+  (the `xml` legacy sink) used to log any XML string that declared an external
+  entity and, when armed, refuse it whatever the parse flags said. It now reads
+  the libxml options argument as well as the document and acts only when a
+  dangerous flag (`LIBXML_NOENT`, `LIBXML_DTDLOAD`, `LIBXML_DTDATTR` or
+  `LIBXML_DTDVALID`) coincides with an external entity (`<!ENTITY ... SYSTEM|PUBLIC>`,
+  general or parameter) or a nested-entity expansion bomb (billion laughs: internal
+  entities whose references expand past 1 MiB, in any declaration order) in the
+  string being parsed. Instead of failing the parse, a block **removes the
+  dangerous flags from the call and lets the parse continue** (the entity is not
+  expanded, the application keeps working; logged as `action: "block"` with a
+  reason ending `dangerous flags removed, parse continued`); only the callee sees the
+  change, the caller's variable keeps its value. A bare `<!DOCTYPE>`, internal
+  entities of ordinary size, and an external DTD reference (SAML, SVG, XHTML, RSS,
+  plist, ODF and Office XML carry them) never trigger it; an external DTD is logged
+  (`action: "log"`, never blocked) only when `DTDLOAD`/`DTDATTR` really fetch it,
+  and an external entity with no dangerous flag is silent (libxml 2.9+ neither
+  expands nor fetches it). On libxml older than 2.9.0, which resolves external
+  entities whatever the flags say (detected at run time), the flags cannot be
+  trusted or stripped, so the document alone decides and the call is refused. The
+  scan reads through the disguises that hide an entity from a scan of the raw
+  bytes but not from libxml (a `>` or `[` inside the DOCTYPE's system literal; a
+  parameter entity whose literal declares the entity, character references
+  included; UTF-16 and UTF-32 in any byte order) and reports what it cannot read
+  (UTF-7 or EBCDIC text, a prolog padded past 1 MiB) rather than waving it through.
+  Hooked now: `simplexml_load_string`, `new SimpleXMLElement` (not with `$dataIsURL`),
+  `DOMDocument::loadXML`, `XMLReader::XML` (static and, on PHP 8, instance calls)
+  and `Dom\XMLDocument::createFromString` on 8.4+. The by-path readers
+  (`simplexml_load_file`, `DOMDocument::load`, `XMLReader::open`) are still not
+  hooked; `[sinks.xml] external_entities = "deny"` covers them. Same rule id (`xxe`,
+  catalog stays 42), same severity; `[sinks.xml] mode` now defaults to `block`
+  instead of inheriting `sinks.mode`, whatever the global mode (like `[inspect]
+  cgi_arg`); `"detect"` logs only, `"off"` disables it, and `[sinks] enabled =
+  false` and `howdah.mode = off` silence it. The other six legacy sinks keep their
+  log-first defaults. A call without a dangerous flag costs a few integer
+  compares and never enters the core; the document and any path in it are never
+  logged. New `howdah_sink_check_xml` entry point and `HOWDAH_STRIP` action code in
+  the core ABI (`howdah_core.h` regenerated), no new php.ini directives. Lab:
+  `lab/integration/legacy_sinks.sh` now takes a list of PHP minors; per minor a
+  control run without Howdah proves the vector is live, the flag is stripped on
+  every entry point, and a 14-document benign corpus (SAML, SVG, XHTML, RSS, plist,
+  ODF, Office XML, bare DOCTYPE, internal entities) x 10 flag sets x each entry point
+  parses byte-identically with zero blocks (the on-by-default false-positive gate),
+  and 14 disguised payloads (UTF-7, UTF-32, UTF-16, EBCDIC, parameter-entity
+  literals, DOCTYPE literals, megabyte padding) are neutralized wherever libxml
+  still reads them; verified on PHP 5.4, 5.6, 7.0-7.4 and 8.0-8.5.
 - A Layer 2 signature for php-cgi argument injection (CVE-2012-1823 and
   CVE-2024-4577), **on and enforcing by default**. When PHP runs as php-cgi
   behind a CGI front end, a query string with no literal `=` is passed to

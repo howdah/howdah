@@ -211,6 +211,28 @@ test('1.3 phar and ssrf sinks round-trip through the core', () => {
   assert.deepEqual(v.config.sinks.ssrf.allow_hosts, ['10.0.0.0/8', 'api.internal', '192.168.1.5']);
 });
 
+test('xxe is on by default and its mode round-trips through the core', () => {
+  // Shipped defaults emit nothing for [sinks.xml]: the core default (block) is the posture.
+  assert.ok(!E.emitToml(fresh(), {}).includes('sinks.xml'));
+  assert.equal(validate('').config.sinks.xml.mode, 'block');
+  for (const m of ['detect', 'off']) {
+    const s = fresh();
+    s['sinks.xml.mode'] = m;
+    const toml = E.emitToml(s, {});
+    assert.ok(toml.includes('[sinks.xml]'), toml);
+    const v = validate(toml);
+    assert.equal(v.ok, true, v.error);
+    assert.equal(v.config.sinks.xml.mode, m);
+  }
+  // external_entities is independent of the mode.
+  const s = fresh();
+  s['sinks.xml.external_entities'] = 'deny';
+  const v = validate(E.emitToml(s, {}));
+  assert.equal(v.ok, true, v.error);
+  assert.equal(v.config.sinks.xml.external_entities, 'deny');
+  assert.equal(v.config.sinks.xml.mode, 'block');
+});
+
 test('a wildcard ssrf host is rejected by the core, not by JavaScript', () => {
   const s = fresh();
   s['sinks.ssrf.allow_hosts'] = ['*.example.com'];

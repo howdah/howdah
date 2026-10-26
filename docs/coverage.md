@@ -346,8 +346,9 @@ still pending.
 
 Seven cheaper sinks for functions and behaviours that mostly matter on the PHP
 5.x/7.x third of the web; each is a no-op where the function no longer exists.
-All inherit `sinks.mode` (log by default, block only when armed) and never log
-the argument. From `lab/integration/legacy_sinks.sh`.
+All but `xml` inherit `sinks.mode` (log by default, block only when armed);
+`xml` is enforced by default (below). None logs the argument. From
+`lab/integration/legacy_sinks.sh`.
 
 | sink (rule) | PHP 5.x | PHP 7.x | PHP 8.x |
 |---|---|---|---|
@@ -356,10 +357,11 @@ the argument. From `lab/integration/legacy_sinks.sh`.
 | `create_function` (`create_function`) | detect + block | detect + block | **not covered** (removed in 8.0) |
 | `assert` (`assert_string`) | detect + block | detect + block | **not covered** (8.0 stopped evaluating strings) |
 | `callback` (`dangerous_callback`) | detect + block | detect + block | detect + block |
-| `xml` (`xxe`) | detect + block | detect + block | detect + block |
+| `xml` (`xxe`) | **block by default** | **block by default** | **block by default** |
 | `tls` (`tls_verify`) | detect only | detect only | detect only |
 
-Verified on PHP 5.4, 5.6, 7.4 and 8.3. Limitations, stated plainly:
+Verified on PHP 5.4, 5.6, 7.4 and 8.3 (`xml`: every minor from 5.4 to 8.5 except 5.5, which has no lab
+image, with a benign-corpus false-positive gate). Limitations, stated plainly:
 
 - **`preg_eval`, `create_function` and string `assert` fire nothing** on the
   PHP versions where the function or modifier is gone (7.0+ for `/e`, 8.0+ for
@@ -373,16 +375,24 @@ Verified on PHP 5.4, 5.6, 7.4 and 8.3. Limitations, stated plainly:
   `ZEND_INIT_USER_CALL` and never calls the function, so that shape is not
   seen there** (a namespaced or dynamic call, and the other hooked functions,
   are); PHP 5.x sees every form. Pinned per version by the lab.
-- **The `xml` sink sees `simplexml_load_string` and `DOMDocument::loadXML`
-  only**, and only the first 64 KiB of a document; `new SimpleXMLElement`,
-  `simplexml_import_dom`, `XMLReader`, ext/xml (`xml_parse`),
-  `DOMDocument::loadHTML` and the by-path readers (`simplexml_load_file`,
-  `DOMDocument::load`, `XMLReader::open`) are not hooked. A hit is the
-  *declaration*, not proof the entity was fetched; a bare external DTD
-  reference (the XHTML/SVG doctypes) is detect only and never blocked.
+- **The `xml` sink (`xxe`) is flag-aware and enforced by default.** It reads
+  the libxml options argument of `simplexml_load_string`, `new SimpleXMLElement`,
+  `DOMDocument::loadXML`, `XMLReader::XML` (and `Dom\XMLDocument::createFromString`
+  on 8.4+) and acts only when a dangerous flag (`LIBXML_NOENT`, `DTDLOAD`,
+  `DTDATTR`, `DTDVALID`) coincides with an external entity (`<!ENTITY ...
+  SYSTEM|PUBLIC>`) or a nested-entity expansion bomb in the string being
+  parsed; it then removes the flags and the parse continues (logged as
+  `block`). It refuses the call only on libxml older than 2.9.0, which
+  resolves entities whatever the flags say. A bare DOCTYPE, an external DTD
+  reference (SAML, SVG, XHTML, Office XML) and an external entity with no
+  dangerous flag are never blocked. It sees through the usual disguises (a
+  `>` in the DOCTYPE literal, a parameter entity that declares the entity,
+  UTF-16/32 documents) and reports what it cannot read (UTF-7 or EBCDIC text,
+  a prolog padded past 1 MiB). The by-path readers (`simplexml_load_file`, `DOMDocument::load`,
+  `XMLReader::open`, `SimpleXMLElement` with `$dataIsURL`), `simplexml_import_dom`,
+  ext/xml (`xml_parse`) and `DOMDocument::loadHTML` are not hooked.
   `[sinks.xml] external_entities = "deny"` is a libxml-level toggle (off by
-  default) that also disables loading documents by path through libxml; PHP 8
-  already defaults to not substituting external entities.
+  default) that also disables loading documents by path through libxml.
 - **`tls` cannot block in this release** (detect only): a block mode is logged,
   the call proceeds. Only the option name is logged, never the URL.
 - **`mail`** matches the one-string first/4th/5th arguments only; an array of

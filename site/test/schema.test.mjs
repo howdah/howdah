@@ -44,6 +44,11 @@ test('every schema default equals the core default', () => {
   assert.equal(state['sinks.ssrf.mode'], core.sinks.ssrf.mode);
   assert.equal(state['sinks.ssrf.mode'], 'off');
   assert.deepEqual(state['sinks.ssrf.allow_hosts'], []);
+  // xxe is the one legacy sink enforced by default, with its own mode (it does not
+  // inherit sinks.mode, which is detect).
+  assert.equal(state['sinks.xml.mode'], core.sinks.xml.mode);
+  assert.equal(state['sinks.xml.mode'], 'block');
+  assert.notEqual(state['sinks.xml.mode'], core.sinks.mode);
   // The ini default is the SHIPPED default (packaging/howdah.ini), deliberately
   // not the core's safe default, which is "block".
   assert.equal(state['howdah.mode'], 'detect');

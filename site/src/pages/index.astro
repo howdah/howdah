@@ -260,7 +260,7 @@ const aptLines = [
           <h3>The six core sinks</h3>
           <FitTable caption="Layer 3 core sinks" cols={['Sink', 'Functions', 'Default']} rows={coreSinks} />
           <p class="legend">Known limitation: <code>proc_open</code> with an array command (PHP 7.4+) is not inspected.</p>
-          <p class="legend"><strong>Seven legacy sinks (new in 1.5), all log-first:</strong> <code>mail_injection</code>, <code>preg_eval</code> (PHP 5.x), <code>create_function</code> and <code>assert_string</code> (5.x/7.x), <code>dangerous_callback</code>, <code>xxe</code> (with <code>[sinks.xml] external_entities</code>), and <code>tls_verify</code> (detect-only). See the <a href="/docs/configuration/#layer-3-sinks">configuration reference</a> for each one's PHP-version applicability and defaults.</p>
+          <p class="legend"><strong>Seven legacy sinks (new in 1.5), log-first except <code>xxe</code>:</strong> <code>mail_injection</code>, <code>preg_eval</code> (PHP 5.x), <code>create_function</code> and <code>assert_string</code> (5.x/7.x), <code>dangerous_callback</code>, <code>xxe</code> (enforced by default, but only when a dangerous libxml flag meets an external entity; with <code>[sinks.xml] external_entities</code>), and <code>tls_verify</code> (detect-only). See the <a href="/docs/configuration/#layer-3-sinks">configuration reference</a> for each one's PHP-version applicability and defaults.</p>
           <h3 style="margin-top:1.5rem">Coverage by PHP version</h3>
           <div class="vmatrix">
             <table>

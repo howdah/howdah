@@ -19,6 +19,17 @@
 #define HOWDAH_SINK_TLS             12
 
 #define HOWDAH_ACTION_BLOCK      2
+/* howdah_sink_check_xml only: neutralize by rewriting the options argument
+ * (clear HOWDAH_XML_DANGEROUS_FLAGS) and running the original call. Mirrors
+ * HOWDAH_STRIP in howdah-core/src/ffi.rs. */
+#define HOWDAH_ACTION_STRIP      3
+
+/* howdah_sink_check_xml capability bits and the LIBXML_* flags it strips (see
+ * HOWDAH_XML_* in howdah-core/src/ffi.rs): NOENT 2 | DTDLOAD 4 | DTDATTR 8 |
+ * DTDVALID 16. */
+#define HOWDAH_XML_CAN_STRIP            1
+#define HOWDAH_XML_ENGINE_IGNORES_FLAGS 2
+#define HOWDAH_XML_DANGEROUS_FLAGS      30
 
 /* Legacy sink install mask bits (howdah_install_legacy_hooks; mirrored as
  * HOWDAH_LEGACY_* in howdah-sys/src/lib.rs). */

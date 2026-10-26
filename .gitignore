@@ -12,6 +12,7 @@
 /lab/integration/.matrix-out
 /lab/integration/.refusal-out
 /lab/integration/.cgi_arg-out
+/lab/integration/.legacy_sinks-out
 /lab/integration/.oom-backstop-out
 /lab/integration/.recycle-out
 /lab/integration/.request-limits-out

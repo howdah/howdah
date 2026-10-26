@@ -91,6 +91,21 @@ pub const HOWDAH_SINK_CALLBACK: i32 = 10;
 pub const HOWDAH_SINK_XML: i32 = 11;
 pub const HOWDAH_SINK_TLS: i32 = 12;
 
+/// Action code from `howdah_sink_check_xml`: the dangerous call is neutralized
+/// by removing the dangerous libxml flags from its options argument (the glue
+/// then runs the original call with the rewritten flags) instead of refusing
+/// it. Logged as `block`. Never returned by any other entry point.
+pub const HOWDAH_STRIP: i32 = 3;
+/// `howdah_sink_check_xml` `caps` bit: the glue can rewrite the options
+/// argument, so a block may strip the flags instead of refusing the call.
+pub const HOWDAH_XML_CAN_STRIP: i32 = 1;
+/// `howdah_sink_check_xml` `caps` bit: the libxml in use is older than 2.9.0,
+/// which resolves external entities whatever the flags say.
+pub const HOWDAH_XML_ENGINE_IGNORES_FLAGS: i32 = 2;
+/// The dangerous `LIBXML_*` option bits (`NOENT|DTDLOAD|DTDATTR|DTDVALID`) the
+/// glue clears on a `HOWDAH_STRIP`. Mirrored in `howdah_sink.h`.
+pub const HOWDAH_XML_DANGEROUS_FLAGS: i64 = 30;
+
 // Layer-4 behavior facets (howdah_behavior_armed).
 pub const HOWDAH_BEHAVIOR_EXEC_DIR: i32 = 0;
 pub const HOWDAH_BEHAVIOR_BINARY: i32 = 1;
@@ -239,7 +254,7 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::CreateFunction => "create_function invoked",
         RuleId::AssertString => "assert() evaluating a string as code",
         RuleId::DangerousCallback => "string callback naming a command or code execution function",
-        RuleId::Xxe => "XML document declaring an external entity",
+        RuleId::Xxe => "XML external entity or entity bomb parsed with a dangerous libxml flag",
         RuleId::TlsVerify => "curl TLS certificate verification disabled",
         RuleId::OutOfMemory => "worker ended on out-of-memory",
         RuleId::StartupFatal => "fatal error during request startup",
@@ -528,9 +543,6 @@ impl howdah_ctx {
         }
         let sinks = &self.config.sinks;
         let n = String::from_utf8_lossy(&name[..name.len().min(64)]).into_owned();
-        // xml: scanned once; a bare external DTD (XHTML/SVG doctypes) is a
-        // detect-only hit, an external entity declaration may block.
-        let xml_hit = if sink == SinkId::Xml { legacy::xml_external_entity_hit(arg) } else { None };
         let (rule, matched): (RuleId, Option<String>) = match sink {
             SinkId::CommandExec => (
                 RuleId::CommandExec,
@@ -569,7 +581,9 @@ impl howdah_ctx {
                 RuleId::DangerousCallback,
                 legacy::dangerous_callback(arg).map(|cb| format!("dangerous callback '{cb}' via {n}")),
             ),
-            SinkId::Xml => (RuleId::Xxe, xml_hit.map(|h| format!("{} via {n}", h.reason))),
+            // xml has its own entry point (howdah_sink_check_xml): the verdict
+            // needs the call's libxml flags, which this one-argument path lacks.
+            SinkId::Xml => (RuleId::Xxe, None),
             // `arg` is the option token the shim passes ("verifypeer" /
             // "verifyhost"), not user data.
             SinkId::Tls => (RuleId::TlsVerify, legacy::tls_reason(arg).map(|r| format!("{r} via {n}"))),
@@ -594,15 +608,66 @@ impl howdah_ctx {
             self.note_excepted_sink(rule, &m);
             return Action::Allow;
         }
-        // tls is detect-only in this release, and so is a bare external DTD
-        // under the xml sink: a block mode is logged as log for those.
-        let detect_only = sink == SinkId::Tls || xml_hit.is_some_and(|h| !h.external_entity);
+        // tls is detect-only in this release: a block mode is logged as log.
         let action = match mode {
-            Mode::Block if !detect_only => Action::Block,
+            Mode::Block if sink != SinkId::Tls => Action::Block,
             _ => Action::Log,
         };
         self.sink_log = Some(self.record(rule, action, reason));
         action
+    }
+
+    /// Layer-3 `xxe` check for an XML string about to be parsed with libxml
+    /// option mask `flags`. Flag-aware: nothing happens unless a dangerous
+    /// flag (`LIBXML_NOENT`/`DTDLOAD`/`DTDATTR`/`DTDVALID`) coincides with
+    /// an external entity or an entity bomb in `doc`; a bare DOCTYPE or a bare
+    /// external DTD (SAML, SVG, XHTML, Office XML) is never an attack. `caps`
+    /// is `HOWDAH_XML_CAN_STRIP` | `HOWDAH_XML_ENGINE_IGNORES_FLAGS` bits from
+    /// the glue. In block mode an attack is neutralized by removing the
+    /// dangerous flags when the glue can rewrite them (and the engine honours
+    /// them), else by refusing the call. A bare external DTD, fetched because
+    /// of `DTDLOAD`/`DTDATTR`, only ever logs. The document is scanned, never
+    /// logged. Returns the action and whether the caller should strip.
+    fn sink_check_xml(
+        &mut self,
+        name: &[u8],
+        doc: &[u8],
+        flags: i64,
+        caps: i32,
+        script: Option<&str>,
+        sha: Option<&[u8; 32]>,
+    ) -> (Action, bool) {
+        #[cfg(test)]
+        if tests::FORCE_PANIC.with(|f| f.get()) {
+            panic!("injected test panic");
+        }
+        let mode = self.config.sinks.effective_mode(SinkId::Xml, self.config.mode);
+        if mode == Mode::Off {
+            return (Action::Allow, false);
+        }
+        let legacy_engine = caps & HOWDAH_XML_ENGINE_IGNORES_FLAGS != 0;
+        let Some(hit) = legacy::xml_flag_aware_hit(doc, flags, legacy_engine) else {
+            return (Action::Allow, false);
+        };
+        let rule = RuleId::Xxe;
+        if let Some(m) = self.excepted(rule, script, sha, None) {
+            self.note_excepted_sink(rule, &m);
+            return (Action::Allow, false);
+        }
+        let n = String::from_utf8_lossy(&name[..name.len().min(64)]).into_owned();
+        let what = format!("{} ({}) via {n}", hit.reason, legacy::xml_flag_names(flags, legacy_engine));
+        let (action, strip, reason) = match mode {
+            Mode::Block if hit.is_attack() => {
+                let strip = caps & HOWDAH_XML_CAN_STRIP != 0
+                    && !legacy_engine
+                    && flags & legacy::XML_DANGEROUS_FLAGS != 0;
+                let how = if strip { "dangerous flags removed, parse continued" } else { "call refused" };
+                (Action::Block, strip, format!("{what}; {how}"))
+            }
+            _ => (Action::Log, false, what),
+        };
+        self.sink_log = Some(self.record(rule, action, reason));
+        (action, strip)
     }
 
     /// `mail()` check: the 4th (headers) and 5th (additional_parameters)
@@ -2399,6 +2464,61 @@ pub unsafe extern "C" fn howdah_sink_check_mail(
     })
 }
 
+/// XML sink check (`xxe`), flag-aware: `doc` is the XML string about to be
+/// parsed (`simplexml_load_string`, `DOMDocument::loadXML`, `new
+/// SimpleXMLElement`, `XMLReader::XML`), `flags` the libxml option mask the call
+/// passes (0 when absent), `caps` a `HOWDAH_XML_*` bit set, `script`/`sha256` the
+/// executing script for `[[exceptions]]`. Scanned, never logged. Returns 0
+/// Allow / 1 Log / 2 Block, or 3 (`HOWDAH_STRIP`) to neutralize by removing
+/// the dangerous flags from the options argument and continuing; a strip is
+/// logged as `block`. Nothing fires without a dangerous flag AND an external
+/// entity (or entity bomb) together. NULL ctx or panic is 0 (fail-open). A hit
+/// is retrievable with `howdah_take_sink_log_line`.
+///
+/// # Safety
+/// `ctx` NULL or live; every pointer NULL or valid for its length.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn howdah_sink_check_xml(
+    ctx: *mut howdah_ctx,
+    name: *const c_char,
+    name_len: usize,
+    doc: *const c_char,
+    doc_len: usize,
+    flags: i64,
+    caps: i32,
+    script: *const c_char,
+    script_len: usize,
+    sha256: *const u8,
+    sha256_len: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let sl = |p: *const c_char, n: usize| -> &[u8] {
+            if p.is_null() || n == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts(p as *const u8, n)
+            }
+        };
+        let s = copy_script(script, script_len);
+        let h = copy_sha(sha256, sha256_len);
+        let (action, strip) =
+            (*ctx).sink_check_xml(sl(name, name_len), sl(doc, doc_len), flags, caps, s.as_deref(), h.as_ref());
+        if strip {
+            HOWDAH_STRIP
+        } else {
+            code(action)
+        }
+    }));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
 /// 1 iff `[sinks.xml] external_entities = "deny"` is in force (set, global
 /// mode not off, sinks enabled); the glue then turns libxml's external
 /// entity loader off at every request start. NULL ctx or panic is 0.
@@ -3452,13 +3572,13 @@ mod tests {
         assert!(l.contains("\"rule\":\"dangerous_callback\"") && l.contains("'system' via array_map"), "{l}");
         assert_eq!(sink(c, HOWDAH_SINK_CALLBACK, "array_map", b"trim"), HOWDAH_ALLOW);
         assert!(take_sink(c).is_none());
+        // xml has its own flag-aware entry point (xml_check below); the
+        // one-argument path never reports it.
         assert_eq!(
             sink(c, HOWDAH_SINK_XML, "simplexml_load_string", b"<!DOCTYPE r [<!ENTITY x SYSTEM \"file:///SECRETPATH\">]><r/>"),
-            HOWDAH_LOG
+            HOWDAH_ALLOW
         );
-        let l = take_sink(c).unwrap();
-        assert!(l.contains("\"rule\":\"xxe\"") && !l.contains("SECRETPATH"), "{l}");
-        assert_eq!(sink(c, HOWDAH_SINK_XML, "simplexml_load_string", b"<r/>"), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
         assert_eq!(sink(c, HOWDAH_SINK_TLS, "curl_setopt", b"verifypeer"), HOWDAH_LOG);
         let l = take_sink(c).unwrap();
         assert!(l.contains("\"rule\":\"tls_verify\"") && l.contains("VERIFYPEER"), "{l}");
@@ -3474,12 +3594,6 @@ mod tests {
         assert_eq!(sink(c, HOWDAH_SINK_CREATE_FUNCTION, "create_function", b"1;"), HOWDAH_BLOCK);
         assert_eq!(sink(c, HOWDAH_SINK_ASSERT, "assert", b"1"), HOWDAH_BLOCK);
         assert_eq!(sink(c, HOWDAH_SINK_CALLBACK, "call_user_func", b"\\exec"), HOWDAH_BLOCK);
-        // An external ENTITY blocks; a bare external DTD (XHTML/SVG) only logs.
-        assert_eq!(sink(c, HOWDAH_SINK_XML, "DOMDocument::loadXML", b"<!DOCTYPE r [<!ENTITY x SYSTEM \"f\">]><r/>"), HOWDAH_BLOCK);
-        assert!(take_sink(c).unwrap().contains("\"action\":\"block\""));
-        assert_eq!(sink(c, HOWDAH_SINK_XML, "DOMDocument::loadXML", b"<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"svg11.dtd\"><svg/>"), HOWDAH_LOG);
-        let l = take_sink(c).unwrap();
-        assert!(l.contains("\"action\":\"log\"") && l.contains("external DTD"), "{l}");
         assert_eq!(sink(c, HOWDAH_SINK_TLS, "curl_setopt_array", b"verifyhost"), HOWDAH_LOG);
         let l = take_sink(c).unwrap();
         assert!(l.contains("\"action\":\"log\"") && l.contains("VERIFYHOST"), "{l}");
@@ -3514,6 +3628,165 @@ mod tests {
         }
     }
 
+    fn xml_check(c: *mut howdah_ctx, name: &str, doc: &[u8], flags: i64, caps: i32) -> i32 {
+        unsafe {
+            howdah_sink_check_xml(
+                c,
+                name.as_ptr() as _,
+                name.len(),
+                doc.as_ptr() as _,
+                doc.len(),
+                flags,
+                caps,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            )
+        }
+    }
+
+    const XXE_DOC: &[u8] =
+        b"<?xml version=\"1.0\"?><!DOCTYPE r [<!ENTITY x SYSTEM \"file:///SECRETPATH\">]><r>&x;</r>";
+    const SVG_DOC: &[u8] = b"<?xml version=\"1.0\"?><!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\"><svg/>";
+
+    #[test]
+    fn xxe_blocks_only_a_dangerous_flag_with_an_external_entity_by_default() {
+        // Shipped config: no [sinks] section at all, global detect. The xxe rule
+        // still enforces (like cgi_arg_injection), and only on flag AND entity.
+        let c = init("");
+        begin(c);
+        let strip = HOWDAH_XML_CAN_STRIP;
+        // dangerous flag + external entity: stripped (block), logged as block,
+        // document never logged, flags named from a fixed vocabulary.
+        assert_eq!(xml_check(c, "simplexml_load_string", XXE_DOC, 2, strip), HOWDAH_STRIP);
+        let l = take_sink(c).unwrap();
+        assert!(l.contains("\"rule\":\"xxe\"") && l.contains("\"layer\":3"), "{l}");
+        assert!(l.contains("\"action\":\"block\"") && l.contains("LIBXML_NOENT"), "{l}");
+        assert!(l.contains("dangerous flags removed, parse continued"), "{l}");
+        assert!(!l.contains("SECRETPATH") && !l.contains("passwd"), "{l}");
+        // every dangerous flag, and combinations
+        for f in [4, 8, 16, 2 | 4, 14, 30, 2 | 16384, 2 | 1 << 19] {
+            assert_eq!(xml_check(c, "DOMDocument::loadXML", XXE_DOC, f, strip), HOWDAH_STRIP, "flags {f}");
+            assert!(take_sink(c).is_some());
+        }
+        // no dangerous flag: silent, whatever the document
+        for f in [0, 1, 32, 64, 256, 1024, 2048, 16384, 1 << 19] {
+            assert_eq!(xml_check(c, "simplexml_load_string", XXE_DOC, f, strip), HOWDAH_ALLOW, "flags {f}");
+            assert!(take_sink(c).is_none());
+        }
+        // A bare DOCTYPE / SAML / SVG / Office-style document: never blocked
+        // under any flags; a bare external DTD logs only when a flag fetches it.
+        for f in [0, 2, 4, 8, 16, 30, 31] {
+            for doc in [
+                &b"<!DOCTYPE html><html/>"[..],
+                b"<?xml version=\"1.0\"?><samlp:Response xmlns:samlp=\"urn:oasis:names:tc:SAML:2.0:protocol\"/>",
+                b"<?xml version=\"1.0\"?><!DOCTYPE r [<!ELEMENT r ANY><!ENTITY co \"ACME\">]><r>&co;</r>",
+                SVG_DOC,
+            ] {
+                let a = xml_check(c, "DOMDocument::loadXML", doc, f, strip);
+                assert!(a == HOWDAH_ALLOW || a == HOWDAH_LOG, "flags {f}: {a}");
+                let line = take_sink(c);
+                assert_eq!(a == HOWDAH_LOG, line.is_some());
+                if let Some(line) = line {
+                    assert!(f & 12 != 0 && line.contains("external DTD") && line.contains("\"action\":\"log\""), "{line}");
+                }
+            }
+        }
+        // Without the strip capability a block refuses the call.
+        assert_eq!(xml_check(c, "simplexml_load_string", XXE_DOC, 2, 0), HOWDAH_BLOCK);
+        assert!(take_sink(c).unwrap().contains("call refused"));
+        // libxml before 2.9 resolves entities whatever the flags: flags 0 is
+        // not a pass, and the flags cannot be stripped, so the call is refused.
+        let old = HOWDAH_XML_CAN_STRIP | HOWDAH_XML_ENGINE_IGNORES_FLAGS;
+        assert_eq!(xml_check(c, "simplexml_load_string", XXE_DOC, 0, old), HOWDAH_BLOCK);
+        let l = take_sink(c).unwrap();
+        assert!(l.contains("before 2.9") && l.contains("call refused") && !l.contains("SECRETPATH"), "{l}");
+        assert_eq!(xml_check(c, "simplexml_load_string", b"<r/>", 0, old), HOWDAH_ALLOW);
+        // an entity bomb is the same class
+        let mut bomb = String::from("<!DOCTYPE l [<!ENTITY a0 \"lol\">");
+        for k in 1..=9 {
+            bomb.push_str(&format!("<!ENTITY a{k} \"{}\">", format!("&a{};", k - 1).repeat(10)));
+        }
+        bomb.push_str("]><l>&a9;</l>");
+        assert_eq!(xml_check(c, "simplexml_load_string", bomb.as_bytes(), 2, strip), HOWDAH_STRIP);
+        assert!(take_sink(c).unwrap().contains("expand past 1 MiB"));
+        assert_eq!(xml_check(c, "simplexml_load_string", bomb.as_bytes(), 0, strip), HOWDAH_ALLOW);
+        unsafe { howdah_free(c) };
+
+        // Shipped howdah.mode = detect and an explicit [sinks] detect do not
+        // soften it; sinks off does not either (own knob); global off does.
+        let c = init("[sinks]\nmode=\"detect\"");
+        begin(c);
+        assert_eq!(xml_check(c, "simplexml_load_string", XXE_DOC, 2, strip), HOWDAH_STRIP);
+        unsafe { howdah_free(c) };
+        let c = init("mode=\"off\"");
+        begin(c);
+        assert_eq!(xml_check(c, "simplexml_load_string", XXE_DOC, 2, strip), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        unsafe { howdah_free(c) };
+        let c = init("[sinks]\nenabled=false");
+        begin(c);
+        assert_eq!(xml_check(c, "simplexml_load_string", XXE_DOC, 2, strip), HOWDAH_ALLOW);
+        unsafe { howdah_free(c) };
+
+        // [sinks.xml] mode: detect logs and leaves the call alone; off is silent.
+        let c = init("[sinks.xml]\nmode=\"detect\"");
+        begin(c);
+        assert_eq!(xml_check(c, "simplexml_load_string", XXE_DOC, 2, strip), HOWDAH_LOG);
+        let l = take_sink(c).unwrap();
+        assert!(l.contains("\"action\":\"log\"") && !l.contains("removed") && !l.contains("refused"), "{l}");
+        unsafe { howdah_free(c) };
+        let c = init("[sinks.xml]\nmode=\"off\"");
+        begin(c);
+        assert_eq!(xml_check(c, "simplexml_load_string", XXE_DOC, 2, strip), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        unsafe {
+            assert_eq!(howdah_sink_armed(c, HOWDAH_SINK_XML), 0);
+            howdah_free(c);
+        }
+        // Armed by default (so the glue installs the hooks with no config).
+        let c = init("");
+        unsafe {
+            assert_eq!(howdah_sink_armed(c, HOWDAH_SINK_XML), 1);
+            assert_eq!(
+                howdah_sink_check_xml(std::ptr::null_mut(), std::ptr::null(), 0, std::ptr::null(), 0, 2, 1, std::ptr::null(), 0, std::ptr::null(), 0),
+                HOWDAH_ALLOW
+            );
+            howdah_free(c);
+        }
+    }
+
+    #[test]
+    fn xml_dangerous_flags_mirror_the_scanner() {
+        assert_eq!(HOWDAH_XML_DANGEROUS_FLAGS, legacy::XML_DANGEROUS_FLAGS);
+        assert_eq!(HOWDAH_XML_DANGEROUS_FLAGS, 2 | 4 | 8 | 16); // NOENT|DTDLOAD|DTDATTR|DTDVALID
+    }
+
+    #[test]
+    fn xxe_script_exception_silences_the_rule() {
+        let c = init("[[exceptions]]\nrule = \"sinks.xxe\"\nscript = \"/srv/app/dom.php\"\nreason = \"trusted local DocBook build\"");
+        begin(c);
+        let at = |script: &str| unsafe {
+            howdah_sink_check_xml(
+                c,
+                b"DOMDocument::loadXML".as_ptr() as _,
+                20,
+                XXE_DOC.as_ptr() as _,
+                XXE_DOC.len(),
+                2,
+                HOWDAH_XML_CAN_STRIP,
+                script.as_ptr() as _,
+                script.len(),
+                std::ptr::null(),
+                0,
+            )
+        };
+        assert_eq!(at("/srv/app/dom.php"), HOWDAH_ALLOW);
+        assert_eq!(at("/srv/app/other.php"), HOWDAH_STRIP);
+        unsafe { howdah_free(c) };
+    }
+
     /// The ext glue routes every one-argument sink through the `_at` entry
     /// point (exceptions-aware), which has its own sink-id map: each legacy
     /// id must be known there too (the lab caught `array_map('system')`
@@ -3541,7 +3814,6 @@ mod tests {
             (HOWDAH_SINK_CREATE_FUNCTION, "create_function", b"1;", "create_function"),
             (HOWDAH_SINK_ASSERT, "assert", b"1", "assert_string"),
             (HOWDAH_SINK_CALLBACK, "array_map", b"system", "dangerous_callback"),
-            (HOWDAH_SINK_XML, "simplexml_load_string", b"<!DOCTYPE r [<!ENTITY x SYSTEM \"f\">]><r/>", "xxe"),
             (HOWDAH_SINK_TLS, "curl_setopt", b"verifypeer", "tls_verify"),
         ] {
             assert_eq!(at(id, name, arg), HOWDAH_LOG, "{rule} via _at");

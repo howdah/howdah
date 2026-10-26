@@ -86,6 +86,32 @@
 
 #define HOWDAH_SINK_TLS 12
 
+/**
+ * Action code from `howdah_sink_check_xml`: the dangerous call is neutralized
+ * by removing the dangerous libxml flags from its options argument (the glue
+ * then runs the original call with the rewritten flags) instead of refusing
+ * it. Logged as `block`. Never returned by any other entry point.
+ */
+#define HOWDAH_STRIP 3
+
+/**
+ * `howdah_sink_check_xml` `caps` bit: the glue can rewrite the options
+ * argument, so a block may strip the flags instead of refusing the call.
+ */
+#define HOWDAH_XML_CAN_STRIP 1
+
+/**
+ * `howdah_sink_check_xml` `caps` bit: the libxml in use is older than 2.9.0,
+ * which resolves external entities whatever the flags say.
+ */
+#define HOWDAH_XML_ENGINE_IGNORES_FLAGS 2
+
+/**
+ * The dangerous `LIBXML_*` option bits (`NOENT|DTDLOAD|DTDATTR|DTDVALID`) the
+ * glue clears on a `HOWDAH_STRIP`. Mirrored in `howdah_sink.h`.
+ */
+#define HOWDAH_XML_DANGEROUS_FLAGS 30
+
 #define HOWDAH_BEHAVIOR_EXEC_DIR 0
 
 #define HOWDAH_BEHAVIOR_BINARY 1
@@ -808,6 +834,33 @@ int32_t howdah_sink_check_mail(struct howdah_ctx *ctx,
                                size_t headers_len,
                                const char *params,
                                size_t params_len);
+
+/**
+ * XML sink check (`xxe`), flag-aware: `doc` is the XML string about to be
+ * parsed (`simplexml_load_string`, `DOMDocument::loadXML`, `new
+ * SimpleXMLElement`, `XMLReader::XML`), `flags` the libxml option mask the call
+ * passes (0 when absent), `caps` a `HOWDAH_XML_*` bit set, `script`/`sha256` the
+ * executing script for `[[exceptions]]`. Scanned, never logged. Returns 0
+ * Allow / 1 Log / 2 Block, or 3 (`HOWDAH_STRIP`) to neutralize by removing
+ * the dangerous flags from the options argument and continuing; a strip is
+ * logged as `block`. Nothing fires without a dangerous flag AND an external
+ * entity (or entity bomb) together. NULL ctx or panic is 0 (fail-open). A hit
+ * is retrievable with `howdah_take_sink_log_line`.
+ *
+ * # Safety
+ * `ctx` NULL or live; every pointer NULL or valid for its length.
+ */
+int32_t howdah_sink_check_xml(struct howdah_ctx *ctx,
+                              const char *name,
+                              size_t name_len,
+                              const char *doc,
+                              size_t doc_len,
+                              int64_t flags,
+                              int32_t caps,
+                              const char *script,
+                              size_t script_len,
+                              const uint8_t *sha256,
+                              size_t sha256_len);
 
 /**
  * 1 iff `[sinks.xml] external_entities = "deny"` is in force (set, global

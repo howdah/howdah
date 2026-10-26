@@ -368,3 +368,78 @@ version-independent pure Rust in `howdah-core`, with no PHP calls inside them,
 so matching behavior should be identical across PHP 5.4-8.5 (an inference, not a per-version lab result). The version-dependent
 part is only the input-filter hook wiring, which was exercised on the two
 versions above.
+
+# Howdah Layer-3 XXE flag-awareness coverage data (after 1.6.1)
+
+The `xxe` rule (the `xml` legacy sink) is **on and enforcing by default**. It
+acts only when a dangerous libxml parse flag (`LIBXML_NOENT` 2, `DTDLOAD` 4,
+`DTDATTR` 8, `DTDVALID` 16) is passed together with an XML string that
+declares an external entity or an entity-expansion bomb. It removes the flags and
+lets the parse continue (logged as `block`). See `docs/config.md` (Legacy-era
+sinks) for behaviour and limits.
+
+## What it looks for
+
+| shape | needs a dangerous flag | action in the default mode |
+|---|---|---|
+| `<!ENTITY ... SYSTEM\|PUBLIC ...>` in the internal subset (general or parameter entity) | yes | strip the flags, log `block` |
+| internal entities whose nested references expand past 1 MiB (billion laughs and variants, any declaration order) | yes | strip the flags, log `block` |
+| a document the scan cannot read: UTF-7 or EBCDIC text, a UTF-16/32 encoding declared on an ASCII-looking document, a prolog still open after 1 MiB | yes | strip the flags, log `block` |
+| a bare `<!DOCTYPE>`, internal entities of ordinary size | n/a | silent |
+| a bare external DTD reference (`SYSTEM`/`PUBLIC` on the DOCTYPE: SAML, SVG, XHTML, RSS, plist, ODF) | only `DTDLOAD`/`DTDATTR` fetch it | log `log` only, never blocked |
+
+## Lab: `lab/integration/legacy_sinks.sh` (no config, shipped `howdah.mode = detect`)
+
+Per PHP minor: (1) a control run **without Howdah** proves the vector is live
+(an external entity parsed with `LIBXML_NOENT` leaks a canary file through every
+entry point present); (2) the same parse through Howdah, with no configuration,
+has the flag removed on every entry point (`simplexml_load_string`,
+`new SimpleXMLElement`, `DOMDocument::loadXML`, `XMLReader::XML`, and on 8.4+
+`Dom\XMLDocument::createFromString`), reads nothing, and writes one `xxe` /
+`block` line that never contains the document or the path; (3) a benign corpus
+(14 documents: plain, SOAP, SAML, Office XML, bare DOCTYPE, DOCTYPE with
+declarations, nested internal entities, character-reference entities, XHTML, SVG,
+RSS, plist, ODF, a local-DTD document with an internal entity) is parsed through
+every entry point under 10 flag sets, with and without Howdah: zero blocks and
+byte-identical results; (4) 15 disguised payloads (a `>` or `[` inside the DOCTYPE's system literal, a parameter entity whose literal declares the entity with plain, decimal, hex and split-keyword character references, UTF-7, UTF-32 BE and LE, UTF-16 with and without BOM, EBCDIC, a megabyte of comment or whitespace before the DOCTYPE, newlines inside the declaration) must each leak without Howdah where libxml still reads them (14 of 15 are live; libxml rejects the UTF-32LE-with-BOM one) and leave nothing readable with it.
+
+| PHP | libxml2 | control leaks (no Howdah) | stripped by Howdah | disguised payloads stopped / live | benign parses | benign blocks | results identical |
+|---|---|---|---|---|---|---|---|
+| 5.4 | 2.9.1 | 2/2 | 2/2 | 14/14 | 280 | 0 | yes |
+| 5.6 | 2.9.4 | 4/4 | 4/4 | 14/14 | 560 | 0 | yes |
+| 7.0 | 2.9.4 | 4/4 | 4/4 | 14/14 | 560 | 0 | yes |
+| 7.1 | 2.9.4 | 4/4 | 4/4 | 14/14 | 560 | 0 | yes |
+| 7.2 | 2.9.4 | 4/4 | 4/4 | 14/14 | 560 | 0 | yes |
+| 7.3 | 2.9.10 | 4/4 | 4/4 | 14/14 | 560 | 0 | yes |
+| 7.4 | 2.9.10 | 4/4 | 4/4 | 14/14 | 560 | 0 | yes |
+| 8.0 | 2.9.10 | 4/4 | 4/4 | 14/14 | 560 | 0 | yes |
+| 8.1 | 2.9.14 | 4/4 | 4/4 | 14/14 | 560 | 0 | yes |
+| 8.2 | 2.9.14 | 4/4 | 4/4 | 14/14 | 560 | 0 | yes |
+| 8.3 | 2.9.14 | 4/4 | 4/4 | 14/14 | 560 | 0 | yes |
+| 8.4 | 2.9.14 | 5/5 | 5/5 | 14/14 | 560 | 0 | yes |
+| 8.5 | 2.9.14 | 5/5 | 5/5 | 14/14 | 560 | 0 | yes |
+
+The 5.4 image has no DOM or XMLReader extension, so only the two SimpleXML entry
+points exist there (and 5.5 has no lab image). Of the 560 benign parses per
+minor, 96 are the detect-only `log` line for a bare external DTD parsed with
+`DTDLOAD`/`DTDATTR` (XHTML, SVG, RSS, plist, ODF); none is a block.
+
+## Caveats, stated plainly
+
+- **libxml2 before 2.9.0** resolves external entities whatever the flags say, so
+  on such an engine the rule cannot rely on the flags: it checks the document
+  alone and refuses the call (it cannot strip). No lab image carries a libxml2
+  that old (5.4 has 2.9.1), so that branch is covered by unit tests of the
+  decision (`cargo test -p howdah-core`) and by a check that the version probe
+  reads the real libxml2 version on 5.4, 7.4, 8.3 and 8.5, not by an end-to-end
+  run.
+- **PHP 8's `$reader->XML()`** (an instance call to the static `XMLReader::XML`)
+  runs a private non-static copy of the function that a swap of the class's
+  function-table entry never sees; the hook patches that copy too. The lab pins
+  both call forms.
+- **By-path loaders are not hooked** (`simplexml_load_file`, `DOMDocument::load`,
+  `XMLReader::open`, `SimpleXMLElement` with `$dataIsURL`): Howdah cannot see
+  their content. The lab asserts they raise no event, so the gap is documented,
+  not accidental. `[sinks.xml] external_entities = "deny"` covers them.
+- A quadratic blow-up (one large entity referenced many times in the body, past
+  the scanned prologue) and `LIBXML_XINCLUDE` file reads are not matched.

@@ -301,7 +301,9 @@ facet exempts a scanner or a path.
 
 **Sinks log by default; they do not block.** Layer 3 watches dangerous PHP
 functions ("sinks") and writes an event when one is called with something your
-allowlist does not cover. It **actively guards six sinks** (four since 1.2;
+allowlist does not cover. The one exception is `xxe` (XML external entities,
+under "Legacy-era sinks" below): it is enforced by default, but only when a
+dangerous libxml parse flag and an external entity meet in the same XML string. It **actively guards six sinks** (four since 1.2;
 `phar` and `ssrf` were added in 1.3):
 
 - `command_exec` — `system`, `exec`, `shell_exec`, `passthru`, `popen` and
@@ -517,10 +519,14 @@ is checked, and a hit on a reserved or internal range is a match.
 
 Seven more sinks guard functions and behaviours that mostly matter on the PHP
 5.x/7.x third of the web; each is a no-op where the function no longer exists.
-Each has its own `[sinks.<name>]` table whose `mode` inherits `sinks.mode`
-(so they log by default and block only when you set a mode to `"block"`; a
-global `howdah.mode = block` arms none of them), and, as everywhere in Layer
-3, the argument is never logged. `php --ri howdah` shows a `Layer-3 legacy
+Each has its own `[sinks.<name>]` table. For six of them `mode` inherits
+`sinks.mode` (so they log by default and block only when you set a mode to
+`"block"`; a global `howdah.mode = block` arms none of them). **`xml` (the
+`xxe` rule) is the exception: its `mode` defaults to `block`, whatever the
+global mode and `sinks.mode`**, like `[inspect] cgi_arg`; `[sinks.xml] mode =
+"off"`, `[sinks] enabled = false` or `howdah.mode = off` silence it, and
+`mode = "detect"` makes it log only. As everywhere in Layer 3, the argument is
+never logged. `php --ri howdah` shows a `Layer-3 legacy
 sinks` row naming which ones installed on your PHP.
 
 ```toml
@@ -530,7 +536,8 @@ sinks` row naming which ones installed on your PHP.
 [sinks.create_function]   # create_function() (PHP 5.x/7.x)
 [sinks.assert]            # assert("string") evaluated as code (PHP 5.x/7.x)
 [sinks.callback]          # a string callback naming a command/code-exec function
-[sinks.xml]               # XML external-entity declarations
+[sinks.xml]               # XML external entities parsed with a dangerous libxml flag (ENFORCED by default)
+# mode = "detect"         # default "block"; detect logs only, off disables. NOT inherited from [sinks] mode
 # external_entities = "deny"   # also turn libxml's external entity loader off (off by default)
 [sinks.tls]               # curl TLS verification turned off (detect-only this release)
 ```
@@ -542,7 +549,7 @@ sinks` row naming which ones installed on your PHP.
 | `create_function` (`create_function`) | detect + block | detect + block | not covered | any `create_function()` call (removed in PHP 8.0) |
 | `assert` (`assert_string`) | detect + block | detect + block | not covered | a string passed to `assert()` (needs `assert.active`/`zend.assertions`; PHP 8.0 stopped evaluating strings) |
 | `callback` (`dangerous_callback`) | detect + block | detect + block | detect + block | a string callback naming a command/code-exec function, passed to a callback-taking function |
-| `xml` (`xxe`) | detect + block | detect + block | detect + block | an XML string (`simplexml_load_string`, `DOMDocument::loadXML`) declaring an external entity / DTD |
+| `xml` (`xxe`) | **block by default** | **block by default** | **block by default** | an XML string parsed with a dangerous libxml flag (`LIBXML_NOENT`, `DTDLOAD`, `DTDATTR`, `DTDVALID`) while it declares an external entity or an entity bomb: `simplexml_load_string`, `new SimpleXMLElement`, `DOMDocument::loadXML`, `XMLReader::XML`, `Dom\XMLDocument::createFromString` (8.4+) |
 | `tls` (`tls_verify`) | detect | detect | detect | `curl_setopt`(`_array`) turning `CURLOPT_SSL_VERIFYPEER` off or `CURLOPT_SSL_VERIFYHOST` to 0 |
 
 - **`mail`.** The 5th argument is split on whitespace; anything that is not
@@ -574,21 +581,61 @@ sinks` row naming which ones installed on your PHP.
   a fully dynamic call (`$f = 'call_user_func'; $f(...)`) or any of the other
   hooked functions is seen. On PHP 5.x every form goes through the function
   and is seen. `lab/integration/legacy_sinks.sh` pins this per version.
-- **`xml`.** Only `simplexml_load_string` and `DOMDocument::loadXML` are
-  hooked (the string entry points). `simplexml_load_file`,
-  `DOMDocument::load`, `XMLReader::open` and other document-by-path readers are
-  not. The scan reads the prolog only (the first 64 KiB, up to the root
-  element), skipping comments and processing instructions, and squeezes the
-  NULs out of a UTF-16 document (BOM or NUL-interleaved `<?`) before looking.
-  Two shapes: an external **entity** declaration (`<!ENTITY ... SYSTEM|PUBLIC>`,
-  general or parameter) logs in detect and is refused in block; a **bare
-  external DTD** reference in the DOCTYPE (`SYSTEM`/`PUBLIC` with no external
-  entity), which every standard XHTML and SVG document carries, is **detect
-  only** and never blocked, so an SVG sanitizer built on
-  `DOMDocument::loadXML` will see `xxe` detect lines but keep working. It
-  flags the *attempt shape*; whether libxml would actually fetch anything
-  depends on the parser options (`LIBXML_NOENT`, `LIBXML_DTDLOAD`) and the
-  libxml version.
+- **`xml` (rule `xxe`): flag-aware, and enforced by default.** Howdah reads
+  the libxml *options* argument of the call as well as the XML string and acts
+  only when **both** are dangerous: a flag that makes libxml act on a DOCTYPE
+  (`LIBXML_NOENT` 2, `LIBXML_DTDLOAD` 4, `LIBXML_DTDATTR` 8 or `LIBXML_DTDVALID`
+  16) **and** an external entity declared in the document's internal subset
+  (`<!ENTITY ... SYSTEM|PUBLIC ...>`, general or parameter: the shape of every
+  file-read and out-of-band XXE payload) or a nested-entity expansion bomb
+  (internal entities whose references expand past 1 MiB: billion laughs and its
+  variants, in any declaration order). A call with none of those flags (the
+  default, `$options = 0`) is never looked at, and a document with a bare
+  `<!DOCTYPE>`, ordinary internal entities, or an external DTD reference
+  (SAML, SVG, XHTML, RSS, plist, ODF and Office XML legitimately carry them)
+  never triggers it. Hooked: `simplexml_load_string`, `new SimpleXMLElement`
+  (not when `$dataIsURL` is true), `DOMDocument::loadXML`, `XMLReader::XML`
+  (called statically or on an instance) and, on PHP 8.4+,
+  `Dom\XMLDocument::createFromString`. The scan reads the prolog only (up to
+  the root element, within the first 1 MiB), skipping comments and processing
+  instructions and quoted literals, and squeezes the NULs out of a UTF-16 or
+  UTF-32 document (BOM or NUL-interleaved `<`) before looking. It also reads
+  through the usual disguises: a `>` or `[` inside the DOCTYPE's system
+  literal, and a parameter entity whose literal declares the external entity
+  and is then expanded (`<!ENTITY % p "<!ENTITY x SYSTEM 'f'>"> %p;`, with
+  character references decoded).
+
+  **Documents it cannot read are reported, not waved through.** With a
+  dangerous flag set, a document is treated as an attack (the flags are removed)
+  when its text is in an encoding an ASCII scan cannot see into (UTF-7, an
+  EBCDIC code page, or a UTF-16/32 or UCS-2/4 encoding declared on a document
+  that does not look wide, which libxml honours mid-stream) or when its prolog
+  is still open after 1 MiB (padding with comments or whitespace to push the
+  DOCTYPE out of the window). Real documents are neither; the reason says
+  `encoding that hides its DOCTYPE` or `prolog is longer than the inspection
+  window`.
+
+  **What `block` does.** It removes the dangerous flags from the call's options
+  argument and lets the parse go on: the application keeps working and the
+  entity is simply not expanded (`&xxe;` stays an unresolved reference). The
+  event is logged as `action: block` with a reason ending `dangerous flags
+  removed, parse continued`. Only the callee sees the rewritten flags; the
+  caller's own variable keeps its value. It refuses the call (`false`, or the
+  "String could not be parsed as XML" exception from the `SimpleXMLElement`
+  constructor) only where stripping cannot help: **libxml older than 2.9.0**
+  (CentOS 6 era), which resolves external entities whatever the flags say, so
+  on that engine the flag test is skipped and the document alone decides. `detect`
+  logs (`action: log`) and changes nothing; `off` disables the rule. The
+  document and any path it names are never logged, only the rule, the guarded
+  function and the flag names.
+
+  **Bare external DTD.** A DOCTYPE that only references an external DTD is
+  never blocked, in any mode. It is logged (`action: log`, "references an
+  external DTD") only when a flag really fetches it (`LIBXML_DTDLOAD` or
+  `LIBXML_DTDATTR`), so an XHTML or SVG pipeline that sets those flags sees
+  `xxe` log lines and keeps working; without them nothing is logged. An
+  external entity with no dangerous flag is silent: libxml 2.9+ neither expands
+  nor fetches it.
 - **`[sinks.xml] external_entities = "deny"`** is a separate libxml-level
   toggle (off by default). When set, Howdah calls ext/libxml's C setter
   (`php_libxml_disable_entity_loader(1)`, found at run time) at every request
@@ -619,13 +666,24 @@ sinks` row naming which ones installed on your PHP.
   hook is not seen. A literal global-namespace `call_user_func` /
   `call_user_func_array` on PHP 7.0+ is compiled to its own opcode and is not
   seen (above).
-- The `xml` sink sees only `simplexml_load_string` / `DOMDocument::loadXML`.
-  Not hooked: `new SimpleXMLElement($xml)`, `simplexml_import_dom`,
-  `XMLReader::XML()` / `XMLReader::open`, `xml_parse()` /
-  `xml_parser_create` (ext/xml), `DOMDocument::loadHTML` / `loadHTMLFile`,
-  `DOMDocument::load`, `simplexml_load_file`. Only the first 64 KiB of the
-  document is scanned; a DOCTYPE past that is not seen. A bare external DTD is
-  never blocked. It does not prove the entity was fetched.
+- The `xml` sink needs the XML as a **string** to scan. Not hooked: the
+  by-path readers (`simplexml_load_file`, `DOMDocument::load`,
+  `XMLReader::open`, `new SimpleXMLElement($path, ..., true)`), whose content
+  Howdah cannot see; `[sinks.xml] external_entities = "deny"` closes that
+  door. Also not hooked: `simplexml_import_dom`, `xml_parse()` /
+  `xml_parser_create` (ext/xml, no libxml flags, no external fetch without a
+  user handler) and `DOMDocument::loadHTML` / `loadHTMLFile` (the HTML parser
+  does not resolve entities). `LIBXML_XINCLUDE` (XInclude file reads) is not a flag it acts on,
+  and a quadratic blow-up (one large entity referenced many times in the body,
+  past the prolog) is left to libxml's own limits. Signature inspection can be
+  bypassed by an encoding it does not know; the families above are the ones
+  libxml2 decodes in practice. An attacker-hosted external DTD that
+  `LIBXML_DTDLOAD` fetches is indistinguishable by shape from an XHTML doctype,
+  so it is logged (`action: log`) but not stopped: avoid `DTDLOAD` on
+  untrusted input, or set `[sinks.xml] external_entities = "deny"`. A
+  flag that is not a plain integer, string or boolean (an array, an object) is
+  left to PHP. A bare external DTD is never blocked. It does not prove an
+  entity was fetched.
 - `tls` cannot block in this release and does not see verification disabled
   through a `CURLOPT_*` constant passed as a variable the shim cannot read, nor
   through a stream context.

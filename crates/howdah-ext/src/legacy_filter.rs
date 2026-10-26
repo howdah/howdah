@@ -1,6 +1,6 @@
-//! Layer-3 legacy-sink glue: the `mail()` decide callback the C trampoline in
-//! howdah-sys `legacy_hook.c` invokes (the other legacy sinks reuse
-//! `sink_filter::decide`), plus the first-RINIT install mask and the phpinfo
+//! Layer-3 legacy-sink glue: the `mail()` and flag-aware XML decide callbacks
+//! the C trampolines in howdah-sys `legacy_hook.c` invoke (the other legacy
+//! sinks reuse `sink_filter::decide`), plus the first-RINIT install mask and the phpinfo
 //! label. Thin bridge; the policy lives in howdah-core. Fail-open.
 use std::ffi::{c_char, c_int, CStr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -8,7 +8,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use howdah_core::ffi as core;
 use howdah_sys as sys;
 
-use crate::{module, response};
+use crate::{module, origin, response};
 
 /// `howdah_mail_decide_t`: 0 ALLOW / 1 LOG / 2 BLOCK; on BLOCK the C refuses
 /// the call (returns false, nothing reaches sendmail).
@@ -28,6 +28,55 @@ pub(crate) unsafe extern "C" fn mail_decide(
         }
         module::maybe_begin();
         let action = core::howdah_sink_check_mail(module::CTX, headers, headers_len, params, params_len);
+        let p = core::howdah_take_sink_log_line(module::CTX);
+        if !p.is_null() {
+            let line = CStr::from_ptr(p).to_string_lossy().into_owned();
+            core::howdah_free_str(p);
+            response::write_log_line(&line);
+        }
+        action
+    }))
+    .unwrap_or(core::HOWDAH_ALLOW)
+}
+
+/// `howdah_xml_decide_t`: 0 ALLOW / 1 LOG / 2 BLOCK / 3 STRIP. `flags` is the
+/// libxml option mask the call passes, `caps` a `HOWDAH_XML_*` bit set. On
+/// BLOCK the C refuses the call; on STRIP it clears the dangerous flags in the
+/// options argument and runs the original call. The executing script (and its
+/// SHA-256 when an exception asks) is passed along for `[[exceptions]]`.
+///
+/// # Safety
+/// Invoked by the C XML trampolines mid-call; `name`/`doc` valid for their
+/// lengths.
+pub(crate) unsafe extern "C" fn xml_decide(
+    name: *const c_char,
+    name_len: usize,
+    doc: *const c_char,
+    doc_len: usize,
+    flags: i64,
+    caps: c_int,
+) -> c_int {
+    catch_unwind(AssertUnwindSafe(|| {
+        if module::CTX.is_null() {
+            return core::HOWDAH_ALLOW;
+        }
+        module::maybe_begin();
+        let script = origin::current_script();
+        let sha = origin::sha_for(&script);
+        let (sp, sl) = origin::sha_args(&sha);
+        let action = core::howdah_sink_check_xml(
+            module::CTX,
+            name,
+            name_len,
+            doc,
+            doc_len,
+            flags,
+            caps,
+            script.as_ptr() as *const c_char,
+            script.len(),
+            sp,
+            sl,
+        );
         let p = core::howdah_take_sink_log_line(module::CTX);
         if !p.is_null() {
             let line = CStr::from_ptr(p).to_string_lossy().into_owned();

@@ -66,6 +66,13 @@ printf '%s\n' "$l2" | grep -qi 'default: block\|blocks by default'
 [ $? -ne 0 ]; check "Layer-2 line never claims blocking by default" $?
 printf '%s\n' "$l2" | grep -q 'cgi_arg_injection.*enforced by default'
 check "Layer-2 line names the one enforced-by-default rule, cgi_arg_injection" $?
+l3=$(printf '%s\n' "$out" | grep '^note: layer 3')
+printf '%s\n' "$l3" | grep -q 'are log-only by default'
+check "Layer-3 line says the sinks are log-only by default" $?
+printf '%s\n' "$l3" | grep -q 'xxe.*enforced by default'
+check "Layer-3 line names the one enforced-by-default rule, xxe" $?
+printf '%s\n' "$l3" | grep -q 'never blocks a bare DOCTYPE'
+check "Layer-3 line says a bare DOCTYPE is never blocked" $?
 
 # --- ini: risky php.ini settings report ---------------------------------------
 # fake php whose `-i` prints $T/ini/<name>.txt; its php.ini is $T/ini/php.ini

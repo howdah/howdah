@@ -430,15 +430,31 @@ pub enum XmlExternalEntities {
     Deny,
 }
 
-/// Layer-3 XML sink settings: the `xxe` rule's mode (inherits `sinks.mode`)
-/// plus the libxml-level toggle.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+/// Layer-3 XML sink settings: the `xxe` rule's mode plus the libxml-level
+/// toggle.
+///
+/// Unlike the other legacy sinks the `xxe` rule is ENFORCED by default: `mode`
+/// defaults to `block` and does not inherit `sinks.mode` (like `[inspect]
+/// cgi_arg`). It only ever fires when a dangerous libxml parse flag
+/// (`LIBXML_NOENT`, `DTDLOAD`, `DTDATTR`, `DTDVALID`) coincides with an
+/// external entity or an entity bomb in the XML string being parsed, so a
+/// bare DOCTYPE (SAML, SVG, Office XML) never triggers it. `block` removes the
+/// dangerous flags and lets the parse continue where the engine honours that
+/// (otherwise it refuses the call), `detect` only logs, `off` disables it. A
+/// global `off` and `[sinks] enabled = false` still silence it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct XmlConfig {
-    pub mode: Option<Mode>,
+    pub mode: Mode,
     /// `None` = `allow`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_entities: Option<XmlExternalEntities>,
+}
+
+impl Default for XmlConfig {
+    fn default() -> Self {
+        XmlConfig { mode: Mode::Block, external_entities: None }
+    }
 }
 
 impl XmlConfig {
@@ -533,7 +549,8 @@ impl SinkConfig {
             SinkId::CreateFunction => self.create_function.mode,
             SinkId::Assert => self.assert.mode,
             SinkId::Callback => self.callback.mode,
-            SinkId::Xml => self.xml.mode,
+            // Enforced by default and independent of `sinks.mode` (see `XmlConfig`).
+            SinkId::Xml => Some(self.xml.mode),
             SinkId::Tls => self.tls.mode,
         };
         sub.unwrap_or(self.mode)
@@ -1333,7 +1350,6 @@ self_test = "off"
             SinkId::CreateFunction,
             SinkId::Assert,
             SinkId::Callback,
-            SinkId::Xml,
             SinkId::Tls,
         ] {
             assert_eq!(c.sinks.effective_mode(s, Mode::Detect), Mode::Detect, "{s:?}");
@@ -1348,7 +1364,9 @@ self_test = "off"
         assert_eq!(c.sinks.effective_mode(SinkId::Mail, Mode::Detect), Mode::Block);
         assert_eq!(c.sinks.effective_mode(SinkId::Callback, Mode::Detect), Mode::Detect);
         assert_eq!(c.sinks.effective_mode(SinkId::PregEval, Mode::Detect), Mode::Off);
-        assert_eq!(c.sinks.effective_mode(SinkId::Xml, Mode::Detect), Mode::Off);
+        // xml does not inherit sinks.mode: the explicit [sinks] off above leaves
+        // it enforcing (it has its own default, see xml_xxe_is_enforced_by_default).
+        assert_eq!(c.sinks.effective_mode(SinkId::Xml, Mode::Detect), Mode::Block);
         assert!(c.sinks.xml_deny_external_entities(Mode::Detect));
         assert!(!c.sinks.xml_deny_external_entities(Mode::Off));
         let c = Config::from_toml("[sinks]\nenabled=false\n[sinks.xml]\nexternal_entities=\"deny\"").unwrap();
@@ -1361,6 +1379,38 @@ self_test = "off"
         // A global or [sinks] block never arms them past what the others get.
         let c = Config::from_toml("mode=\"block\"").unwrap();
         assert_eq!(c.sinks.effective_mode(SinkId::Callback, Mode::Block), Mode::Detect);
+    }
+
+    #[test]
+    fn xml_xxe_is_enforced_by_default_under_every_global_mode_but_off() {
+        use crate::sinks::SinkId;
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.sinks.xml.mode, Mode::Block);
+        // The shipped detect still enforces; so does block; off silences.
+        for g in [Mode::Detect, Mode::Block] {
+            assert_eq!(c.sinks.effective_mode(SinkId::Xml, g), Mode::Block, "{g:?}");
+        }
+        assert_eq!(c.sinks.effective_mode(SinkId::Xml, Mode::Off), Mode::Off);
+        // [sinks] mode = "detect" (explicit) and the other sinks do not change it.
+        let d = Config::from_toml("[sinks]\nmode=\"detect\"").unwrap();
+        assert_eq!(d.sinks.effective_mode(SinkId::Xml, Mode::Detect), Mode::Block);
+        assert_eq!(d.sinks.effective_mode(SinkId::Mail, Mode::Detect), Mode::Detect);
+        // Its own knob: detect logs only, off disables, block is the default.
+        for (toml, want) in [
+            ("[sinks.xml]\nmode=\"detect\"", Mode::Detect),
+            ("[sinks.xml]\nmode=\"off\"", Mode::Off),
+            ("[sinks.xml]\nmode=\"block\"", Mode::Block),
+            ("[sinks.xml]\nexternal_entities=\"deny\"", Mode::Block),
+        ] {
+            let c = Config::from_toml(toml).unwrap();
+            assert_eq!(c.sinks.effective_mode(SinkId::Xml, Mode::Detect), want, "{toml}");
+        }
+        // [sinks] enabled = false silences it like every Layer 3 sink.
+        let c = Config::from_toml("[sinks]\nenabled=false").unwrap();
+        assert_eq!(c.sinks.effective_mode(SinkId::Xml, Mode::Block), Mode::Off);
+        assert!(Config::from_toml("[sinks.xml]\nmode=\"inherit\"").is_err());
+        // The default is visible in the serialized config (the editor reads it).
+        assert_eq!(serde_json::to_value(Config::from_toml("").unwrap()).unwrap()["sinks"]["xml"]["mode"], "block");
     }
 
     // ---- [log] (schema 2 log contract) ------------------------------------

@@ -101,7 +101,8 @@ applications" is your assessor's call. These are the points to put to them:
   `phar://`, outbound requests, and, new in 1.5, `mail`,
   `preg`/`assert`/`create_function` evaluation, dangerous callbacks and XXE)
   at the moment they are called; Layer 4 watches what the code does after a
-  breach. All log-first.
+  breach. All log-first, except XXE: that one strips a dangerous libxml flag by
+  default, but only when it meets an external entity.
 
 Howdah complements a network WAF; it does not replace one. Keep or add a WAF,
 CDN rule or web server rule for:

@@ -325,6 +325,7 @@ unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
                 sys::howdah_install_legacy_hooks(
                     crate::sink_filter::decide,
                     crate::legacy_filter::mail_decide,
+                    crate::legacy_filter::xml_decide,
                     armed,
                 )
             } else {

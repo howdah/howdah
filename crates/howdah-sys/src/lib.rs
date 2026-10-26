@@ -53,12 +53,14 @@ extern "C" {
 
     /// Install the legacy-era sink swaps named by `mask` (`HOWDAH_LEGACY_*`
     /// bits; see `legacy_hook.c`). Call once at first RINIT. `cb` is the
-    /// one-argument decide callback, `mail_cb` the two-argument `mail()` one.
+    /// one-argument decide callback, `mail_cb` the two-argument `mail()` one,
+    /// `xml_cb` the flag-aware XML one.
     /// Returns the mask of sinks actually installed (a function missing on
     /// this PHP is skipped).
     pub fn howdah_install_legacy_hooks(
         cb: HowdahSinkDecide,
         mail_cb: HowdahMailDecide,
+        xml_cb: HowdahXmlDecide,
         mask: ::std::ffi::c_int,
     ) -> ::std::ffi::c_int;
 
@@ -208,6 +210,19 @@ pub type HowdahMailDecide = unsafe extern "C" fn(
     headers_len: usize,
     params: *const ::std::ffi::c_char,
     params_len: usize,
+) -> ::std::ffi::c_int;
+
+/// The XML-string decide callback: the guarded function name, the document, the
+/// libxml option mask the call passes and a `HOWDAH_XML_*` capability set.
+/// Returns 0 ALLOW / 1 LOG / 2 BLOCK / 3 STRIP (remove the dangerous flags and
+/// run the call).
+pub type HowdahXmlDecide = unsafe extern "C" fn(
+    name: *const ::std::ffi::c_char,
+    name_len: usize,
+    doc: *const ::std::ffi::c_char,
+    doc_len: usize,
+    flags: i64,
+    caps: ::std::ffi::c_int,
 ) -> ::std::ffi::c_int;
 
 /// `howdah_sink_ssrf_armed`-shaped callback: 1 iff SSRF guarding is armed.

@@ -32,9 +32,11 @@ while the request-header rules' 403 is **post-hoc** (set at request shutdown,
 after the script) when the script builds `$_SERVER` lazily. The refusal
 itself (status, body, request id, worker survival) is covered by the
 separate refusal-path lab below. php-cgi
-argument injection (CVE-2012-1823) is **out of reach** from inside PHP — the
-exploit is consumed before any extension hook runs — so it is **not** protected
-(see Table 4 and caveat 7).
+argument injection (CVE-2012-1823 / CVE-2024-4577) is refused by the
+`cgi_arg_injection` check: Howdah cannot undo php-cgi's own argv parse, but it
+refuses the request at RINIT, before the script and any injected
+`auto_prepend_file` run — the code-execution form, not the `-s` source dump
+php-cgi emits before RINIT (best-effort shape matching; see Table 4 and caveat 7).
 
 ## What is NOT claimed
 
@@ -147,7 +149,7 @@ armed. See caveats 5–7.
 | **CVE-2023-0662** — too-many-parts memory DoS | `max_parts` (2000) | Blocked wherever Table 1's field/part-flood column is green; same scenario, cross-referenced. |
 | **Hash-collision / variable flood** (symbol-table DoS) | `max_input_vars` (2000) | Variable dropped and logged, refused before the script (since 1.5); Enforced on the SAPIs in Table 3's `max_input_vars` column. |
 | **Array-nesting DoS** (deep `a[b][c]…`) | `max_input_nesting_depth` (64) | Variable dropped and logged, refused before the script (since 1.5); Enforced on the SAPIs in Table 3's nesting column. |
-| **CVE-2012-1823** — php-cgi argument injection | *(none — out of reach)* | **NOT protected.** The exploit works only under the php-cgi SAPI, where php-cgi consumes the argv-injection query string during its **own startup — before any PHP extension, module, or request (RINIT) hook loads** — so no in-PHP check can ever fire for the attack shape. Like CVE-2019-11043, this happens before extension code runs and is outside what a PHP extension can defend. See caveat 7. |
+| **CVE-2012-1823 / CVE-2024-4577** — php-cgi argument injection | `cgi_arg_injection` (Layer 2, default block) | **Request shape refused before the script runs.** php-cgi parses the argv-shaped query string (no literal `=`) during its own startup, before any extension loads, and Howdah cannot undo that parse — but it refuses the *request* at the end of RINIT, before the script and any injected `auto_prepend_file` compile and run. Lab-verified on the real php-cgi SAPI (and fpm/Apache/CLI) across PHP 5.4-8.5 for the code-execution shapes (`-d auto_prepend_file=php://input`, in `-`/`%2d`/`%AD`/`%C2%AD` forms, GET and POST): clean 403, app marker unwritten, worker alive. Best-effort shape matching (narrow by design; see [config.md](config.md)). The `-s`/`-i` source/info-disclosure forms, which php-cgi handles before RINIT, and CVE-2019-11043 (php-fpm) stay out of reach. See caveat 7. |
 
 ## Table 5: other SAPIs and runtimes
 
@@ -218,15 +220,24 @@ Docker images for PHP 7.2-8.5 (x86_64).
    leave the header limit unexercised. The limit is counted exactly once the
    vars exist. With Layer 2 armed, Howdah builds `$_SERVER` at RINIT itself,
    which also makes the header rules pre-execution on that install.
-7. **CVE-2012-1823 (php-cgi argument injection) is out of reach and NOT
-   protected.** Lab testing proved the argv-injection query shape ("`-s`",
-   "`-d…`") is consumed by php-cgi during its **own startup — before any PHP
-   extension, module, or request (RINIT) hook loads** — so a check from inside a
-   PHP extension can never fire for the attack. A configurable rule that can
-   never fire would be a false promise, so the virtual patch was removed. This
-   CVE belongs with CVE-2019-11043: both happen before extension code runs and
-   are outside what Howdah, as a PHP extension, can defend. Use a web-server or
-   front-proxy rule (or a patched php-cgi) to cover it.
+7. **CVE-2012-1823 / CVE-2024-4577 (php-cgi argument injection): the request
+   shape is refused before the script runs; the SAPI's own argv parse is not
+   undone.** php-cgi consumes an argv-shaped query string (no literal `=`)
+   during its **own startup — before any PHP extension, module or request
+   (RINIT) hook loads** — so Howdah cannot stop php-cgi from parsing the
+   options. It can and does refuse the *request* at the end of RINIT, before the
+   script and any injected `auto_prepend_file` compile and run, through the
+   `cgi_arg_injection` Layer 2 check (on and blocking by default, independent
+   of mode). Lab testing on the real php-cgi SAPI (and fpm/Apache/CLI) across
+   PHP 5.4-8.5 shows the code-execution shapes (`-d auto_prepend_file=php://input`,
+   in `-`/`%2d`/`%AD`/`%C2%AD` forms, GET and POST) refused with a clean
+   403, the app marker unwritten and the worker alive. It is best-effort shape
+   matching (narrow by design to keep benign `=`-less queries clean; see
+   docs/config.md). It does **not** catch the `-s`/`-i` source/info-disclosure
+   forms under php-cgi, which that SAPI handles inside its own startup before
+   RINIT fires (RINIT ran for a benign `?x=1` but not for `?-s`), and does not
+   cover CVE-2019-11043 (php-fpm); a web-server or front-proxy rule (or a patched
+   php-cgi) is still worth keeping as defence in depth.
 8. **Platforms: Linux x86_64 and aarch64, NTS builds only.** Release tarballs
    are built on a glibc-2.17 baseline for both architectures. x86_64 covers all
    14 PHP minors (5.4 to 8.5). aarch64 builds every minor from PHP source on
@@ -279,6 +290,19 @@ generation, not run), php-cgi, header values, a raw body read through
 never builds (`variables_order` without `G`/`P`/`C`,
 `enable_post_data_reading = Off`).
 
+**php-cgi argument injection (default block).** Beside the three log-first
+classes, Layer 2 refuses &mdash; by default, independent of `inspect.mode` and
+`howdah.mode` &mdash; a query string that carries no literal `=` and parses as
+php-cgi command-line options (`?-d+allow_url_include%3d1+-d+auto_prepend_file%3dphp://input`,
+and the soft-hyphen `%AD` form of CVE-2024-4577), the precondition for
+CVE-2012-1823 / CVE-2024-4577. Rule `cgi_arg_injection`; `inspect.cgi_arg =
+"detect"` logs instead and `"off"` disables; the query string is never logged.
+Verified by `lab/integration/cgi_arg.sh` on PHP 5.4-8.5: malicious query
+strings refused with a clean 403 and the worker surviving, 0 of 57 benign query
+strings blocked on each version. (Howdah runs inside PHP, so it cannot stop the
+php-cgi SAPI parsing argv before any extension loads &mdash; this catches the
+shape in the query string PHP hands the application.)
+
 ## Refusal path (worker survival)
 
 Releases up to 1.4.0 refused a request by unwinding (`zend_bailout`) out of
@@ -327,142 +351,32 @@ Not claimed: php-cgi (same startup code as php-fpm, not run), the CLI server
 ## Layer 3 (sink hardening, 1.3 additions)
 
 Layer 3 guards dangerous PHP functions. It detects and logs by default and does
-not block unless a sink is explicitly armed. 1.3 adds the `phar` and `ssrf`
-sinks (both **off by default**, armed only by an explicit per-sink mode) and
-makes `include`/`eval` **active on PHP 5.x**. These results come from
-`lab/integration/sinks_fastfollow.sh`, not from the matrix tables above.
+not block unless a sink is explicitly armed &mdash; with default-on exceptions:
+the include/open wrapper firewall (here) and `xxe` (legacy-sinks table below).
+1.3 adds the `phar` and `ssrf` sinks (both **off by default**, armed only by
+an explicit per-sink mode) and makes `include`/`eval` **active on PHP 5.x**;
+later additions are the include/open wrapper firewall (default **block**) and
+three opt-in `[sinks.ssrf]` hardening knobs (`rebind`/`scheme`/`redirect`).
+These results come from `lab/integration/sinks_fastfollow.sh` and `wrapper.sh`,
+not from the matrix tables above.
 
 | sink / mechanism | PHP 5.4-5.6 | PHP 7.0-7.4 | PHP 8.0-8.5 |
 |---|---|---|---|
 | `phar://` (wrapper proxy; off by default) | detect/deny + **deserialization** | detect/deny + **deserialization** | detect/deny **only**; no deserialization claim |
-| SSRF (function swap + curl handle map; off by default) | yes, opt-in | yes, opt-in | yes, opt-in |
+| include/open wrapper firewall (`include_wrapper`/`file_open`; **block by default**) | blocks `php://filter`/`data:`/`expect:`/remote includes + `/proc`/session/log poison (warm-opcache caveat) | blocks (same) | blocks (same) |
+| SSRF range check (function swap + curl handle map; off by default) | yes, opt-in | yes, opt-in | yes, opt-in |
+| SSRF `rebind`/`scheme`/`redirect` hardening (opt-in) | `scheme`/`redirect` yes; `rebind` after-the-fact only (5.4 has no `CURLOPT_RESOLVE`) | pinned | pinned |
 | `include` / `eval` | **now active** (include: opcache caveat; eval: full) | active | active |
-| include/open wrapper firewall (`include_wrapper`, `file_open`; **on by default, block**) | yes (compile-swap; opcache caveat) | yes (compile default + opcode) | yes (compile default + opcode) |
 
-The wrapper firewall (new; `lab/integration/wrapper.sh`, verified on PHP 5.4,
-5.6, 7.0, 7.4, 8.0, 8.1, 8.3, 8.5) classifies the fully resolved include/open
-target and refuses non-`file` wrappers (`php://filter` chains, `php://input`,
-`data:`, `expect://`, remote `http(s)`/`ftp(s)`; `phar://` stays with the phar
-sink) and poisonable local targets (`/proc/self/environ`, the session dir, the
-error_log). The file-open sinks (`fopen`/`file_get_contents`/`readfile`) refuse
-only the tight dangerous-wrapper set, so `php://input`, `php://temp`/`memory`
-and remote fetches are not false positives; a benign include corpus (relative
-templates, autoloader paths, absolute config, vendor autoload) is zero-block on
-every version. On PHP 5.x an include served from a warm opcache is not
-re-inspected (the same compile-swap caveat as `include`/`eval`).
-
-Verified on PHP 5.4, 5.6, 7.4, 8.3 and 8.5 (the wrapper firewall on 5.4, 5.6,
-7.0, 7.4, 8.0, 8.1, 8.3, 8.5). Other minors build and are expected to work but
-are **not independently verified**. A debug-build leak review is still pending.
-
-### SSRF hardening (`rebind`, `scheme`, `redirect`; opt-in)
-
-Three independent knobs beside the call-time range check, each **off by default**
-(`[sinks.ssrf] rebind | scheme | redirect = "detect" | "block"`; reference and the
-exact per-path guarantees in `docs/config.md`). Results from
-`lab/integration/sinks_fastfollow.sh` against a loopback target, a DNS server that
-answers a name with a public decoy once and `127.0.0.1` afterwards, and a
-self-signed HTTPS target; a negative check ("the internal service was not
-reached") is only counted against a server that was proven alive.
-
-| php | libcurl | curl rebinding | scheme refused (curl + stream) | redirects not followed | rebind refused (curl, socket, fopen) |
-|---|---|---|---|---|---|
-| 5.4 | 7.29.0 | **after the fact only** (no `CURLOPT_RESOLVE` in PHP 5.4) | yes | yes (308 not run: test server) | yes |
-| 5.6 | 7.52.1 | pinned (one address: libcurl < 7.59) | yes | yes | yes |
-| 7.0 | 7.52.1 | pinned (one address: libcurl < 7.59) | yes | yes | yes |
-| 7.4 | 7.74.0 | pinned (address list: libcurl >= 7.59) | yes | yes | yes |
-| 8.0 | 7.74.0 | pinned (address list: libcurl >= 7.59) | yes | yes | yes |
-| 8.1 | 8.14.1 | pinned (address list: libcurl >= 7.59) | yes | yes | yes |
-| 8.3 | 8.14.1 | pinned (address list: libcurl >= 7.59) | yes | yes | yes |
-| 8.5 | 8.14.1 | pinned (address list: libcurl >= 7.59) | yes | yes | yes |
-
-The lab asserts that the pin works on every row; whether it pins one address or the
-list follows the libcurl version found at run time and is not itself asserted.
-
-- **scheme:** curl `file://`, `gopher://` (a smuggled `GET` that reaches the
-  internal server when unguarded), `dict://`, `ldap://`, `tftp://`, `ftp://` and the
-  `ftp.`-host protocol guess are refused; so is a redirect hop to `gopher://` /
-  `dict://` / `file://`. `ftp://` is refused on `file_get_contents`, `fopen` and
-  `get_headers`; `file://`, `php://memory`/`temp` and `http://` are untouched.
-- **rebind:** with only the call-time guard a rebinding name is served by curl,
-  `file_get_contents` and `fsockopen` (the TOCTOU is real in the lab). With
-  `rebind = "block"` curl is pinned (libcurl connects to the decoy, never the
-  rebound loopback) or, on PHP 5.4, judged after the transfer and its response
-  discarded; `fsockopen`/`pfsockopen`/`stream_socket_client` close the stream when
-  the connected peer is internal; `fopen(url)` hides the response. `file_get_contents`
-  and `get_headers` have no peer to inspect and are still served (pinned as a known
-  gap by the lab).
-- **redirect:** a `301/302/303/307/308` to `127.0.0.1`, `[::1]`, decimal
-  `2130706433`, scheme-relative `//`, a name that resolves to loopback, `169.254.169.254`
-  or RFC1918 is aborted before libcurl follows it (`curl_errno` 23) and the internal
-  service is never contacted. Relative redirects, redirects to an `allow_hosts` host,
-  a `Location` on a `201` and `FOLLOWLOCATION` off are untouched.
-- **benign:** with `rebind`, `scheme` and `redirect` all in `block`, curl (by name,
-  literal, and through same-host and allowed-host redirects), `file_get_contents`,
-  `fopen`, `fsockopen`, `get_headers` and HTTPS to an `allow_hosts` host are served
-  with zero events.
-- **Known gaps, pinned by checks that fail if they close:** `file_get_contents` /
-  `get_headers` rebinding; a redirect hop to a rebinding name (not pinned; `rebind`
-  discards the final response after the request was sent); a script-set
-  `CURLOPT_HEADERFUNCTION` together with `FOLLOWLOCATION`; `curl_multi_*`. Also not
-  covered: the PHP http stream wrapper's own redirect following, `CURLOPT_CONNECT_TO`
-  (the connected-address check catches it), and any request through a proxy.
-
-### Layer 4 file guards (delete, dangerous write, secret read)
-
-Three origin-attributed guards on the file-op hub (`[behavior] delete_guard`,
-`upload_write`, `secret_read`; see `docs/config.md`). The first two are **on by
-default and block**, the third is **opt-in** (`off` by default). Results come
-from `lab/integration/file_guard.sh` (33 checks per version, real extension, CLI
-and the built-in server with real multipart uploads), verified on PHP 5.4, 5.6,
-7.0, 7.4, 8.0, 8.1, 8.3 and 8.5. The C is also compiled with
-`-Wall -Wextra -Werror` against each image's headers.
-
-| guard / sink | PHP 5.4-5.6 | PHP 7.0-7.4 | PHP 8.0-8.5 |
-|---|---|---|---|
-| delete guard: `unlink`, `rmdir`, `rename` source (**on by default, block**) | yes | yes | yes |
-| upload-write guard: `move_uploaded_file` to an executable / handler-config name (**on by default, block**) | yes | yes | yes |
-| scoped dangerous-write tier (`deny_php_writes`): `file_put_contents`, `fopen` (write), `copy`, `rename`, `move_uploaded_file` (opt-in) | yes | yes | yes |
-| secret-read guard: `file_get_contents`, `readfile`, `file`, `fopen` (read) (**opt-in; off by default**) | yes | yes | yes |
-
-Per-version lab result, identical on all eight versions (cells are *attacks
-refused (or logged, for secret read) | benign operations performed | benign false
-blocks*):
-
-| php | delete guard | upload-write | scoped write | secret read (detect) |
-|---|---|---|---|---|
-| 5.4.16 / 5.6.40 | 12 \| 18 \| 0 | 12 \| 10 \| 0 | 52 \| 32 \| 0 | 16 \| 32 \| 0 |
-| 7.0.33 / 7.4.33 | 12 \| 18 \| 0 | 12 \| 10 \| 0 | 52 \| 32 \| 0 | 16 \| 32 \| 0 |
-| 8.0.30 / 8.1.34 | 12 \| 18 \| 0 | 12 \| 10 \| 0 | 52 \| 32 \| 0 | 16 \| 32 \| 0 |
-| 8.3.36 / 8.5.12 | 12 \| 18 \| 0 | 12 \| 10 \| 0 | 52 \| 32 \| 0 | 16 \| 32 \| 0 |
-
-Delete attacks: `unlink` of `wp-config.php`, `.env`, `.env.production`, `id_rsa`,
-`privkey.pem`, `server.key`, an `uploads/../` traversal to `wp-config.php`,
-`call_user_func('unlink', ...)`, `rename` of `wp-config.php` and `.env` away,
-and `unlink`/`rmdir` through nine `..` segments into `/etc`; every one returned
-`false`, left the target in place, let the script continue and logged
-`file_delete`/`block` with the calling `file:line` and no file name. Upload
-attacks: twelve real multipart uploads to `.php`, `.phtml`, `.pht`, `.php3`,
-`.php4`, `.php5`, `.php7`, `.PHAR`, `.Php`, `.htaccess`, `.user.ini` and
-`web.config` with no configuration at all; none created, worker alive after each.
-The scoped tier refused all 13 names (the above plus `.inc`) through all four
-write sinks. Benign corpus, zero blocks: cache, tmp, session, upload, thumbnail,
-compiled-view, `.env.example`, `wp-config-sample.php`, `.htaccess`, `cacert.pem`
-and Keynote `.key` deletes, an internal `..`, `array_map('unlink', glob())`,
-`rmdir`, the deploy rename `.env.production` -> `.env`; `.jpg`/`.txt`/`.json`/`.log`/
-`.zip`/`.pdf`/`.csv`/`.inc`/`.png`/`.css` uploads; plain writes of `.php`/`.htaccess`
-with the scoped tier off; reads of the app's own config, data, `cacert.pem` and
-`/etc/hosts` under `secret_read = "detect"`.
-
-Not claimed: the delete guard does not treat `.htaccess` as sensitive, does not
-test "outside the document root" (Howdah does not know yours; `/tmp` and
-`/var/cache` are legitimate), and does not see a Stringable passed to
-`unlink`, `SplFileObject`, `ZipArchive::extractTo`, `fwrite` on an open handle,
-or a symlink with an innocent name. Double extensions (`shell.php.jpg`) and
-`.inc` are outside the upload tier. Migration and restore tools that move
-`wp-config.php`, and admin file managers that upload `.php`, need an
-`[[exceptions]]` entry. PHP-FPM and Apache were not run for this lab (the sinks
-are the same function-table swaps the Layer 3 sinks use under those SAPIs).
+Verified on PHP 5.4, 5.6, 7.4, 8.3 and 8.5 (`phar`, `include`/`eval`); the
+wrapper firewall (`wrapper.sh`) and the SSRF hardening knobs
+(`sinks_fastfollow.sh`) on PHP 5.4, 5.6, 7.0, 7.4, 8.0, 8.1, 8.3 and 8.5. Other
+minors build and are expected to work but are **not independently verified**.
+The SSRF knobs are best-effort and leave documented gaps
+(`file_get_contents`/`get_headers` rebinding, `curl_multi_*`, a proxy, and
+PHP 5.4 which cannot pin); see
+[configuration](/docs/configuration/#layer-3-sinks). A debug-build leak review
+is still pending.
 
 ### Legacy-era sinks (1.5 additions)
 
@@ -533,12 +447,7 @@ Limitations, stated plainly:
   build, fails open.
 - **SSRF is best-effort, resolve-at-check-time detection, not a connection-time
   boundary.** Bypasses: DNS rebinding, redirects to a new host, `curl_multi_*`,
-  `CURLOPT_RESOLVE`/`CONNECT_TO`, and a non-string or absent `CURLOPT_URL`. The
-  opt-in `rebind` / `scheme` / `redirect` knobs (T6, see "SSRF hardening" above)
-  close several of these on the paths PHP lets them, and the residual gaps are
-  stated there: no peer check for `file_get_contents` / `get_headers`; curl hops
-  are not pinned; a script-set `CURLOPT_HEADERFUNCTION`, `curl_multi_*` and the
-  PHP http wrapper's own redirects are not covered; PHP 5.4 cannot pin.
+  `CURLOPT_RESOLVE`/`CONNECT_TO`, and a non-string or absent `CURLOPT_URL`.
 - **Not hooked:** `copy`, `file`, `readfile`, `SoapClient`,
   `DOMDocument::load*`, `simplexml_load_file`.
 - A blocked `fsockopen`/`stream_socket_client` leaves `$errno`/`$errstr` unset;
@@ -565,6 +474,43 @@ Limitations, stated plainly:
   caveat (two includes of one file: two events in `opcode` mode, one in
   `compile` mode); compile-mode include/eval behaviour is also checked on 7.4
   and 5.6.
+
+## Layer 4 (after-breach behaviour, 1.4 additions)
+
+Layer 4 watches what PHP does once something has gone wrong. Four allowlist
+facets log by default and need their lists set (`deny_exec_dirs` ->
+`upload_exec`, `allow_exec_binaries` -> `unexpected_binary`,
+`allow_egress_hosts` -> `unexpected_egress`, `deny_php_writes` ->
+`php_write`); `behavior.mode` is independent of `howdah.mode`. Three file
+guards sit beside them with their own mode and need no list: two block by
+default, one is opt-in. From `lab/integration/behavior.sh` (the facets) and
+`lab/integration/file_guard.sh` (the guards).
+
+| guard (rule) | default | what it refuses | PHP |
+|---|---|---|---|
+| delete guard (`file_delete`) | **block** | `unlink`/`rmdir`/`rename`-away of `wp-config.php`, `.env`, key material, or a `..` traversal into a system directory | 5.4-8.5 |
+| upload-write guard (`php_write`, upload tier) | **block** | `move_uploaded_file` into a PHP-executable or handler-config name (`.php`, `.phtml`, `.phar`, `.htaccess`, `.user.ini`, `web.config`, ...) | 5.4-8.5 |
+| secret-read guard (`secret_read`) | off (opt-in) | reads of `.env`, `wp-config.php`, key and system-account files | 5.4-8.5 |
+
+Verified on PHP 5.4, 5.6, 7.0, 7.4, 8.0, 8.1, 8.3 and 8.5 with a benign-corpus
+false-positive gate (zero benign blocks per version). A blocked call returns
+`false` and the script continues; only a path *category* is logged, never the
+target path. The guards do not catch symlink tricks, a `Stringable` passed to
+`unlink`, `SplFileObject`/`ZipArchive` writes, or a double extension
+(`shell.php.jpg`); plain in-app `.php`/`.htaccess` writes are left to the
+opt-in `deny_php_writes` tier so Blade/Twig/WordPress are not false positives.
+
+**Worker recycle after a poisoning-class fatal (opt-in).** On an engine without
+the 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 out-of-memory fix, a bailout fatal can
+leave request state half-built for the *next* request to read
+(CVE-2026-109619). The opt-in `recycle_on_fatal` facet (rule `fatal_recycle`,
+off / observe / enforce) ends the worker after such a fatal so it never serves
+another request on that state; the 1.6 out-of-memory backstop already
+`_exit`s the worker on an out-of-memory fatal (CVE-2026-109618). From
+`lab/integration/recycle.sh` on PHP 5.4-8.5. On every supported web SAPI the
+worker takes the immediate exit (the 500 is not flushed before teardown there
+anyway), so the producing request's response is dropped; the next-request
+window is closed either way.
 
 ## Performance and the OPcache JIT
 

@@ -245,25 +245,35 @@ that never reads `$_SERVER` on a JIT-globals SAPI leaves the header limit
 unexercised. This is why the CLI header scenarios are SKIP (not asserted) and the
 header rules are validated on fpm + Apache.
 
-## CVE-2012-1823 (php-cgi argument injection) — out of reach; NOT protected
+## CVE-2012-1823 / CVE-2024-4577 (php-cgi argument injection) — the code-execution shape is refused at RINIT; the `-s` source-disclosure shape is not
 
-Howdah does **not** protect against CVE-2012-1823, and no rule for it ships. Lab
-testing proved the defense **cannot** work from inside a PHP extension:
+Howdah's `cgi_arg_injection` check (Layer 2, on and blocking by default) refuses
+a request whose query string has the php-cgi argument-injection shape (no literal
+`=`, a standalone php-cgi option). Whether that is in time depends on *when*
+php-cgi acts on the shape:
 
-- For every argv-injection query shape (no literal `=`, leading `-`), php-cgi
-  consumes the query string as command-line arguments **during its own SAPI
-  startup, before any PHP extension, module, or request-startup (RINIT) hook
-  loads** — so any check from inside an extension is **never reached** (confirmed
-  by instrumentation: RINIT fired for a benign `?x=1` query but not for `?-s`).
-- The only php-cgi in the lab images, PHP **5.4.16**, is itself **already
-  patched** against the CVE, so no vulnerable build was available to test a fire
-  path against in any case.
+- **Code execution (`-d auto_prepend_file=php://input`, `allow_url_include`, …):
+  refused.** php-cgi parses the argv-shaped query string during its own SAPI
+  startup, before any extension or RINIT hook loads, so Howdah cannot undo that
+  parse — but the injected directives only take effect when the script and the
+  `auto_prepend_file` compile and run, which is *after* RINIT. Howdah's Layer 2
+  check fires at the end of RINIT and refuses the request first, so the payload
+  never runs. Lab-verified (`lab/integration/cgi_arg.sh`) on the real php-cgi
+  SAPI across PHP 5.4–8.5: a clean 403, the app marker unwritten, the worker
+  alive, the event carrying no query string.
+- **Source / info disclosure (`?-s`, `?-i`, …): not caught under php-cgi.**
+  php-cgi handles these entirely within its own startup, before RINIT fires
+  (confirmed by instrumentation: RINIT ran for a benign `?x=1` query but not for
+  `?-s`). The rule matches the shape, but under php-cgi it is never reached for
+  this vector; under other SAPIs (fpm, Apache, CLI) a `?-s` query is anomalous
+  but harmless, because those SAPIs do not interpret argv as options.
 
-Because a configurable rule that can never fire is a false promise (Howdah's
-no-overclaim rule), the earlier RINIT virtual patch was **removed**. CVE-2012-1823
-belongs with CVE-2019-11043: both are triggered before any extension code runs
-and are outside what Howdah, as a PHP extension, can defend. Cover this CVE at
-the web server / front proxy, or run a patched php-cgi.
+The only php-cgi in the lab images, PHP **5.4.16**, is itself **already patched**
+against the CVE, so the fire path exercises Howdah's own rule, not a vulnerable
+engine. The check is best-effort shape matching (narrow by design to keep benign
+`=`-less queries clean). CVE-2019-11043 (php-fpm) runs entirely before extension
+code and is **not** covered. Keep a web-server or front-proxy rule, or a patched
+php-cgi, as defence in depth.
 
 ## Regression caught by the matrix: CLI-server block-state leak (fixed)
 

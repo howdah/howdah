@@ -23,12 +23,22 @@ extern "C" {
     /// Write one line to the SAPI error log (`php_log_err`, see `shim.c`).
     pub fn howdah_sys_log_err(msg: *const ::std::ffi::c_char);
 
+    /// The resolved temporary directory (`php_get_temporary_directory`, see
+    /// `shim.c`): PHP's file session handler's base when `session.save_path`
+    /// is empty. Engine-owned static string, or NULL very early; never freed.
+    pub fn howdah_sys_temp_dir() -> *const ::std::ffi::c_char;
+
     /// The executing PHP script's path (`zend_get_executed_filename()`, the
     /// Layer-4 origin capture in `sink_hook.c`), exported so the glue can hand
     /// it to the core for `[[exceptions]]` `script` facets. Engine-owned
     /// string; never freed. PHP returns a bracketed placeholder (not a path)
     /// when nothing is executing.
     pub fn howdah_sys_current_script() -> *const ::std::ffi::c_char;
+
+    /// The line of the call being made in the script `howdah_sys_current_script`
+    /// names (0 when nothing is executing). Same origin walk, for the T5 file
+    /// guards' `file:line` log text.
+    pub fn howdah_sys_current_line() -> u32;
 
     /// Install the Layer-3 function-table sink hooks (see `sink_hook.c`). Call
     /// once at MINIT. `cb` decides each intercepted call, returning the action
@@ -53,12 +63,14 @@ extern "C" {
 
     /// Install the legacy-era sink swaps named by `mask` (`HOWDAH_LEGACY_*`
     /// bits; see `legacy_hook.c`). Call once at first RINIT. `cb` is the
-    /// one-argument decide callback, `mail_cb` the two-argument `mail()` one.
+    /// one-argument decide callback, `mail_cb` the two-argument `mail()` one,
+    /// `xml_cb` the flag-aware XML one.
     /// Returns the mask of sinks actually installed (a function missing on
     /// this PHP is skipped).
     pub fn howdah_install_legacy_hooks(
         cb: HowdahSinkDecide,
         mail_cb: HowdahMailDecide,
+        xml_cb: HowdahXmlDecide,
         mask: ::std::ffi::c_int,
     ) -> ::std::ffi::c_int;
 
@@ -81,9 +93,24 @@ extern "C" {
     /// `decide` is the Rust verdict. Call once at MINIT.
     pub fn howdah_install_ssrf_hooks(decide: HowdahSsrfDecide, armed: HowdahSsrfArmed);
 
+    /// Register the SSRF redirect / scheme guard (`howdah_curl_header_guard`), a
+    /// PHP-callable internal function a curl handle can use as its header callback.
+    /// MUST be called from MINIT (a function registered at request time dangles on
+    /// PHP 7.x); call only when the redirect or scheme knob is armed. Idempotent.
+    pub fn howdah_register_ssrf_guard_fn();
+
     /// Clear the C-owned per-request curl handle->URL map and resolution cache.
     /// Called from the ext's `clear_request_state` (RSHUTDOWN and bailout paths).
     pub fn howdah_ssrf_request_reset();
+
+    /// Install the T4 file-op foundation (see `file_hook.c`): set the shared
+    /// file-op decide callback and swap the read-open sinks file_hook.c owns
+    /// (`readfile`). fopen / file_get_contents are swapped by
+    /// `howdah_install_ssrf_hooks` and call the firewall check once the callback
+    /// is set, so a file-firewall-armed config must ALSO reach
+    /// `howdah_install_ssrf_hooks`. Call once at first RINIT when the firewall is
+    /// armed. Idempotent; a NULL callback leaves the firewall disarmed.
+    pub fn howdah_install_file_hooks(decide: HowdahFileDecide, ops: ::std::ffi::c_int);
 
     /// Install the Layer-4 behavior glue: set the five behavior callbacks AND
     /// swap `file_put_contents`/`move_uploaded_file`/`rename` onto their
@@ -99,6 +126,7 @@ extern "C" {
         binary: HowdahBehaviorBinary,
         egress: HowdahBehaviorEgress,
         php_write: HowdahBehaviorPhpWrite,
+        swap: ::std::ffi::c_int,
     );
 
     /// Deferred refusal (see `refuse_hook.c`): swap `zend_compile_file` for
@@ -125,6 +153,13 @@ extern "C" {
     /// Restore the `zend_error_cb` saved by `howdah_install_oom_hook`. No-op when
     /// not installed. Called from MSHUTDOWN, before the core ctx is freed.
     pub fn howdah_uninstall_oom_hook();
+
+    /// §4.7 recycle facet: `_exit(0)` the worker iff a poisoning-class script
+    /// fatal tainted it this request (the decide callback returned 2). Called
+    /// from the ext's `post_deactivate` AFTER request teardown, so PHP has
+    /// rendered and (on SAPIs that flush before teardown) delivered its 500.
+    /// A no-op when the worker was not tainted; allocates nothing.
+    pub fn howdah_oom_recycle_if_tainted();
 
     /// 1 iff the `memory_hard_limit_percent` ini directive is registered at
     /// runtime: upstream's out-of-memory fix (8.2.35/8.3.36/8.4.27/8.5.12) adds
@@ -184,6 +219,17 @@ extern "C" {
     pub fn howdah_sink_ssrf_oversize(ctx: *mut ::std::ffi::c_void) -> ::std::ffi::c_int;
 }
 
+/// `howdah_install_file_hooks` `ops` bit: also swap `unlink`/`rmdir` (the delete
+/// guard is armed). Mirrors `HOWDAH_FILE_HOOK_DELETE` in `howdah_sink.h`.
+pub const HOWDAH_FILE_HOOK_DELETE: ::std::ffi::c_int = 1;
+
+/// `howdah_install_behavior_hooks` `swap` mask bits (mirror `HOWDAH_BHV_SWAP_*`
+/// in `howdah_sink.h`): the scoped `deny_php_writes` tier, the upload-write
+/// guard (`move_uploaded_file`), and rename's delete-guard source check.
+pub const HOWDAH_BHV_SWAP_GENERIC: ::std::ffi::c_int = 1;
+pub const HOWDAH_BHV_SWAP_UPLOAD: ::std::ffi::c_int = 2;
+pub const HOWDAH_BHV_SWAP_RENAME_SRC: ::std::ffi::c_int = 4;
+
 /// Legacy sink install mask bits (mirror `HOWDAH_LEGACY_*` in `howdah_sink.h`).
 pub const HOWDAH_LEGACY_MAIL: ::std::ffi::c_int = 1;
 pub const HOWDAH_LEGACY_PREG_EVAL: ::std::ffi::c_int = 2;
@@ -203,7 +249,22 @@ pub type HowdahMailDecide = unsafe extern "C" fn(
     params_len: usize,
 ) -> ::std::ffi::c_int;
 
-/// `howdah_sink_ssrf_armed`-shaped callback: 1 iff SSRF guarding is armed.
+/// The XML-string decide callback: the guarded function name, the document, the
+/// libxml option mask the call passes and a `HOWDAH_XML_*` capability set.
+/// Returns 0 ALLOW / 1 LOG / 2 BLOCK / 3 STRIP (remove the dangerous flags and
+/// run the call).
+pub type HowdahXmlDecide = unsafe extern "C" fn(
+    name: *const ::std::ffi::c_char,
+    name_len: usize,
+    doc: *const ::std::ffi::c_char,
+    doc_len: usize,
+    flags: i64,
+    caps: ::std::ffi::c_int,
+) -> ::std::ffi::c_int;
+
+/// SSRF armed-mask callback: the `HOWDAH_SSRF_ARM_*` bits of which parts of the
+/// SSRF path the shim must run (0 = nothing: the zero-overhead chain). Any
+/// non-zero value means "armed" to a caller that only tests truthiness.
 pub type HowdahSsrfArmed = unsafe extern "C" fn(ctx: *mut ::std::ffi::c_void) -> ::std::ffi::c_int;
 
 /// The §4.1 read_post decide callback (see `read_post_hook.c`). Given the body
@@ -218,8 +279,10 @@ pub type HowdahReadPostDecide = unsafe extern "C" fn(
 /// is PHP's `E_*` code, `msg` the rendered message (8.x) or `format` string
 /// (5.x/7.x) for `msg_len` bytes, `during_startup` 1 inside `php_request_startup`,
 /// and `file`/`file_len`/`line` the error's location (script path + line, for
-/// the logged reason; `file` may be NULL). Returns 1 to end the worker (after
-/// logging), 0 to chain to the prior handler.
+/// the logged reason; `file` may be NULL). Returns 0 to chain to the prior
+/// handler, 1 to end the worker NOW (the §4.6 backstop), or 2 to mark the worker
+/// tainted and chain (the §4.7 recycle facet — the C shim `_exit`s it at the
+/// ext's `post_deactivate`, after this request delivers its 500).
 pub type HowdahOomDecide = unsafe extern "C" fn(
     error_type: ::std::ffi::c_int,
     msg: *const ::std::ffi::c_char,
@@ -230,10 +293,12 @@ pub type HowdahOomDecide = unsafe extern "C" fn(
     line: u32,
 ) -> ::std::ffi::c_int;
 
-/// `howdah_sink_check_ssrf`-shaped callback. `ips` is `ips_count` x 17-byte
-/// records `[family 4|6][16 addr bytes]`. Returns 0 ALLOW / 1 LOG / 2 BLOCK.
+/// `howdah_sink_check_ssrf_kind_at`-shaped callback. `kind` is a
+/// `HOWDAH_SSRF_KIND_*` code (range / rebind / redirect). `ips` is `ips_count` x
+/// 17-byte records `[family 4|6][16 addr bytes]`. Returns 0 ALLOW / 1 LOG / 2 BLOCK.
 pub type HowdahSsrfDecide = unsafe extern "C" fn(
     ctx: *mut ::std::ffi::c_void,
+    kind: ::std::ffi::c_int,
     scheme: *const ::std::ffi::c_char,
     scheme_len: usize,
     host: *const ::std::ffi::c_char,
@@ -241,6 +306,18 @@ pub type HowdahSsrfDecide = unsafe extern "C" fn(
     port: u16,
     ips: *const u8,
     ips_count: usize,
+) -> ::std::ffi::c_int;
+
+/// The T4 file-op decide callback the file-open trampolines invoke (mirrors
+/// `howdah_file_decide_t` in `howdah_sink.h`). `name` is the guarded function,
+/// `target` its path/URL argument (never logged by the core), `op` a
+/// `HOWDAH_FILE_OP_*` code. Returns 0 ALLOW / 1 LOG / 2 BLOCK.
+pub type HowdahFileDecide = unsafe extern "C" fn(
+    name: *const ::std::ffi::c_char,
+    name_len: usize,
+    target: *const ::std::ffi::c_char,
+    target_len: usize,
+    op: ::std::ffi::c_int,
 ) -> ::std::ffi::c_int;
 
 /// The glue decision callback the C sink trampolines invoke. `sink` is a

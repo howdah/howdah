@@ -14,6 +14,7 @@ use howdah_sys as sys;
 
 use crate::input_filter;
 use crate::logsink;
+use crate::oom_filter;
 use crate::refusal::{Deferred, Delivery, Verdict};
 use crate::response;
 use crate::rfc1867;
@@ -71,6 +72,8 @@ static mut DISP_INCLUDE_HOOK: Option<CString> = None;
 static mut DISP_LEGACY: Option<CString> = None;
 /// The out-of-memory backstop state decided at MINIT (phpinfo row).
 static mut DISP_OOM: Option<CString> = None;
+/// The §4.7 recycle-facet state decided at MINIT (phpinfo row).
+static mut DISP_RECYCLE: Option<CString> = None;
 /// `[sinks.xml] external_entities = "deny"` in force (decided once).
 static mut XML_DENY: bool = false;
 
@@ -191,6 +194,12 @@ pub(crate) unsafe fn maybe_begin() {
     core::howdah_request_begin(CTX, ptr::null(), 0, &meta);
     // ip/method/uri outlive this call's request_begin, which copies them.
     // (BEGUN was latched at the top, before the re-entrant sapi_getenv.)
+
+    // Layer 2, php-cgi argument injection: judge the raw query string once, as
+    // soon as the core request exists, so the verdict is in the request's worst
+    // action before ANY other hook (the multipart END path included) ends it.
+    // Fail-open; the string is read by the core and never logged.
+    let _ = catch_unwind(AssertUnwindSafe(|| input_filter::inspect_query_string()));
 }
 
 /// Request shutdown (RSHUTDOWN): the unified end-of-request. Runs after every
@@ -279,31 +288,90 @@ unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
             // mode `ssrf_filter::armed` still returns 0 (ssrf+egress off), so the
             // fopen SSRF branch short-circuits before any DNS/block work; only
             // the php-write branch activates.
+            // The T4 file-open firewall (include/open wrapper scheme + poison)
+            // is on by default. fopen / file_get_contents are swapped by the
+            // SSRF install, and their firewall branch self-gates on the file
+            // decide callback, so a firewall-armed config must reach the SSRF
+            // install too.
+            let open_armed = core::howdah_sink_open_armed(CTX) != 0;
+            // The T6 SSRF hardening knobs (rebind / scheme / redirect) are
+            // independent of the range `mode`, so any armed bit installs too.
             if core::howdah_sink_armed(CTX, core::HOWDAH_SINK_SSRF) != 0
+                || core::howdah_ssrf_armed_mask(CTX) != 0
                 || core::howdah_behavior_egress_active(CTX) != 0
                 || core::howdah_behavior_armed(CTX, core::HOWDAH_BEHAVIOR_PHP_WRITE) != 0
+                || open_armed
             {
                 sys::howdah_install_ssrf_hooks(
                     crate::ssrf_filter::decide,
                     crate::ssrf_filter::armed,
                 );
             }
+            // File-op hub: swap readfile/file (and unlink/rmdir when the T5
+            // delete guard is armed) and set the shared file decide callback
+            // (which lights up the fopen / file_get_contents / rename branches).
+            // `open_armed` already covers the delete and secret-read guards.
+            // Stash the runtime session.save_path / error_log for the poison
+            // check; empty values simply leave that category inert.
+            let delete_armed = core::howdah_behavior_armed(CTX, core::HOWDAH_BEHAVIOR_DELETE) != 0;
+            if open_armed {
+                sys::howdah_install_file_hooks(
+                    crate::file_filter::decide,
+                    if delete_armed { sys::HOWDAH_FILE_HOOK_DELETE } else { 0 },
+                );
+                let mut session = ini_string(b"session.save_path\0").unwrap_or_default();
+                if session.is_empty() {
+                    // Empty save_path: PHP's file session handler writes sess_*
+                    // into the temporary directory, so give the poison check
+                    // that base rather than leaving the category inert (F5c).
+                    let p = sys::howdah_sys_temp_dir();
+                    if !p.is_null() {
+                        session = CStr::from_ptr(p).to_string_lossy().into_owned();
+                    }
+                }
+                let error_log = ini_string(b"error_log\0").unwrap_or_default();
+                core::howdah_set_runtime_paths(
+                    CTX,
+                    session.as_ptr() as *const c_char,
+                    session.len(),
+                    error_log.as_ptr() as *const c_char,
+                    error_log.len(),
+                );
+            }
             // Layer-4 behavior glue: install once if ANY facet is armed. This
-            // sets the five callbacks and swaps the php-write sinks
-            // (file_put_contents/move_uploaded_file/rename); the exec-dir and
-            // binary in-hook checks live in the command-exec / compile-file /
-            // opcode-handler hooks already installed at MINIT.
+            // sets the five callbacks and swaps only the write/rename sinks an
+            // armed facet needs: file_put_contents/copy for the scoped
+            // deny_php_writes tier, move_uploaded_file for it or the (default-on)
+            // upload-write guard, rename for it or the delete guard's source
+            // check. The exec-dir and binary in-hook checks live in the
+            // command-exec / compile-file / opcode-handler hooks already
+            // installed at MINIT.
+            let write_armed = core::howdah_behavior_armed(CTX, core::HOWDAH_BEHAVIOR_PHP_WRITE) != 0;
+            let upload_armed = core::howdah_behavior_armed(CTX, core::HOWDAH_BEHAVIOR_UPLOAD_WRITE) != 0;
             if core::howdah_behavior_armed(CTX, core::HOWDAH_BEHAVIOR_EXEC_DIR) != 0
                 || core::howdah_behavior_armed(CTX, core::HOWDAH_BEHAVIOR_BINARY) != 0
                 || core::howdah_behavior_armed(CTX, core::HOWDAH_BEHAVIOR_EGRESS) != 0
-                || core::howdah_behavior_armed(CTX, core::HOWDAH_BEHAVIOR_PHP_WRITE) != 0
+                || write_armed
+                || upload_armed
+                || delete_armed
             {
+                let mut swap = 0;
+                if write_armed {
+                    swap |= sys::HOWDAH_BHV_SWAP_GENERIC;
+                }
+                if upload_armed {
+                    swap |= sys::HOWDAH_BHV_SWAP_UPLOAD;
+                }
+                if delete_armed {
+                    swap |= sys::HOWDAH_BHV_SWAP_RENAME_SRC;
+                }
                 sys::howdah_install_behavior_hooks(
                     crate::behavior_filter::armed,
                     crate::behavior_filter::exec_dir,
                     crate::behavior_filter::binary,
                     crate::behavior_filter::egress,
                     crate::behavior_filter::php_write,
+                    swap,
                 );
             }
             // Legacy-era sinks (mail, preg_eval, create_function, assert,
@@ -316,6 +384,7 @@ unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
                 sys::howdah_install_legacy_hooks(
                     crate::sink_filter::decide,
                     crate::legacy_filter::mail_decide,
+                    crate::legacy_filter::xml_decide,
                     armed,
                 )
             } else {
@@ -340,6 +409,17 @@ unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
     if *ptr::addr_of!(XML_DENY) {
         let _ = catch_unwind(AssertUnwindSafe(|| sys::howdah_xml_deny_external_entities()));
     }
+    // Layer 2, php-cgi argument injection (CVE-2012-1823, CVE-2024-4577): the
+    // query string is judged when the core request begins (`maybe_begin`). A
+    // query that produced no input variable (`?-s`, `?%ADd+...` all do, but a
+    // lone `?` or `?&` does not) would never have begun it, so begin here when
+    // there is a query to judge. Idempotent; on by default (`[inspect] cgi_arg`),
+    // so the cost is one bounded scan of a short string per request that has one.
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if !CTX.is_null() && input_filter::has_query_string() {
+            maybe_begin();
+        }
+    }));
     // Layer-4 main-script exec-dir check: the primary, opcache-independent
     // control. Runs every request, BEFORE the script executes, and records a
     // 403 if the main script resolves under a denied exec dir.
@@ -505,6 +585,14 @@ unsafe fn exec_dir_decision() -> Option<(c_int, String)> {
 /// Called by PHP once per request at shutdown (NTS).
 unsafe extern "C" fn post_deactivate() -> c_int {
     let _ = catch_unwind(AssertUnwindSafe(|| clear_request_state()));
+    // §4.7 recycle facet: if this request raised a poisoning-class fatal while
+    // the facet was enforcing, the error-cb marked the worker tainted. Now that
+    // request teardown is done (PHP has rendered and, on SAPIs that flush here,
+    // delivered its 500), end the worker so it never serves another request on
+    // the state CVE-2026-109619 leaves behind. `_exit(0)` from the C shim; a
+    // no-op when nothing tainted the worker. Runs unconditionally at shutdown,
+    // so a skipped RSHUTDOWN still reaches it. MUST be last.
+    sys::howdah_oom_recycle_if_tainted();
     SUCCESS
 }
 
@@ -831,6 +919,14 @@ unsafe extern "C" fn minit(type_: c_int, module_number: c_int) -> c_int {
     // MSHUTDOWN restore, like the other installs).
     sys::howdah_install_sink_hooks(crate::sink_filter::decide);
 
+    // T6: the SSRF redirect / scheme guard is a PHP-callable internal function.
+    // It is registered HERE, at startup, and only when one of those knobs is
+    // armed (PHP 7.x interns the name of a function registered later in the
+    // request's own string table, which dangles after the request).
+    if core::howdah_ssrf_armed_mask(CTX) & (core::HOWDAH_SSRF_ARM_REDIRECT | core::HOWDAH_SSRF_ARM_SCHEME) != 0 {
+        sys::howdah_register_ssrf_guard_fn();
+    }
+
     // The include/eval hook is a STARTUP decision (config is read once, here):
     // the core's plan says whether anything armed needs it (eval on, include
     // on with an allowlist, or Layer-4 deny_exec_dirs) and which mechanism
@@ -869,9 +965,11 @@ unsafe extern "C" fn minit(type_: c_int, module_number: c_int) -> c_int {
     SUCCESS
 }
 
-/// Decide the three OOM-backstop gates, install the hook when all pass, and set
-/// the phpinfo row either way. Web SAPIs only; unpatched engine only
-/// (upstream's fix registers `memory_hard_limit_percent`); `oom_exit` on.
+/// Decide the OOM-backstop (§4.6) and recycle-facet (§4.7) gates, arm the shared
+/// `zend_error_cb` decide path, install the hook when either is armed, and set
+/// both phpinfo rows. Web SAPIs only; unpatched engine only (upstream's fix
+/// registers `memory_hard_limit_percent`). The backstop wants `oom_exit` on (the
+/// default); the recycle facet wants `recycle_on_fatal` on (off by default).
 ///
 /// # Safety
 /// Called from `minit` once per process; `CTX` is set.
@@ -885,18 +983,74 @@ unsafe fn install_oom_backstop() {
     // a global `mode = off` (or the `on_invalid_config = "off"` fallback)
     // disables the backstop like every other layer. `detect` keeps it armed.
     let exit_on = !ctx_null && core::howdah_oom_exit(CTX) != 0;
-    let armed_cfg = !ctx_null && core::howdah_oom_armed(CTX) != 0;
+    let oom_armed_cfg = !ctx_null && core::howdah_oom_armed(CTX) != 0;
+    let recycle_on = !ctx_null && core::howdah_recycle_on_fatal(CTX) != 0;
+    let recycle_armed_cfg = !ctx_null && core::howdah_recycle_armed(CTX) != 0;
+    let recycle_observe = !ctx_null && core::howdah_recycle_observe(CTX) != 0;
     let patched = sys::howdah_memory_hard_limit_percent_exists() != 0;
     let web = is_backstop_sapi(&sapi);
-    if armed_cfg && web && !patched {
+
+    // Effective, after the SAPI + patched-engine gates.
+    let oom_exit_armed = oom_armed_cfg && web && !patched;
+    let recycle_mode = if recycle_armed_cfg && web && !patched {
+        if recycle_observe { oom_filter::RECYCLE_OBSERVE } else { oom_filter::RECYCLE_ENFORCE }
+    } else {
+        oom_filter::RECYCLE_OFF
+    };
+    // On a SAPI that drops the response before `post_deactivate`, enforce takes
+    // the immediate exit (the 500 is lost either way; see §4.7 and the lab).
+    let recycle_immediate = sapi_recycle_immediate(&sapi);
+
+    oom_filter::set_arm(oom_exit_armed, recycle_mode, recycle_immediate);
+    if oom_exit_armed || recycle_mode != oom_filter::RECYCLE_OFF {
+        // Capture the log fd now (MINIT, safe context): the backstop's event
+        // line is then one write(2) with no open/allocation on the OOM or
+        // signal-handler path. -1 (syslog/stderr, or open failed) -> stderr.
+        let fd = (*ptr::addr_of!(LOG)).as_ref().and_then(|s| s.oom_fd()).unwrap_or(-1);
+        oom_filter::set_log_fd(fd);
         sys::howdah_install_oom_hook(crate::oom_filter::decide);
     }
-    DISP_OOM = Some(cstring(&oom_backstop_label(ctx_null, exit_on, armed_cfg, &sapi, web, patched)));
+    DISP_OOM = Some(cstring(&oom_backstop_label(ctx_null, exit_on, oom_armed_cfg, &sapi, web, patched)));
+    DISP_RECYCLE = Some(cstring(&recycle_facet_label(
+        ctx_null, recycle_on, recycle_armed_cfg, recycle_observe, &sapi, web, patched, recycle_immediate,
+    )));
 }
 
 /// Web SAPIs the out-of-memory backstop runs on. Off on cli / cli-server.
 fn is_backstop_sapi(name: &str) -> bool {
     matches!(name, "apache2handler" | "fpm-fcgi" | "cgi-fcgi" | "litespeed")
+}
+
+/// Whether the §4.7 recycle facet must `_exit` immediately (from the
+/// `zend_error_cb`, before PHP's bailout longjmp) instead of recycling after
+/// teardown. The spec (§4.7) keeps recycle-after only where the response is
+/// flushed to the client BEFORE `post_deactivate`; on any SAPI where it isn't,
+/// the producing request's 500 is dropped under recycle-after just as under an
+/// immediate exit, so the simpler, guaranteed-safe immediate fail-stop is used
+/// ("safety over the preserved error page").
+///
+/// Measured empirically by `lab/integration/recycle.sh`: **every tested web SAPI
+/// finalizes the response AFTER `post_deactivate`**, so none preserves the 500.
+///
+/// * **FastCGI (`fpm-fcgi`, `cgi-fcgi`):** php-fpm sends the `FCGI_END_REQUEST`
+///   record only after `php_request_shutdown` returns (in its main loop), i.e.
+///   after `zend_post_deactivate_modules` runs our `post_deactivate`. Exiting
+///   there closes the FastCGI socket before `END_REQUEST`, so nginx answers 502
+///   (lab: producing request = 502).
+/// * **Apache mod_php (`apache2handler`):** mod_php finalizes the response (the
+///   output-filter flush + connection close) only after the handler returns,
+///   which is after `post_deactivate`; exiting there resets the client
+///   connection (lab: producing request = no response / 000).
+/// * **LiteSpeed (`litespeed`):** untested here; defaulted to the immediate
+///   fail-stop (the safe direction) until the lab covers it.
+///
+/// The recycle-after code path (the tainted flag + the `post_deactivate` exit)
+/// is retained and is selected automatically for any SAPI that DOES flush before
+/// teardown; none of the supported web SAPIs do, so enforce currently resolves
+/// to an immediate exit on all of them, while still fully closing the
+/// CVE-2026-109619 window (the worker never serves the consumer request).
+fn sapi_recycle_immediate(name: &str) -> bool {
+    matches!(name, "fpm-fcgi" | "cgi-fcgi" | "apache2handler" | "litespeed")
 }
 
 /// The `OOM backstop (oom_exit)` phpinfo row: armed, or the specific reason not.
@@ -920,6 +1074,46 @@ fn oom_backstop_label(ctx_null: bool, exit_on: bool, armed_cfg: bool, sapi: &str
     format!("armed (ends the worker on out-of-memory; SAPI {sapi})")
 }
 
+/// The `Recycle after fatal (recycle_on_fatal)` phpinfo row: armed (and in which
+/// mode and delivery strategy), or the specific reason not. Off by default.
+#[allow(clippy::too_many_arguments)]
+fn recycle_facet_label(
+    ctx_null: bool,
+    recycle_on: bool,
+    armed_cfg: bool,
+    observe: bool,
+    sapi: &str,
+    web: bool,
+    patched: bool,
+    immediate: bool,
+) -> String {
+    if ctx_null {
+        return "off (core unavailable)".to_string();
+    }
+    if !recycle_on {
+        return "off (recycle_on_fatal = false)".to_string();
+    }
+    if !armed_cfg {
+        // recycle_on_fatal is on, so the only remaining config reason is a global off.
+        return "off (mode = off)".to_string();
+    }
+    if !web {
+        return format!("off (non-web SAPI: {sapi})");
+    }
+    if patched {
+        return "off (patched PHP: memory_hard_limit_percent present)".to_string();
+    }
+    if observe {
+        return format!("armed (observe: logs a would-recycle, does not exit; SAPI {sapi})");
+    }
+    let how = if immediate {
+        "immediate _exit (this SAPI drops the response before teardown)"
+    } else {
+        "recycle after teardown (the request keeps its 500)"
+    };
+    format!("armed (enforce: {how}; SAPI {sapi})")
+}
+
 /// The `Include/eval hook` phpinfo row: what the shim reported installed, and
 /// why the plan chose it (`HOWDAH_HOOK_WHY_*`). The JIT parentheticals apply
 /// to PHP 8.0+ only (there is no JIT before); "JIT disabled by PHP" is said
@@ -939,6 +1133,7 @@ fn include_hook_label(installed: c_int, why: i32, jit_on: bool) -> String {
         core::HOWDAH_HOOK_WHY_EVAL_ONLY => "auto: eval only",
         core::HOWDAH_HOOK_WHY_INCLUDE_ALLOW_PATHS => "auto: include allow_paths set",
         core::HOWDAH_HOOK_WHY_DENY_EXEC_DIRS => "auto: deny_exec_dirs set",
+        core::HOWDAH_HOOK_WHY_INCLUDE_FIREWALL => "auto: include firewall on",
         _ => "configured",
     };
     let sep = if mech.ends_with('(') { "" } else { "; " };
@@ -1017,6 +1212,9 @@ unsafe extern "C" fn minfo(_module: *mut sys::zend_module_entry) {
     }
     if let Some(o) = (*ptr::addr_of!(DISP_OOM)).as_ref() {
         row(b"OOM backstop (oom_exit)\0", o.as_bytes_with_nul());
+    }
+    if let Some(r) = (*ptr::addr_of!(DISP_RECYCLE)).as_ref() {
+        row(b"Recycle after fatal (recycle_on_fatal)\0", r.as_bytes_with_nul());
     }
     if *ptr::addr_of!(XML_DENY) {
         row(b"XML external entities\0", b"denied ([sinks.xml] external_entities)\0");

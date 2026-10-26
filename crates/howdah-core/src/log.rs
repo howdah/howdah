@@ -45,16 +45,19 @@ pub fn rule_layer(r: RuleId) -> u8 {
         | RuleId::MaxRequestHeaderBytes
         | RuleId::OutOfMemory
         | RuleId::StartupFatal
+        | RuleId::FatalRecycle
         | RuleId::PostTooLarge
         | RuleId::NestingBudget
         | RuleId::ParseMemoryEstimate => 1,
-        RuleId::SqlInjection | RuleId::PathTraversal | RuleId::CommandInjection => 2,
+        RuleId::SqlInjection | RuleId::PathTraversal | RuleId::CommandInjection | RuleId::CgiArgInjection => 2,
         RuleId::CommandExec
         | RuleId::Include
         | RuleId::Eval
         | RuleId::Unserialize
         | RuleId::Phar
         | RuleId::Ssrf
+        | RuleId::IncludeWrapper
+        | RuleId::FileOpen
         | RuleId::MailInjection
         | RuleId::PregEval
         | RuleId::CreateFunction
@@ -62,7 +65,10 @@ pub fn rule_layer(r: RuleId) -> u8 {
         | RuleId::DangerousCallback
         | RuleId::Xxe
         | RuleId::TlsVerify => 3,
-        RuleId::UploadExec | RuleId::UnexpectedBinary | RuleId::UnexpectedEgress | RuleId::PhpWrite => 4,
+        RuleId::UploadExec | RuleId::UnexpectedBinary | RuleId::UnexpectedEgress
+        | RuleId::PhpWrite
+        | RuleId::FileDelete
+        | RuleId::SecretRead => 4,
     }
 }
 
@@ -103,16 +109,21 @@ fn rule_name(r: RuleId) -> &'static str {
         RuleId::SqlInjection => "sql_injection",
         RuleId::PathTraversal => "path_traversal",
         RuleId::CommandInjection => "command_injection",
+        RuleId::CgiArgInjection => "cgi_arg_injection",
         RuleId::CommandExec => "command_exec",
         RuleId::Include => "include",
         RuleId::Eval => "eval",
         RuleId::Phar => "phar",
         RuleId::Ssrf => "ssrf",
+        RuleId::IncludeWrapper => "include_wrapper",
+        RuleId::FileOpen => "file_open",
         RuleId::Unserialize => "unserialize",
         RuleId::UploadExec => "upload_exec",
         RuleId::UnexpectedBinary => "unexpected_binary",
         RuleId::UnexpectedEgress => "unexpected_egress",
         RuleId::PhpWrite => "php_write",
+        RuleId::FileDelete => "file_delete",
+        RuleId::SecretRead => "secret_read",
         RuleId::MailInjection => "mail_injection",
         RuleId::PregEval => "preg_eval",
         RuleId::CreateFunction => "create_function",
@@ -122,6 +133,7 @@ fn rule_name(r: RuleId) -> &'static str {
         RuleId::TlsVerify => "tls_verify",
         RuleId::OutOfMemory => "out_of_memory",
         RuleId::StartupFatal => "startup_fatal",
+        RuleId::FatalRecycle => "fatal_recycle",
         RuleId::PostTooLarge => "post_too_large",
         RuleId::NestingBudget => "nesting_budget",
         RuleId::ParseMemoryEstimate => "parse_memory_estimate",
@@ -157,6 +169,97 @@ pub fn log_line(rec: &EventRecord) -> String {
     });
     // Serializing a Value with string keys cannot fail; fall back to `{}`.
     serde_json::to_string(&v).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// A fixed-capacity, allocation-free line writer, for building one event line on
+/// the stack where the allocator must not be called: the out-of-memory backstop
+/// (a genuine system OOM cannot allocate) and the recycle facet (a
+/// `max_execution_time` fatal on PHP <= 7.0 reaches `zend_error_cb` from the
+/// SIGPROF handler, where `malloc` is not async-signal-safe). Silently refuses
+/// to overflow; the caller checks `ok`.
+struct LineBuf<'a> {
+    out: &'a mut [u8],
+    pos: usize,
+    ok: bool,
+}
+
+impl<'a> LineBuf<'a> {
+    fn new(out: &'a mut [u8]) -> Self {
+        LineBuf { out, pos: 0, ok: true }
+    }
+    fn raw(&mut self, b: &[u8]) {
+        if self.ok && self.pos + b.len() <= self.out.len() {
+            self.out[self.pos..self.pos + b.len()].copy_from_slice(b);
+            self.pos += b.len();
+        } else {
+            self.ok = false;
+        }
+    }
+    /// A JSON string value's bytes: `"` and `\` are backslash-escaped and
+    /// control bytes (< 0x20) are dropped, so the result is always valid JSON.
+    fn json(&mut self, s: &str) {
+        for &b in s.as_bytes() {
+            match b {
+                b'"' => self.raw(b"\\\""),
+                b'\\' => self.raw(b"\\\\"),
+                0..=0x1f => {}
+                _ => self.raw(&[b]),
+            }
+        }
+    }
+    fn uint(&mut self, mut n: u64) {
+        if n == 0 {
+            self.raw(b"0");
+            return;
+        }
+        let mut tmp = [0u8; 20];
+        let mut i = tmp.len();
+        while n > 0 {
+            i -= 1;
+            tmp[i] = b'0' + (n % 10) as u8;
+            n /= 10;
+        }
+        self.raw(&tmp[i..]);
+    }
+}
+
+/// Write one schema-2 event line — byte-for-byte what [`log_line`] produces —
+/// into `out` with NO allocation, for the OOM / signal-context paths. Returns
+/// the byte length, or 0 if it does not fit (the caller then writes nothing).
+/// `ts`, `request_id` and `reason` are the only dynamic values and are
+/// JSON-escaped here; `client_ip`/`method`/`uri` are always empty on these
+/// paths. Keys are emitted in the sorted order `serde_json` uses.
+pub fn write_event_line(
+    out: &mut [u8],
+    rule: RuleId,
+    action: Action,
+    ts: &str,
+    request_id: &str,
+    reason: &str,
+) -> usize {
+    let mut b = LineBuf::new(out);
+    b.raw(b"{\"action\":\"");
+    b.json(action_name(action));
+    b.raw(b"\",\"client_ip\":\"\",\"layer\":");
+    b.uint(rule_layer(rule) as u64);
+    b.raw(b",\"method\":\"\",\"reason\":\"");
+    b.json(reason);
+    b.raw(b"\",\"request_id\":\"");
+    b.json(request_id);
+    b.raw(b"\",\"rule\":\"");
+    b.json(rule_name(rule));
+    b.raw(b"\",\"schema\":");
+    b.uint(SCHEMA_VERSION as u64);
+    b.raw(b",\"ts\":\"");
+    b.json(ts);
+    b.raw(b"\",\"uri\":\"\",\"version\":\"");
+    b.json(env!("CARGO_PKG_VERSION"));
+    b.raw(b"\"}");
+    if b.ok {
+        b.pos
+    } else {
+        0
+    }
 }
 
 /// Generate a request id: a process-wide monotonic counter (unique within the
@@ -205,6 +308,40 @@ mod tests {
             uri: "/upload.php?a=1\n\"x\"".into(),
             reason: "too many\nparts".into(),
         }
+    }
+
+    #[test]
+    fn write_event_line_matches_log_line() {
+        // The no-alloc builder must be byte-for-byte what serde produces, for a
+        // clean (control-free) OOM/recycle reason — the realistic shape.
+        for (rule, action, reason) in [
+            (RuleId::OutOfMemory, Action::Block, "worker ended on PHP out-of-memory at /var/www/x.php:42"),
+            (RuleId::FatalRecycle, Action::Block, "worker recycled after a poisoning-class fatal (CVE-2026-109619)"),
+            (RuleId::StartupFatal, Action::Log, "would recycle the worker"),
+        ] {
+            let r = EventRecord {
+                ts: "1792864974141".to_string(),
+                request_id: "o42".to_string(),
+                rule,
+                action,
+                client_ip: String::new(),
+                method: String::new(),
+                uri: String::new(),
+                reason: reason.to_string(),
+            };
+            let want = log_line(&r);
+            let mut buf = [0u8; 1024];
+            let n = write_event_line(&mut buf, rule, action, &r.ts, &r.request_id, reason);
+            assert_eq!(std::str::from_utf8(&buf[..n]).unwrap(), want, "{rule:?}");
+        }
+        // Escaping: a quote and backslash survive as valid JSON; control dropped.
+        let mut buf = [0u8; 256];
+        let n = write_event_line(&mut buf, RuleId::OutOfMemory, Action::Block, "1", "id", "a\"b\\c\x01d");
+        let v: serde_json::Value = serde_json::from_str(std::str::from_utf8(&buf[..n]).unwrap()).unwrap();
+        assert_eq!(v["reason"], "a\"b\\cd");
+        // Overflow: a buffer too small writes nothing (0), never a partial line.
+        let mut small = [0u8; 8];
+        assert_eq!(write_event_line(&mut small, RuleId::OutOfMemory, Action::Block, "1", "i", "r"), 0);
     }
 
     #[test]
@@ -283,16 +420,21 @@ mod tests {
             (RuleId::SqlInjection, 2),
             (RuleId::PathTraversal, 2),
             (RuleId::CommandInjection, 2),
+            (RuleId::CgiArgInjection, 2),
             (RuleId::CommandExec, 3),
             (RuleId::Include, 3),
             (RuleId::Eval, 3),
             (RuleId::Unserialize, 3),
             (RuleId::Phar, 3),
             (RuleId::Ssrf, 3),
+            (RuleId::IncludeWrapper, 3),
+            (RuleId::FileOpen, 3),
             (RuleId::UploadExec, 4),
             (RuleId::UnexpectedBinary, 4),
             (RuleId::UnexpectedEgress, 4),
             (RuleId::PhpWrite, 4),
+            (RuleId::FileDelete, 4),
+            (RuleId::SecretRead, 4),
             (RuleId::MailInjection, 3),
             (RuleId::PregEval, 3),
             (RuleId::CreateFunction, 3),
@@ -302,11 +444,12 @@ mod tests {
             (RuleId::TlsVerify, 3),
             (RuleId::OutOfMemory, 1),
             (RuleId::StartupFatal, 1),
+            (RuleId::FatalRecycle, 1),
             (RuleId::PostTooLarge, 1),
             (RuleId::NestingBudget, 1),
             (RuleId::ParseMemoryEstimate, 1),
         ];
-        assert_eq!(rule_catalog().len(), 40);
+        assert_eq!(rule_catalog().len(), 46);
         assert_eq!(want.len(), rule_catalog().len(), "layer table and rule_catalog differ");
         for r in rule_catalog() {
             let w = want.iter().find(|(x, _)| x == r).unwrap_or_else(|| panic!("{r:?} has no layer in this table")).1;

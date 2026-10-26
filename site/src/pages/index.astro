@@ -14,9 +14,9 @@ const shortVersion = VERSION.split('.').slice(0, 2).join('.');
 // Non-active layers are dimmed so the page never implies they are in 1.0.
 const layers = [
   { n: 1, name: 'Request parsing', covers: 'Upload/multipart floods (the PHP2Shell shape), input-variable floods and deeply nested arrays — refused while PHP parses the request. Too many or oversized headers are logged, and refused in block mode.', status: 'active' },
-  { n: 2, name: 'Request inspection', covers: 'Content inspection of decoded GET/POST/cookie/path values for SQL injection, path traversal and command/code injection. It detects and logs; it does not block by default.', status: 'released' },
-  { n: 3, name: 'Runtime checks', covers: 'Sink hardening: guards command execution, unserialize, include and eval with a flat allowlist policy, plus phar:// and an SSRF egress guard (both off by default, new in 1.3). It detects and logs; it does not block by default.', status: 'released' },
-  { n: 4, name: 'After a breach', covers: 'Watches PHP run from upload directories, unexpected binaries, unexpected outbound hosts and .php writes. It detects and logs; it does not block by default, and does nothing until you set its lists.', status: 'released' },
+  { n: 2, name: 'Request inspection', covers: 'Content inspection of decoded GET/POST/cookie/path values for SQL injection, path traversal and command/code injection. These detect and log by default; the php-cgi argument-injection check blocks by default.', status: 'released' },
+  { n: 3, name: 'Runtime checks', covers: 'Sink hardening: guards command execution, unserialize, include and eval with a flat allowlist policy, plus phar:// and an SSRF egress guard (both off by default, new in 1.3). Most sinks detect and log by default; XXE and the include/open wrapper firewall block by default.', status: 'released' },
+  { n: 4, name: 'After a breach', covers: 'Watches PHP run from upload directories, unexpected binaries, unexpected outbound hosts and .php writes. Its list-driven facets detect and log and need their lists set; the delete and upload-write file guards block by default.', status: 'released' },
 ];
 
 // Comparison facts compiled Oct 2026 from each project's own documentation.
@@ -229,7 +229,7 @@ const aptLines = [
   <section id="inspection">
     <div class="wrap">
       <h2>Layer 2 — what Howdah inspects <span class="pill ok">1.1 · log-only</span></h2>
-      <p>Layer 1 limits the <em>shape</em> of a request. Layer 2 looks at the <em>content</em> of decoded request values: GET query parameters, POST fields, cookies and the URL path, through the same request hook Layer 1 uses. <strong>It detects and logs; it does not block by default.</strong></p>
+      <p>Layer 1 limits the <em>shape</em> of a request. Layer 2 looks at the <em>content</em> of decoded request values: GET query parameters, POST fields, cookies and the URL path, through the same request hook Layer 1 uses. <strong>The content classes detect and log by default; the php-cgi argument-injection check blocks by default.</strong></p>
       <div class="cols two" style="margin-top:1.5rem">
         <div>
           <h3>Three classes of pattern</h3>
@@ -254,13 +254,13 @@ const aptLines = [
   <section id="sinks" class="alt">
     <div class="wrap">
       <h2>Layer 3 — the sinks Howdah guards <span class="pill ok">since 1.2 · log-only</span></h2>
-      <p>Layer 2 looks at request values. Layer 3 looks at what the application does with them: it guards dangerous PHP functions, called <em>sinks</em>, with a flat allowlist policy in the style of Snuffleupagus. Howdah <strong>guards six core sinks (three of them off by default), plus seven legacy sinks added in 1.5. It detects and logs; it does not block by default.</strong> This is sink hardening, not XSS or output inspection.</p>
+      <p>Layer 2 looks at request values. Layer 3 looks at what the application does with them: it guards dangerous PHP functions, called <em>sinks</em>, with a flat allowlist policy in the style of Snuffleupagus. Howdah <strong>guards six core sinks (three of them off by default), the include/open wrapper firewall, and seven legacy sinks added in 1.5. Most detect and log by default; XXE and the wrapper firewall block by default.</strong> This is sink hardening, not XSS or output inspection.</p>
       <div class="cols two" style="margin-top:1.5rem">
         <div>
           <h3>The six core sinks</h3>
           <FitTable caption="Layer 3 core sinks" cols={['Sink', 'Functions', 'Default']} rows={coreSinks} />
           <p class="legend">Known limitation: <code>proc_open</code> with an array command (PHP 7.4+) is not inspected.</p>
-          <p class="legend"><strong>Seven legacy sinks (new in 1.5), all log-first:</strong> <code>mail_injection</code>, <code>preg_eval</code> (PHP 5.x), <code>create_function</code> and <code>assert_string</code> (5.x/7.x), <code>dangerous_callback</code>, <code>xxe</code> (with <code>[sinks.xml] external_entities</code>), and <code>tls_verify</code> (detect-only). See the <a href="/docs/configuration/#layer-3-sinks">configuration reference</a> for each one's PHP-version applicability and defaults.</p>
+          <p class="legend"><strong>Seven legacy sinks (new in 1.5), log-first except <code>xxe</code>:</strong> <code>mail_injection</code>, <code>preg_eval</code> (PHP 5.x), <code>create_function</code> and <code>assert_string</code> (5.x/7.x), <code>dangerous_callback</code>, <code>xxe</code> (enforced by default, but only when a dangerous libxml flag meets an external entity; with <code>[sinks.xml] external_entities</code>), and <code>tls_verify</code> (detect-only). See the <a href="/docs/configuration/#layer-3-sinks">configuration reference</a> for each one's PHP-version applicability and defaults.</p>
           <h3 style="margin-top:1.5rem">Coverage by PHP version</h3>
           <div class="vmatrix">
             <table>
@@ -293,7 +293,7 @@ const aptLines = [
   <section id="behavior">
     <div class="wrap">
       <h2>Layer 4 — what Howdah watches after a breach <span class="pill ok">1.4 · log-only</span></h2>
-      <p>Layers 1 to 3 try to stop the attack. Layer 4 assumes something got through, such as a webshell uploaded into a writable directory, and watches what PHP then does. <strong>It detects and logs; it does not block by default, and it does nothing until you set its lists.</strong> Events name the script that made the call, so a finding points at the webshell even when a legitimate script <code>require</code>d it.</p>
+      <p>Layers 1 to 3 try to stop the attack. Layer 4 assumes something got through, such as a webshell uploaded into a writable directory, and watches what PHP then does. <strong>Its four list-driven facets detect and log and do nothing until you set their lists; the delete and upload-write file guards block by default.</strong> Events name the script that made the call, so a finding points at the webshell even when a legitimate script <code>require</code>d it.</p>
       <div class="cols two" style="margin-top:1.5rem">
         <div>
           <h3>Four things it watches</h3>

@@ -82,6 +82,13 @@ is not inspected.
   (DNS rebinding, redirects, `curl_multi_*` and others bypass it), several
   outbound primitives (`copy`, `file`, `readfile`, `SoapClient`...) are not
   hooked, and it adds a DNS lookup with no timeout per distinct outbound host.
+  Three more opt-in `[sinks.ssrf]` knobs, each off by default, narrow those
+  gaps where PHP allows it: `rebind` (pin the validated address into curl and
+  judge the connected address / stream peer), `scheme` (only http/https may
+  leave: curl `gopher://`, `dict://`, `file://` are refused) and `redirect` (a curl
+  `3xx` to an internal target is not followed). Their residual gaps
+  (`file_get_contents` has no peer to check, `curl_multi_*`, PHP 5.4 cannot pin)
+  are listed in [docs/config.md](docs/config.md).
 - Verified on PHP 5.4, 5.6, 7.4, 8.3 and 8.5; other minors build and are
   expected to work but are not independently verified.
 
@@ -91,10 +98,10 @@ See the `[sinks]` section of [docs/config.md](docs/config.md) and the
 ## Layer 4: after a breach (1.4)
 
 Layer 4 watches what PHP does once something has gone wrong, such as a webshell
-dropped in an upload directory. It **detects and logs; it does not block by
-default**, and it does nothing until you fill in its lists. It has its own
-`behavior.mode` (default `detect`), independent of the global `howdah.mode`.
-Four facets, each driven by its own setting:
+dropped in an upload directory. Its four list-driven facets **detect and log;
+they do not block by default**, and do nothing until you fill in their lists.
+They share `behavior.mode` (default `detect`), independent of the global
+`howdah.mode`. Each facet has its own setting:
 
 - **Execution origin** (`deny_exec_dirs`): PHP run from a denied directory,
   either as the requested script or `require`d by another script.
@@ -102,8 +109,20 @@ Four facets, each driven by its own setting:
   `proc_open`/`shell_exec`/`passthru` to a program not on the list.
 - **Expected egress** (`allow_egress_hosts`): an outbound connection to a host
   not on the list.
-- **`.php` writes** (`deny_php_writes`): writing a PHP file into a denied
-  directory, or from a script that lives in one.
+- **Executable and handler-config writes** (`deny_php_writes`): writing a
+  `.php`/`.phtml`/`.pht`/`.php3`-`.php8`/`.phar`/`.inc` file, or an
+  `.htaccess`, `.user.ini` or `web.config`, into a denied directory, or from a
+  script that lives in one.
+
+Three **file guards** carry their own mode and, unlike the facets above, two of
+them are **enforced by default**: the **delete guard** (`delete_guard`) refuses
+`unlink`/`rmdir`/`rename`-away of `wp-config.php`, `.env`, private keys, or a
+`..` traversal into a system directory (deleting `wp-config.php` resets
+WordPress to its installer); the **upload-write guard** (`upload_write`) refuses
+`move_uploaded_file` into a PHP-executable or handler-config name (the
+`.htaccess`/`.user.ini` re-enable trick). The **secret-read guard**
+(`secret_read`) is opt-in: off by default, `detect` observes reads of `.env`,
+`wp-config.php` and key files. See [docs/config.md](docs/config.md).
 
 `behavior.observe = true` logs what would have been flagged as `proposed` lines
 to help you build the lists; it never blocks and never edits config.

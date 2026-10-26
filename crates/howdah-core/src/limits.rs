@@ -411,16 +411,51 @@ pub enum RuleId {
     SqlInjection,
     PathTraversal,
     CommandInjection,
+    /// The query string has the shape of php-cgi command-line arguments (CVE-2012-1823,
+    /// CVE-2024-4577). Standard, Layer 2; unlike the other Layer 2 classes it blocks by
+    /// default (`[inspect] cgi_arg`), because an `=`-less option-shaped query is not
+    /// something an application sends. See `crate::inspect::cgi_arg_injection`.
+    CgiArgInjection,
     CommandExec,
     Include,
     Eval,
     Unserialize,
     Phar,
     Ssrf,
+    /// `include`/`require` of a non-`file` stream wrapper (`php://filter` chains,
+    /// `php://input`, `data:`, `expect://`, remote `http(s)`/`ftp(s)`), or of a
+    /// poisonable local target (`/proc/self/environ`, the session dir, the
+    /// error_log): LFI->RCE, RFI and log/session/proc poisoning. Standard,
+    /// Layer 3; enforced by default (`[sinks.include] wrapper`/`poison`), like
+    /// the `xxe`/`cgi_arg` rules. See `crate::sinks::wrapper`.
+    IncludeWrapper,
+    /// A file-open sink (`fopen`/`file_get_contents`/`readfile`) called with a
+    /// dangerous wrapper (`php://filter`, `data:`, `expect://`) or a poisonable
+    /// local target. Standard, Layer 3; enforced by default alongside
+    /// `IncludeWrapper`. See `crate::sinks::wrapper`.
+    FileOpen,
     UploadExec,
     UnexpectedBinary,
     UnexpectedEgress,
+    /// An executable or handler-config file written to disk: a PHP-executable
+    /// extension (`.php`, `.phtml`, `.pht`, `.php3`..`.php8`, `.phar`, `.inc`) or
+    /// the handler-config set (`.htaccess`, `.user.ini`, `web.config`), the
+    /// durable upload bypass. Standard, Layer 4. Two tiers: the scoped
+    /// `deny_php_writes` facet (any write sink, under `deny_exec_dirs`) and the
+    /// enforced-by-default `[behavior] upload_write` guard (`move_uploaded_file`
+    /// into such a name). See `crate::behavior`.
     PhpWrite,
+    /// A sensitive file deleted (or renamed away): `wp-config.php`, `.env`,
+    /// `.env.*`, private-key material, or a `..` traversal that lands in a
+    /// system directory. Delete-to-takeover (WordPress falls back to its
+    /// installer without `wp-config.php`). Standard, Layer 4; enforced by default
+    /// (`[behavior] delete_guard`). See `crate::behavior`.
+    FileDelete,
+    /// A read of secret material (`.env`, `wp-config.php`, private keys, system
+    /// account files, or a `..` traversal into a system directory). Standard,
+    /// Layer 4; OFF by default (`[behavior] secret_read`, opt-in detect/block)
+    /// because apps legitimately read their own config. See `crate::behavior`.
+    SecretRead,
     MailInjection,
     PregEval,
     CreateFunction,
@@ -449,6 +484,13 @@ pub enum RuleId {
     /// nesting levels + buffered non-file field bytes) passed the ceiling derived
     /// from the request's live `memory_limit` (§4.5). Critical, Layer 1.
     ParseMemoryEstimate,
+    /// A poisoning-class bailout fatal (an uncaught `Error`, a parse/compile
+    /// error, a failed `require`, `max_execution_time`) struck during the script
+    /// on an unpatched engine, and the recycle facet (§4.7) ended the worker
+    /// after the request delivered its 500 — before it could serve another and
+    /// hit the CVE-2026-109619 consumer window. Critical, Layer 1. Reported
+    /// directly by the glue's `zend_error_cb` hook, never by a limit check.
+    FatalRecycle,
 }
 
 impl RuleId {
@@ -465,16 +507,21 @@ impl RuleId {
             | RuleId::SqlInjection
             | RuleId::PathTraversal
             | RuleId::CommandInjection
+            | RuleId::CgiArgInjection
             | RuleId::CommandExec
             | RuleId::Include
             | RuleId::Eval
             | RuleId::Unserialize
             | RuleId::Phar
             | RuleId::Ssrf
+            | RuleId::IncludeWrapper
+            | RuleId::FileOpen
             | RuleId::UploadExec
             | RuleId::UnexpectedBinary
             | RuleId::UnexpectedEgress
             | RuleId::PhpWrite
+            | RuleId::FileDelete
+            | RuleId::SecretRead
             | RuleId::MailInjection
             | RuleId::PregEval
             | RuleId::CreateFunction
@@ -493,7 +540,7 @@ impl RuleId {
 /// or miss one it accepts. `rule_catalog_covers_every_variant` fails to
 /// compile when a variant is added here but not to the list.
 pub fn rule_catalog() -> &'static [RuleId] {
-    const ALL: [RuleId; 40] = [
+    const ALL: [RuleId; 46] = [
         RuleId::MaxParts,
         RuleId::MaxFiles,
         RuleId::MaxPartHeaders,
@@ -512,16 +559,21 @@ pub fn rule_catalog() -> &'static [RuleId] {
         RuleId::SqlInjection,
         RuleId::PathTraversal,
         RuleId::CommandInjection,
+        RuleId::CgiArgInjection,
         RuleId::CommandExec,
         RuleId::Include,
         RuleId::Eval,
         RuleId::Unserialize,
         RuleId::Phar,
         RuleId::Ssrf,
+        RuleId::IncludeWrapper,
+        RuleId::FileOpen,
         RuleId::UploadExec,
         RuleId::UnexpectedBinary,
         RuleId::UnexpectedEgress,
         RuleId::PhpWrite,
+        RuleId::FileDelete,
+        RuleId::SecretRead,
         RuleId::MailInjection,
         RuleId::PregEval,
         RuleId::CreateFunction,
@@ -534,6 +586,7 @@ pub fn rule_catalog() -> &'static [RuleId] {
         RuleId::PostTooLarge,
         RuleId::NestingBudget,
         RuleId::ParseMemoryEstimate,
+        RuleId::FatalRecycle,
     ];
     &ALL
 }
@@ -773,16 +826,21 @@ mod tests {
                 | RuleId::SqlInjection
                 | RuleId::PathTraversal
                 | RuleId::CommandInjection
+                | RuleId::CgiArgInjection
                 | RuleId::CommandExec
                 | RuleId::Include
                 | RuleId::Eval
                 | RuleId::Unserialize
                 | RuleId::Phar
                 | RuleId::Ssrf
+                | RuleId::IncludeWrapper
+                | RuleId::FileOpen
                 | RuleId::UploadExec
                 | RuleId::UnexpectedBinary
                 | RuleId::UnexpectedEgress
                 | RuleId::PhpWrite
+                | RuleId::FileDelete
+                | RuleId::SecretRead
                 | RuleId::MailInjection
                 | RuleId::PregEval
                 | RuleId::CreateFunction
@@ -794,10 +852,11 @@ mod tests {
                 | RuleId::StartupFatal
                 | RuleId::PostTooLarge
                 | RuleId::NestingBudget
-                | RuleId::ParseMemoryEstimate => {}
+                | RuleId::ParseMemoryEstimate
+                | RuleId::FatalRecycle => {}
             }
         }
-        assert_eq!(rule_catalog().len(), 40);
+        assert_eq!(rule_catalog().len(), 46);
         let mut sorted = all.to_vec();
         sorted.sort();
         sorted.dedup();
@@ -813,14 +872,24 @@ mod tests {
         assert_eq!(RuleId::SqlInjection.severity(), Severity::Standard);
         assert_eq!(RuleId::PathTraversal.severity(), Severity::Standard);
         assert_eq!(RuleId::CommandInjection.severity(), Severity::Standard);
+        assert_eq!(RuleId::CgiArgInjection.severity(), Severity::Standard);
+        assert_eq!(serde_json::to_string(&RuleId::CgiArgInjection).unwrap(), "\"cgi_arg_injection\"");
         assert_eq!(RuleId::CommandExec.severity(), Severity::Standard);
         assert_eq!(RuleId::Include.severity(), Severity::Standard);
         assert_eq!(RuleId::Eval.severity(), Severity::Standard);
         assert_eq!(RuleId::Unserialize.severity(), Severity::Standard);
+        assert_eq!(RuleId::IncludeWrapper.severity(), Severity::Standard);
+        assert_eq!(RuleId::FileOpen.severity(), Severity::Standard);
+        assert_eq!(serde_json::to_string(&RuleId::IncludeWrapper).unwrap(), "\"include_wrapper\"");
+        assert_eq!(serde_json::to_string(&RuleId::FileOpen).unwrap(), "\"file_open\"");
         assert_eq!(RuleId::UploadExec.severity(), Severity::Standard);
         assert_eq!(RuleId::UnexpectedBinary.severity(), Severity::Standard);
         assert_eq!(RuleId::UnexpectedEgress.severity(), Severity::Standard);
         assert_eq!(RuleId::PhpWrite.severity(), Severity::Standard);
+        assert_eq!(RuleId::FileDelete.severity(), Severity::Standard);
+        assert_eq!(RuleId::SecretRead.severity(), Severity::Standard);
+        assert_eq!(serde_json::to_string(&RuleId::FileDelete).unwrap(), "\"file_delete\"");
+        assert_eq!(serde_json::to_string(&RuleId::SecretRead).unwrap(), "\"secret_read\"");
         for r in [
             RuleId::MailInjection,
             RuleId::PregEval,

@@ -155,6 +155,9 @@ test('load refuses any non-default [behavior] key: the form cannot write Layer 4
     '[behavior]\ndeny_exec_dirs = ["/var/www/uploads"]',
     '[behavior]\nallow_exec_binaries = ["/usr/bin/gs"]',
     '[behavior]\nallow_egress_hosts = ["api.example.com"]',
+    '[behavior]\ndelete_guard = "off"',
+    '[behavior]\nupload_write = "detect"',
+    '[behavior]\nsecret_read = "detect"',
   ]) {
     const v = validate(toml);
     assert.equal(v.ok, true, toml + ': ' + v.error);
@@ -162,6 +165,10 @@ test('load refuses any non-default [behavior] key: the form cannot write Layer 4
   }
   // Restating the defaults (as every shipped profile does) loses nothing.
   assert.ok(E.loadFromCanonical(validate('[behavior]\nmode = "detect"\n').config, catalog).state);
+  // ... including the T5 guard defaults (delete/upload-write block, secret-read off).
+  assert.ok(E.loadFromCanonical(
+    validate('[behavior]\ndelete_guard = "block"\nupload_write = "block"\nsecret_read = "off"\n').config, catalog).state);
+  assert.ok(E.loadFromCanonical(validate('').config, catalog).state);
   assert.deepEqual(E.loadFromCanonical(validate('[log]\npath = "/x"\n[behavior]\nobserve = true').config, catalog),
     { unsupported: ['log', 'behavior'] });
 });
@@ -209,6 +216,50 @@ test('1.3 phar and ssrf sinks round-trip through the core', () => {
   assert.deepEqual(v.config.sinks.phar.allow_paths, ['/var/www/vendor']);
   assert.equal(v.config.sinks.ssrf.mode, 'block');
   assert.deepEqual(v.config.sinks.ssrf.allow_hosts, ['10.0.0.0/8', 'api.internal', '192.168.1.5']);
+});
+
+test('T6 ssrf hardening knobs emit only when set and round-trip through the core', () => {
+  // Shipped defaults emit nothing for them.
+  const base = E.emitToml(fresh(), {});
+  assert.ok(!/rebind|redirect|scheme/.test(base), base);
+  const s = fresh();
+  s['sinks.ssrf.rebind'] = 'block';
+  s['sinks.ssrf.scheme'] = 'detect';
+  s['sinks.ssrf.redirect'] = 'block';
+  const toml = E.emitToml(s, {});
+  assert.ok(toml.includes('[sinks.ssrf]'), toml);
+  const v = validate(toml);
+  assert.equal(v.ok, true, v.error);
+  assert.equal(v.config.sinks.ssrf.rebind, 'block');
+  assert.equal(v.config.sinks.ssrf.scheme, 'detect');
+  assert.equal(v.config.sinks.ssrf.redirect, 'block');
+  // They do not arm the range guard.
+  assert.equal(v.config.sinks.ssrf.mode, 'off');
+  const loaded = E.loadFromCanonical(v.config, catalog);
+  assert.equal(loaded.state['sinks.ssrf.rebind'], 'block');
+  assert.equal(loaded.state['sinks.ssrf.scheme'], 'detect');
+});
+
+test('xxe is on by default and its mode round-trips through the core', () => {
+  // Shipped defaults emit nothing for [sinks.xml]: the core default (block) is the posture.
+  assert.ok(!E.emitToml(fresh(), {}).includes('sinks.xml'));
+  assert.equal(validate('').config.sinks.xml.mode, 'block');
+  for (const m of ['detect', 'off']) {
+    const s = fresh();
+    s['sinks.xml.mode'] = m;
+    const toml = E.emitToml(s, {});
+    assert.ok(toml.includes('[sinks.xml]'), toml);
+    const v = validate(toml);
+    assert.equal(v.ok, true, v.error);
+    assert.equal(v.config.sinks.xml.mode, m);
+  }
+  // external_entities is independent of the mode.
+  const s = fresh();
+  s['sinks.xml.external_entities'] = 'deny';
+  const v = validate(E.emitToml(s, {}));
+  assert.equal(v.ok, true, v.error);
+  assert.equal(v.config.sinks.xml.external_entities, 'deny');
+  assert.equal(v.config.sinks.xml.mode, 'block');
 });
 
 test('a wildcard ssrf host is rejected by the core, not by JavaScript', () => {

@@ -245,25 +245,35 @@ that never reads `$_SERVER` on a JIT-globals SAPI leaves the header limit
 unexercised. This is why the CLI header scenarios are SKIP (not asserted) and the
 header rules are validated on fpm + Apache.
 
-## CVE-2012-1823 (php-cgi argument injection) — out of reach; NOT protected
+## CVE-2012-1823 / CVE-2024-4577 (php-cgi argument injection) — the code-execution shape is refused at RINIT; the `-s` source-disclosure shape is not
 
-Howdah does **not** protect against CVE-2012-1823, and no rule for it ships. Lab
-testing proved the defense **cannot** work from inside a PHP extension:
+Howdah's `cgi_arg_injection` check (Layer 2, on and blocking by default) refuses
+a request whose query string has the php-cgi argument-injection shape (no literal
+`=`, a standalone php-cgi option). Whether that is in time depends on *when*
+php-cgi acts on the shape:
 
-- For every argv-injection query shape (no literal `=`, leading `-`), php-cgi
-  consumes the query string as command-line arguments **during its own SAPI
-  startup, before any PHP extension, module, or request-startup (RINIT) hook
-  loads** — so any check from inside an extension is **never reached** (confirmed
-  by instrumentation: RINIT fired for a benign `?x=1` query but not for `?-s`).
-- The only php-cgi in the lab images, PHP **5.4.16**, is itself **already
-  patched** against the CVE, so no vulnerable build was available to test a fire
-  path against in any case.
+- **Code execution (`-d auto_prepend_file=php://input`, `allow_url_include`, …):
+  refused.** php-cgi parses the argv-shaped query string during its own SAPI
+  startup, before any extension or RINIT hook loads, so Howdah cannot undo that
+  parse — but the injected directives only take effect when the script and the
+  `auto_prepend_file` compile and run, which is *after* RINIT. Howdah's Layer 2
+  check fires at the end of RINIT and refuses the request first, so the payload
+  never runs. Lab-verified (`lab/integration/cgi_arg.sh`) on the real php-cgi
+  SAPI across PHP 5.4–8.5: a clean 403, the app marker unwritten, the worker
+  alive, the event carrying no query string.
+- **Source / info disclosure (`?-s`, `?-i`, …): not caught under php-cgi.**
+  php-cgi handles these entirely within its own startup, before RINIT fires
+  (confirmed by instrumentation: RINIT ran for a benign `?x=1` query but not for
+  `?-s`). The rule matches the shape, but under php-cgi it is never reached for
+  this vector; under other SAPIs (fpm, Apache, CLI) a `?-s` query is anomalous
+  but harmless, because those SAPIs do not interpret argv as options.
 
-Because a configurable rule that can never fire is a false promise (Howdah's
-no-overclaim rule), the earlier RINIT virtual patch was **removed**. CVE-2012-1823
-belongs with CVE-2019-11043: both are triggered before any extension code runs
-and are outside what Howdah, as a PHP extension, can defend. Cover this CVE at
-the web server / front proxy, or run a patched php-cgi.
+The only php-cgi in the lab images, PHP **5.4.16**, is itself **already patched**
+against the CVE, so the fire path exercises Howdah's own rule, not a vulnerable
+engine. The check is best-effort shape matching (narrow by design to keep benign
+`=`-less queries clean). CVE-2019-11043 (php-fpm) runs entirely before extension
+code and is **not** covered. Keep a web-server or front-proxy rule, or a patched
+php-cgi, as defence in depth.
 
 ## Regression caught by the matrix: CLI-server block-state leak (fixed)
 
@@ -336,6 +346,7 @@ is deliberately **not** part of `matrix-results.tsv` / `coverage.json`.
 | `sql_injection` | a quote followed by a comment marker or an `or`/`and` comparison (`' OR 1=1 --`); `UNION SELECT`; a `;` followed by a recognisable stacked statement (`DROP TABLE`, `DELETE FROM`, `INSERT INTO`, `UPDATE x SET`, `SELECT` of `*`/a number/`@@var`/columns `FROM`) |
 | `path_traversal` | `../` or `..\` sequences; sensitive targets such as `/etc/passwd`, `/proc/self/`, `php://`, `file://`, `boot.ini`; percent-encoded forms in path values |
 | `command_injection` | `$(...)`; a closed backtick pair that starts with a common binary; `;`, `\|`, `&&`, `\|\|` followed by a common binary (`cat`, `id`, `curl`, ...); a PHP exec sink name immediately followed by `(` (`system(`, `eval(`) |
+| `cgi_arg_injection` | the raw query string, not a decoded value: no literal `=` and a php-cgi option word (`-s`, `-n`, `-d`/`-c`/`-z` with an argument, `--define`, ...), a php-cgi directive name (`auto_prepend_file`, `allow_url_include`, ...), or a soft-hyphen byte (`0xAD`) standing in for the dash (CVE-2012-1823, CVE-2024-4577). Enforcing by default; see `docs/config.md` |
 
 ## Signal quality: benign-corpus tuning
 
@@ -367,3 +378,242 @@ version-independent pure Rust in `howdah-core`, with no PHP calls inside them,
 so matching behavior should be identical across PHP 5.4-8.5 (an inference, not a per-version lab result). The version-dependent
 part is only the input-filter hook wiring, which was exercised on the two
 versions above.
+
+# Howdah Layer-3 XXE flag-awareness coverage data (after 1.6.1)
+
+The `xxe` rule (the `xml` legacy sink) is **on and enforcing by default**. It
+acts only when a dangerous libxml parse flag (`LIBXML_NOENT` 2, `DTDLOAD` 4,
+`DTDATTR` 8, `DTDVALID` 16) is passed together with an XML string that
+declares an external entity or an entity-expansion bomb. It removes the flags and
+lets the parse continue (logged as `block`). See `docs/config.md` (Legacy-era
+sinks) for behaviour and limits.
+
+## What it looks for
+
+| shape | needs a dangerous flag | action in the default mode |
+|---|---|---|
+| `<!ENTITY ... SYSTEM\|PUBLIC ...>` in the internal subset (general or parameter entity) | yes | strip the flags, log `block` |
+| internal entities whose nested references expand past 1 MiB (billion laughs and variants, any declaration order) | yes | strip the flags, log `block` |
+| a document the scan cannot read: UTF-7 or EBCDIC text, a UTF-16/32 encoding declared on an ASCII-looking document, a prolog still open after 1 MiB | yes | strip the flags, log `block` |
+| a bare `<!DOCTYPE>`, internal entities of ordinary size | n/a | silent |
+| a bare external DTD reference (`SYSTEM`/`PUBLIC` on the DOCTYPE: SAML, SVG, XHTML, RSS, plist, ODF) | only `DTDLOAD`/`DTDATTR` fetch it | log `log` only, never blocked |
+
+## Lab: `lab/integration/legacy_sinks.sh` (no config, shipped `howdah.mode = detect`)
+
+Per PHP minor: (1) a control run **without Howdah** proves the vector is live
+(an external entity parsed with `LIBXML_NOENT` leaks a canary file through every
+entry point present); (2) the same parse through Howdah, with no configuration,
+has the flag removed on every entry point (`simplexml_load_string`,
+`new SimpleXMLElement`, `DOMDocument::loadXML`, `XMLReader::XML`, and on 8.4+
+`Dom\XMLDocument::createFromString`), reads nothing, and writes one `xxe` /
+`block` line that never contains the document or the path; (3) a benign corpus
+(14 documents: plain, SOAP, SAML, Office XML, bare DOCTYPE, DOCTYPE with
+declarations, nested internal entities, character-reference entities, XHTML, SVG,
+RSS, plist, ODF, a local-DTD document with an internal entity) is parsed through
+every entry point under 10 flag sets, with and without Howdah: zero blocks and
+byte-identical results; (4) 15 disguised payloads (a `>` or `[` inside the DOCTYPE's system literal, a parameter entity whose literal declares the entity with plain, decimal, hex and split-keyword character references, UTF-7, UTF-32 BE and LE, UTF-16 with and without BOM, EBCDIC, a megabyte of comment or whitespace before the DOCTYPE, newlines inside the declaration) must each leak without Howdah where libxml still reads them (14 of 15 are live; libxml rejects the UTF-32LE-with-BOM one) and leave nothing readable with it.
+
+| PHP | libxml2 | control leaks (no Howdah) | stripped by Howdah | disguised payloads stopped / live | benign parses | benign blocks | results identical |
+|---|---|---|---|---|---|---|---|
+| 5.4 | 2.9.1 | 2/2 | 2/2 | 14/14 | 280 | 0 | yes |
+| 5.6 | 2.9.4 | 4/4 | 4/4 | 14/14 | 560 | 0 | yes |
+| 7.0 | 2.9.4 | 4/4 | 4/4 | 14/14 | 560 | 0 | yes |
+| 7.1 | 2.9.4 | 4/4 | 4/4 | 14/14 | 560 | 0 | yes |
+| 7.2 | 2.9.4 | 4/4 | 4/4 | 14/14 | 560 | 0 | yes |
+| 7.3 | 2.9.10 | 4/4 | 4/4 | 14/14 | 560 | 0 | yes |
+| 7.4 | 2.9.10 | 4/4 | 4/4 | 14/14 | 560 | 0 | yes |
+| 8.0 | 2.9.10 | 4/4 | 4/4 | 14/14 | 560 | 0 | yes |
+| 8.1 | 2.9.14 | 4/4 | 4/4 | 14/14 | 560 | 0 | yes |
+| 8.2 | 2.9.14 | 4/4 | 4/4 | 14/14 | 560 | 0 | yes |
+| 8.3 | 2.9.14 | 4/4 | 4/4 | 14/14 | 560 | 0 | yes |
+| 8.4 | 2.9.14 | 5/5 | 5/5 | 14/14 | 560 | 0 | yes |
+| 8.5 | 2.9.14 | 5/5 | 5/5 | 14/14 | 560 | 0 | yes |
+
+The 5.4 image has no DOM or XMLReader extension, so only the two SimpleXML entry
+points exist there (and 5.5 has no lab image). Of the 560 benign parses per
+minor, 96 are the detect-only `log` line for a bare external DTD parsed with
+`DTDLOAD`/`DTDATTR` (XHTML, SVG, RSS, plist, ODF); none is a block.
+
+## Caveats, stated plainly
+
+- **libxml2 before 2.9.0** resolves external entities whatever the flags say, so
+  on such an engine the rule cannot rely on the flags: it checks the document
+  alone and refuses the call (it cannot strip). No lab image carries a libxml2
+  that old (5.4 has 2.9.1), so that branch is covered by unit tests of the
+  decision (`cargo test -p howdah-core`) and by a check that the version probe
+  reads the real libxml2 version on 5.4, 7.4, 8.3 and 8.5, not by an end-to-end
+  run.
+- **PHP 8's `$reader->XML()`** (an instance call to the static `XMLReader::XML`)
+  runs a private non-static copy of the function that a swap of the class's
+  function-table entry never sees; the hook patches that copy too. The lab pins
+  both call forms.
+- **By-path loaders are not hooked** (`simplexml_load_file`, `DOMDocument::load`,
+  `XMLReader::open`, `SimpleXMLElement` with `$dataIsURL`): Howdah cannot see
+  their content. The lab asserts they raise no event, so the gap is documented,
+  not accidental. `[sinks.xml] external_entities = "deny"` covers them.
+- A quadratic blow-up (one large entity referenced many times in the body, past
+  the scanned prologue) and `LIBXML_XINCLUDE` file reads are not matched.
+
+# Layer 4 file guards (delete, dangerous write, secret read)
+
+Lab: `lab/integration/file_guard.sh` (driver) and `file_guard_container.sh` (one
+`howdah-dev-php<ver>` image per run: builds the real extension, harmless-shape
+fixtures only, no payload). No config beyond the shipped global `detect` unless a
+check says otherwise. 33 checks per version; run on PHP 5.4.16, 5.6.40, 7.0.33,
+7.4.33, 8.0.30, 8.1.34, 8.3.36 and 8.5.12RC1, all PASS with identical counts.
+
+| php | delete guard (refused \| benign performed \| benign false blocks) | upload-write | scoped write | secret read (detect: logged \| benign \| false positives) |
+|---|---|---|---|---|
+| 5.4.16 | 12 \| 18 \| 0 | 12 \| 10 \| 0 | 52 \| 32 \| 0 | 16 \| 32 \| 0 |
+| 5.6.40 | 12 \| 18 \| 0 | 12 \| 10 \| 0 | 52 \| 32 \| 0 | 16 \| 32 \| 0 |
+| 7.0.33 | 12 \| 18 \| 0 | 12 \| 10 \| 0 | 52 \| 32 \| 0 | 16 \| 32 \| 0 |
+| 7.4.33 | 12 \| 18 \| 0 | 12 \| 10 \| 0 | 52 \| 32 \| 0 | 16 \| 32 \| 0 |
+| 8.0.30 | 12 \| 18 \| 0 | 12 \| 10 \| 0 | 52 \| 32 \| 0 | 16 \| 32 \| 0 |
+| 8.1.34 | 12 \| 18 \| 0 | 12 \| 10 \| 0 | 52 \| 32 \| 0 | 16 \| 32 \| 0 |
+| 8.3.36 | 12 \| 18 \| 0 | 12 \| 10 \| 0 | 52 \| 32 \| 0 | 16 \| 32 \| 0 |
+| 8.5.12RC1 | 12 \| 18 \| 0 | 12 \| 10 \| 0 | 52 \| 32 \| 0 | 16 \| 32 \| 0 |
+
+What each column counts:
+
+- **delete guard** (on by default): 12 refusals (`unlink` of `wp-config.php`,
+  `.env`, `.env.production`, `id_rsa`, `privkey.pem`, `server.key`; an
+  `uploads/../` traversal to `wp-config.php`; `call_user_func('unlink', ...)`;
+  `rename` of `wp-config.php` and of `.env` away; `unlink` and `rmdir` through
+  nine `..` segments into `/etc`). Each returned `false`, the target survived,
+  the script continued, the line was `file_delete`/`block`/layer 4 carrying the
+  calling `file:line` and neither the file name nor the directory. 18 benign
+  deletes/renames all happened with zero events.
+- **upload-write** (on by default, no config): 12 real multipart uploads whose
+  destination is `.php`, `.phtml`, `.pht`, `.php3`, `.php4`, `.php5`, `.php7`,
+  `.PHAR`, `.Php`, `.htaccess`, `.user.ini` or `web.config` were refused
+  (`MOVE[false]`, nothing created, `php_write`/`block` at `up.php:4`, built-in
+  server alive for the next request). 10 benign uploads (`.jpg .txt .json .log
+  .zip .pdf .csv .inc .png .css`) moved into place with zero events.
+- **scoped write** (`deny_php_writes` + `deny_exec_dirs`, opt-in): 13 names
+  (`.php`, `.PHP`, `.phtml`, `.pht`, `.php3`/`4`/`5`/`7`, `.phar`, `.inc`,
+  `.htaccess`, `.user.ini`, `web.config`) across `file_put_contents`,
+  `fopen('w')`, `copy` and `rename` = 52 refusals; 8 benign names x 4 sinks = 32
+  writes performed; `.htaccess` outside the denied directory stays allowed. With
+  the tier off the same plain writes of `.php`/`.htaccess`/`.user.ini` are not
+  touched (zero events), which is why only `move_uploaded_file` is enforced
+  without configuration.
+- **secret read** (`secret_read = "detect"`): 4 functions x 4 secrets = 16 reads
+  logged as `secret_read`/`log` with the origin `file:line`, data still returned,
+  zero blocks. 32 benign reads (own config, data, CSS, `cacert.pem`, `id_rsa.pub`,
+  `.env.example`, an internal `..`, `/etc/hosts`) raised zero events. With the
+  default config (guard off) the same reads raise nothing. `"block"` refuses all
+  four functions; `observe = true` downgrades it to a proposal.
+
+Control checks in the same run: `delete_guard`/`upload_write` = `detect` log and
+proceed, `off`, a global `off`, `[behavior] mode = "off"` and `observe = true` each
+behave as documented, and an `[[exceptions]]` entry on `behavior.file_delete`
+scoped to a script lets only that script through. The log never contained a
+fixture marker. Every changed C file was also compiled with
+`gcc -fsyntax-only -Wall -Wextra -Werror` against each of the eight images'
+`php-config --includes` (clean).
+
+Not covered by this lab: php-fpm and Apache (same function-table swaps as the
+Layer 3 sinks), PHP 8.2 and 8.4 (not run), Windows. Known misses are listed in `docs/config.md` under `[behavior]` "Known
+limitations".
+
+# SSRF hardening (rebind, scheme, redirect)
+
+Lab: `lab/integration/sinks_fastfollow.sh` (driver) and
+`sinks_fastfollow_container.sh` (one `howdah-dev-php<ver>` image per run: builds the
+real extension, harmless fixtures only, no payload). The T6 section starts a
+loopback target (`php -S`: `hit.php` records that the "internal service" was
+reached, `redir.php` answers with a chosen `Location` and status), a DNS server
+(`lab/integration/corpus/rebind_dns.php`: the first A answer for a name under
+`.rebind.test` is the documentation address `203.0.113.7`, every later one is
+`127.0.0.1`) and a self-signed HTTPS target
+(`lab/integration/corpus/https_server.php`). Run on PHP 5.4.16, 5.6.40, 7.0.33,
+7.4.33, 8.0.30, 8.1.34, 8.3.36 and 8.5.12RC1, all PASS. The knobs are off unless a
+check arms them; every check first proves its baseline (facet off, or the range
+guard alone) really lets the attack through, and a negative check ("the internal
+service was not reached") runs against a server that was proven alive just before.
+
+| php | libcurl | curl pin | scheme refusals | redirects refused | rebind refusals | gaps pinned | T6 checks |
+|---|---|---|---|---|---|---|---|
+| 5.4.16 | 7.29.0 | none (after the fact) | 13 | 10 (308 not run) | 8 | 4 | 23 |
+| 5.6.40 | 7.52.1 | one address (< 7.59) | 13 | 11 | 9 | 4 | 24 |
+| 7.0.33 | 7.52.1 | one address (< 7.59) | 13 | 11 | 9 | 4 | 24 |
+| 7.4.33 | 7.74.0 | address list (>= 7.59) | 13 | 11 | 9 | 4 | 24 |
+| 8.0.30 | 7.74.0 | address list (>= 7.59) | 13 | 11 | 9 | 4 | 24 |
+| 8.1.34 | 8.14.1 | address list (>= 7.59) | 13 | 11 | 9 | 4 | 24 |
+| 8.3.36 | 8.14.1 | address list (>= 7.59) | 13 | 11 | 9 | 4 | 24 |
+| 8.5.12RC1 | 8.14.1 | address list (>= 7.59) | 13 | 11 | 9 | 4 | 24 |
+
+The pin is asserted to work on every PHP 5.5+ row; whether it pins one address or the
+list follows the libcurl version found at run time (7.59.0 is the boundary) and is
+not itself asserted.
+
+What each column counts:
+
+- **scheme refusals** (`scheme = "block"`): 7 curl URLs (`file://`, `gopher://` with a
+  smuggled `GET /hit.php`, `dict://`, `ldap://`, `tftp://`, `ftp://`, and the
+  `ftp.`-host protocol guess), 3 redirect hops (a 302 whose `Location` is
+  `gopher://`, `dict://` or `file://`) and 3 stream calls (`ftp://` through
+  `file_get_contents`, `fopen`, `get_headers`). Each returned `false`, the script
+  continued, the local file was not read, the smuggled request did not reach the
+  server, and the log line carried the scheme category only. With the facet off all
+  of them work (the lab proves the `file://` read, the redirect to loopback, and
+  whether this libcurl still speaks `gopher://`); `scheme = "detect"` logs and the
+  read still happens; `http://`, `HTTP://`, scheme-less `host:port`,
+  `curl_init(url)`, `curl_setopt_array`, `file://`/`php://memory`/`php://temp` on
+  the stream functions are untouched with zero events.
+- **redirects refused** (`redirect = "block"`): 302/301/303/307/308 to
+  `http://127.0.0.1/hit.php`, a scheme-relative `//127.0.0.1/..`, `169.254.169.254`
+  (class `metadata`, aborted at once, not after a connect timeout), `[::1]`, decimal
+  `2130706433` and `10.0.0.5`, plus a hop to the name `localhost` (resolved to
+  loopback). Each: `false`, `curl_errno` 23, script continued, `hit.flag` never
+  written. PHP 5.4's built-in test server wedges on a 308 (no reason phrase in 5.4)
+  and libcurl 7.29 predates 308, so that one case is skipped there. Untouched:
+  relative redirect, redirect to an `allow_hosts` host, a `Location` on a `201`,
+  `FOLLOWLOCATION` off, and `detect` (logs, follows).
+- **rebind refusals** (`rebind = "block"`): a name that resolves to loopback at call
+  time (refused before the connect, no `mode` needed); a rebinding name through curl
+  (**PHP >= 5.5: pinned**, libcurl connected to the decoy and failed with
+  `CURLE_COULDNT_CONNECT`/`OPERATION_TIMEDOUT`, the server was not reached, the
+  attempt is silent; **PHP 5.4: judged after the transfer**, response discarded,
+  logged `curl-connect` class `loopback`); `fsockopen`, `pfsockopen` and
+  `stream_socket_client` to a rebinding name (peer judged, stream closed, no fatal);
+  `fopen('http://rebinding/...')` (stream refused after the open; the request had
+  already reached the server, recorded as such); the peer of an `ssl://`
+  `stream_socket_client` (closed unless the host is in `allow_hosts`); a script's own
+  `CURLOPT_RESOLVE` to loopback (PHP >= 5.5); and a final redirect hop to a
+  rebinding name. With only the call-time guard all of those are served: the TOCTOU
+  is real in this lab, not assumed. `detect` serves and logs.
+- **benign** (every knob in `block`, `allow_hosts = ["localhost", "127.0.0.1"]`):
+  curl by name and by literal, a relative redirect and a redirect to the allowed
+  host, `file_get_contents`, `fopen`, `fsockopen`, `get_headers`, and HTTPS
+  (`curl` with the pin in place, `file_get_contents`) to the self-signed target,
+  all served with zero events.
+- **gaps pinned** (4): `file_get_contents` against a rebinding name is served under
+  `rebind = "block"` (no peer to inspect); a redirect hop to a rebinding name passes
+  `redirect` alone and is only discarded after the fact by `rebind`; a script-set
+  `CURLOPT_HEADERFUNCTION` with `FOLLOWLOCATION` is followed; `curl_multi_*` is not
+  hooked. Each is asserted as the current behavior, so the lab fails if one closes
+  without the docs being updated.
+- Footprint: with every knob off no extra function exists; with `redirect` or
+  `scheme` armed `howdah_curl_header_guard` is registered (first request), nothing
+  else is added.
+
+The C is also compiled with `gcc -fsyntax-only -Wall -Wextra -Werror` against
+each of the eight images' `php-config --includes` (clean). The Layer 3 fast-follow
+checks that already existed (phar, ssrf range, PHP 5.x include/eval, the misfire
+guard) pass unchanged on all eight versions; the misfire guard (C7) now switches
+the 1.5 `create_function` / `assert` sinks off, because they log every call by
+default and it was already failing on PHP 5.4 and 5.6 before this change.
+
+Every T6 scenario's exit status is checked (a signal or a fatal fails the run), and
+ten runs with the header guard registered must all exit 0: registering that
+function at request time instead of at startup aborted the PHP 7.0 worker about
+half the time at shutdown, which the exit-code check now catches.
+
+The neighbouring labs that exercise the same trampolines pass unchanged against the
+final code: `wrapper.sh` (8 versions, 28 checks each), `file_guard.sh` (8 versions,
+33 checks), `behavior.sh`, `legacy_sinks.sh` and `sinks.sh` (PHP 5.4, 7.4, 8.5).
+
+Not covered by this lab: php-fpm and Apache (same function-table swaps as the other
+Layer 3 sinks), a libcurl built without `CURLINFO_PRIMARY_IP`, `CURLOPT_PROXY`,
+Alpine/musl, and PHP 8.2/8.4 (not run).

@@ -11,6 +11,14 @@
  * that ran out of memory gets a dropped connection (nginx 502). Every other
  * error chains to the prior callback unchanged.
  *
+ * The recycle facet (§4.7) reuses this same handler: when the decide callback
+ * returns 2 (a poisoning-class bailout fatal during the script, with the facet
+ * enforcing), instead of exiting now we mark the worker tainted and chain, so
+ * PHP renders and delivers its own 500; the ext's post_deactivate then calls
+ * howdah_oom_recycle_if_tainted(), which `_exit()`s the worker once teardown is
+ * done — before it can serve another request on the state the fatal left behind
+ * (the CVE-2026-109619 consumer window).
+ *
  * `zend_error_cb`'s signature differs across generations:
  *   5.x : (int, const char *file, uint     line, const char *format, va_list)
  *   7.x : (int, const char *file, uint32_t line, const char *format, va_list)
@@ -36,13 +44,25 @@
  * recorded in Howdah's own log. */
 #define HOWDAH_OOM_EXIT_CODE 0
 
-/* Rust decide callback: returns 1 to end the worker (after logging), 0 to chain
- * to the prior zend_error_cb. `file`/`file_len`/`line` are the error's location
- * (the script path and line, for the event's reason). See
- * crates/howdah-ext/src/oom_filter.rs. */
+/* Rust decide callback. Return codes (see crates/howdah-ext/src/oom_filter.rs):
+ *   0  chain to the prior zend_error_cb (let PHP handle the error)
+ *   1  end the worker NOW with _exit() (the §4.6 backstop: OOM any phase, or a
+ *      fatal during request startup) — before PHP longjmps
+ *   2  recycle-after (§4.7): a poisoning-class script fatal — mark the worker
+ *      tainted and chain, so PHP renders its 500; the ext's post_deactivate
+ *      then _exit()s the worker once this request's teardown is done.
+ * `file`/`file_len`/`line` are the error's location (the script path and line,
+ * for the event's reason). */
 typedef int (*howdah_oom_decide_t)(int type, const char *msg, size_t msg_len, int during_startup,
                                    const char *file, size_t file_len, uint32_t line);
 static howdah_oom_decide_t howdah_oom_decide = NULL;
+
+/* Set to 1 when the decide callback returns 2 (a §4.7 recycle-class fatal while
+ * the facet is enforcing). Read-and-acted-on by howdah_oom_recycle_if_tainted()
+ * at the ext's post_deactivate. Per-worker (process-static), NTS. Never cleared:
+ * once tainted, the worker _exit()s at the end of the request, so it never
+ * serves another. */
+static int howdah_oom_tainted = 0;
 
 /* Per-generation argument types for zend_error_cb. */
 #if PHP_VERSION_ID >= 80100
@@ -96,24 +116,36 @@ static int howdah_oom_during_startup(void) {
 
 #if HOWDAH_MSG_IS_ZSTR
 static void howdah_oom_error_cb(int type, HOWDAH_FILE_T file, HOWDAH_LINE_T line, zend_string *message) {
-    if (howdah_oom_decide && message &&
-        howdah_oom_decide(type, ZSTR_VAL(message), ZSTR_LEN(message), howdah_oom_during_startup(),
-                          HOWDAH_FILE_PTR(file), HOWDAH_FILE_LEN(file), (uint32_t) line)) {
-        _exit(HOWDAH_OOM_EXIT_CODE);
+    if (howdah_oom_decide && message) {
+        int r = howdah_oom_decide(type, ZSTR_VAL(message), ZSTR_LEN(message), howdah_oom_during_startup(),
+                                  HOWDAH_FILE_PTR(file), HOWDAH_FILE_LEN(file), (uint32_t) line);
+        if (r == 1) _exit(HOWDAH_OOM_EXIT_CODE);
+        if (r == 2) howdah_oom_tainted = 1;
     }
     if (howdah_oom_prev_error_cb) howdah_oom_prev_error_cb(type, file, line, message);
 }
 #else
 static void howdah_oom_error_cb(int type, HOWDAH_FILE_T file, HOWDAH_LINE_T line, const char *format, va_list args) {
     /* Check the FORMAT prefix; do NOT consume args — forward it untouched. */
-    if (howdah_oom_decide &&
-        howdah_oom_decide(type, format, format ? strlen(format) : 0, howdah_oom_during_startup(),
-                          HOWDAH_FILE_PTR(file), HOWDAH_FILE_LEN(file), (uint32_t) line)) {
-        _exit(HOWDAH_OOM_EXIT_CODE);
+    if (howdah_oom_decide) {
+        int r = howdah_oom_decide(type, format, format ? strlen(format) : 0, howdah_oom_during_startup(),
+                                  HOWDAH_FILE_PTR(file), HOWDAH_FILE_LEN(file), (uint32_t) line);
+        if (r == 1) _exit(HOWDAH_OOM_EXIT_CODE);
+        if (r == 2) howdah_oom_tainted = 1;
     }
     if (howdah_oom_prev_error_cb) howdah_oom_prev_error_cb(type, file, line, format, args);
 }
 #endif
+
+/* §4.7: _exit(0) the worker iff a recycle-class fatal tainted it this request.
+ * Called from the ext's post_deactivate AFTER request teardown, so PHP has
+ * rendered (and, on SAPIs that flush before teardown, delivered) its 500. The
+ * master forks a fresh worker for the next request — which is the one that would
+ * otherwise reach the CVE-2026-109619 consumer. Allocates nothing. A no-op when
+ * the worker was not tainted. */
+void howdah_oom_recycle_if_tainted(void) {
+    if (howdah_oom_tainted) _exit(HOWDAH_OOM_EXIT_CODE);
+}
 
 /* Save the current zend_error_cb and install Howdah's. Call once at MINIT, and
  * only when the backstop is armed (web SAPI, unpatched engine, oom_exit on).
@@ -139,6 +171,7 @@ void howdah_uninstall_oom_hook(void) {
     }
     howdah_oom_prev_error_cb = NULL;
     howdah_oom_decide = NULL;
+    howdah_oom_tainted = 0;
 }
 
 /* 1 iff the `memory_hard_limit_percent` ini directive is registered. Upstream's

@@ -69,22 +69,29 @@
     // §4.1-4.5 request limits (Layer 1): gap A reuses max_part_headers above;
     // gap B is a body (multipart) rule, gap C and the §4.5 estimate are input.
     post_too_large: 'multipart', nesting_budget: 'input', parse_memory_estimate: 'input',
-    sql_injection: 'inspect', path_traversal: 'inspect', command_injection: 'inspect',
+    sql_injection: 'inspect', path_traversal: 'inspect', command_injection: 'inspect', cgi_arg_injection: 'inspect',
     command_exec: 'sinks', include: 'sinks', eval: 'sinks', unserialize: 'sinks',
     phar: 'sinks', ssrf: 'sinks',
+    // T4 include/open wrapper-scheme firewall (governed by [sinks.include]
+    // wrapper/poison, not by a per-rule [rules] mode).
+    include_wrapper: 'sinks', file_open: 'sinks',
     upload_exec: 'behavior', unexpected_binary: 'behavior', unexpected_egress: 'behavior', php_write: 'behavior',
+    // T5 file guards (governed by [behavior] delete_guard / secret_read / upload_write).
+    file_delete: 'behavior', secret_read: 'behavior',
     // 1.5 legacy-era sinks: modes come from [sinks.<sink>] mode, as for the others.
     mail_injection: 'sinks', preg_eval: 'sinks', create_function: 'sinks', assert_string: 'sinks',
     dangerous_callback: 'sinks', xxe: 'sinks', tls_verify: 'sinks',
     // The out-of-memory backstop's rules (Layer 1): grouped under "Other", and
     // marked noop below — they are governed by the top-level oom_exit key, not
     // by a per-rule [rules] mode.
-    out_of_memory: 'other', startup_fatal: 'other'
+    out_of_memory: 'other', startup_fatal: 'other',
+    // The §4.7 recycle facet's rule (Layer 1): governed by recycle_on_fatal.
+    fatal_recycle: 'other'
   };
 
   // Rules shown in the [rules] section for completeness but not controllable
   // there: the out-of-memory backstop is turned on and off by oom_exit.
-  var BACKSTOP_RULES = { out_of_memory: 1, startup_fatal: 1 };
+  var BACKSTOP_RULES = { out_of_memory: 1, startup_fatal: 1, fatal_recycle: 1 };
   var OOM_NOOP_NOTE = 'Accepted by the core but has no effect here: the out-of-memory backstop is turned on and off by the top-level oom_exit key, not by a per-rule mode.';
 
   var RULE_NOTES = {
@@ -94,6 +101,8 @@
   // The core accepts every rule name under [rules], but the extension reads
   // Layer 2 overrides only from [inspect.rule_modes] and sink modes only from
   // [sinks.<sink>] mode; a [rules] entry for those names has no effect.
+  var RECYCLE_NOOP_NOTE = 'Accepted by the core but has no effect here: the recycle-after-fatal facet is turned on and off by the top-level recycle_on_fatal key, not by a per-rule mode.';
+  var CGI_ARG_NOOP_NOTE = 'Accepted by the core but has no effect: the extension does not read [rules] for this name. Set [inspect] cgi_arg (block by default, detect to log only, off to disable) instead.';
   var NOOP_NOTE = 'Accepted by the core but has no effect: the extension does not read [rules] for this name. Use the Layer 2 per-class override ([inspect.rule_modes]), the sink’s own mode ([sinks.<sink>] mode), or the Layer 4 [behavior] mode instead.';
 
   // The [rules] keys are built from the core's catalog at runtime so the form
@@ -106,7 +115,7 @@
       return {
         key: r.name, type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
         severity: r.severity, layer: layer, noop: noop,
-        note: backstop ? OOM_NOOP_NOTE : (noop ? NOOP_NOTE : (RULE_NOTES[r.severity] || ''))
+        note: r.name === 'fatal_recycle' ? RECYCLE_NOOP_NOTE : backstop ? OOM_NOOP_NOTE : (r.name === 'cgi_arg_injection' ? CGI_ARG_NOOP_NOTE : (noop ? NOOP_NOTE : (RULE_NOTES[r.severity] || '')))
       };
     });
   }
@@ -118,6 +127,8 @@
     { key: 'sqli', type: 'bool', default: true, note: 'Look for SQL-injection shapes.' },
     { key: 'traversal', type: 'bool', default: true, note: 'Look for path-traversal shapes.' },
     { key: 'cmdi', type: 'bool', default: true, note: 'Look for command-injection shapes.' },
+    { key: 'cgi_arg', type: 'enum', values: MODES, default: 'block',
+      note: 'php-cgi argument injection (CVE-2012-1823, CVE-2024-4577): a query string with no literal = that parses as php-cgi options, such as ?-d+allow_url_include%3d1+-d+auto_prepend_file%3dphp://input or the soft-hyphen form ?%ADd+... Unlike the three classes above this one is enforced by default: block refuses the request before the script runs, whatever the global mode and inspect.mode. detect logs only; off disables it. The query string is never logged.' },
     { key: 'limits.max_value_bytes', type: 'int', min: 1, default: 16384, note: 'Scan at most this many bytes of one value.' },
     { key: 'limits.max_total_bytes', type: 'int', min: 1, default: 2097152, note: 'Per-request aggregate scan budget; values past it are not scanned.' },
     { key: 'limits.max_values', type: 'int', min: 1, default: 2000, note: 'Per-request value count budget; values past it are not scanned.' },
@@ -131,7 +142,7 @@
     { key: 'mode', type: 'enum', values: MODES, default: 'detect',
       note: 'Independent of the global mode: a global block does not arm any sink. detect logs only (the default). Set a sink’s allowlist before arming block.' },
     { key: 'hook', type: 'enum', values: ['auto', 'opcode', 'compile'], default: 'auto',
-      note: 'How include/require/eval are guarded on PHP 7.0+. auto (default): compile when only eval needs the hook, so a default install keeps OPcache JIT on; opcode when include has allow_paths or [behavior] deny_exec_dirs is set. opcode: a user opcode handler, full coverage (warm-opcache includes too) but PHP turns the JIT off while it is installed. compile: the compile-pointer swap PHP 5.x uses; JIT stays on, eval is fully covered, an include served from a warm opcache is not re-inspected. Nothing is installed when eval and include are off and deny_exec_dirs is unset.' },
+      note: 'How include/require/eval are guarded on PHP 7.0+. auto (default): compile when the include firewall (on by default) and/or eval need the hook, so a default install keeps OPcache JIT on; opcode only when include has allow_paths or [behavior] deny_exec_dirs is set (where a warm-opcache include matters). opcode: a user opcode handler, full coverage (warm-opcache includes too) but PHP turns the JIT off while it is installed. compile: the compile-pointer swap PHP 5.x uses; JIT stays on, eval is fully covered, an include served from a warm opcache is not re-inspected (attack includes of a wrapper/poison target are dynamic cache-misses, so compile still sees them). Nothing is installed only when the include firewall, eval and include allow_paths are all off and deny_exec_dirs is unset.' },
     { key: 'command_exec.mode', type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
       note: 'system, exec, shell_exec, passthru, popen, proc_open. Unset inherits sinks.mode. Only a string first argument is inspected (proc_open with an array command is not).' },
     { key: 'command_exec.allow', type: 'list', default: [],
@@ -140,9 +151,13 @@
       note: 'Off by default (object unserialize is high-volume). detect logs classes not in allow_classes; block refuses them. Fill allow_classes from the detect log first.' },
     { key: 'unserialize.allow_classes', type: 'list', default: [], note: 'Class names that may be unserialized, one per line.' },
     { key: 'include.mode', type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
-      note: 'include/require. Active on PHP 5.x and 7.0+; on 5.x an include served from a warm opcache is not re-inspected. Inert until allow_paths is set.' },
+      note: 'The include/require ALLOWLIST check. Active on PHP 5.x and 7.0+; on 5.x an include served from a warm opcache is not re-inspected. Inert until allow_paths is set. The wrapper/poison firewall below is separate and on by default.' },
     { key: 'include.allow_paths', type: 'list', default: [],
       note: 'Directories include/require may load from, one per line. Lexical prefixes: a symlink under an allowed directory is not resolved.' },
+    { key: 'include.wrapper', type: 'enum', values: MODES, default: 'block',
+      note: 'The include/open wrapper-scheme firewall (T4): refuses a non-file stream wrapper. For include/require every non-file, non-phar wrapper (php://filter chains, php://input, data:, expect://, remote http(s)/ftp(s), zip://…); for fopen/file_get_contents/readfile only the near-zero-benign-use wrappers (php://filter, data:, expect://) — php://input/temp/memory and remote fetches stay allowed (SSRF guards remote). ENFORCED by default (block), independent of the global mode and sinks.mode, like xxe. detect logs; off disables. Only a scheme label is logged, never the target.' },
+    { key: 'include.poison', type: 'enum', values: MODES, default: 'block',
+      note: 'The poisonable-local-target firewall (T4): refuses include/open of /proc/self/environ and other /proc/*, a file under the runtime session.save_path, or PHP’s configured error_log — the classic LFI->RCE log/session/proc poisoning sinks. ENFORCED by default (block), independent of the global mode and sinks.mode. detect logs; off disables. Only a category label is logged, never the target.' },
     { key: 'eval.mode', type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
       note: 'eval. Active on PHP 5.x and 7.0+ (fully covered on both). There is no allowlist: in detect every eval() logs; in block every eval() is skipped.' },
     // 1.3: both opt-in (off); only an explicit mode here arms them.
@@ -154,6 +169,15 @@
       note: 'Outbound requests to hosts not in allow_hosts (1.3). Off by default; a global or [sinks] block does not arm it.' },
     { key: 'ssrf.allow_hosts', type: 'list', default: [],
       note: 'One per line: a hostname (exact, case-insensitive; no wildcards), a literal IP, or a CIDR such as 10.0.0.0/8 or fd00::/8 (full address required, so 10/8 is rejected). The core rejects wildcards and out-of-range prefixes.' },
+    // T6 SSRF hardening: three independent opt-in knobs beside the range guard
+    // (default off, like the facet). Each is off|detect|block, independent of
+    // ssrf.mode, [sinks] mode and the global mode (a global off still silences them).
+    { key: 'ssrf.rebind', type: 'enum', values: MODES, default: 'off',
+      note: 'Resolve-at-connect (anti-DNS-rebinding). The range check resolves the host when the call is made and PHP/libcurl resolve it again at connect, so a name can pass as public and connect as internal. block pins the validated IPv4 address into curl with CURLOPT_RESOLVE (PHP 5.5+, libcurl 7.21.3+), then judges the address curl really connected to (CURLINFO_PRIMARY_IP) and the connected peer of fsockopen / pfsockopen / stream_socket_client / fopen(url), discarding the response / closing the stream if it is internal. detect only logs. PHP 5.4 has no CURLOPT_RESOLVE: curl is verified after the fact only. file_get_contents and get_headers have no peer to inspect. A proxy disables it. Off by default; independent of ssrf.mode.' },
+    { key: 'ssrf.scheme', type: 'enum', values: MODES, default: 'off',
+      note: 'Egress-scheme denial. curl may speak only http and https: gopher://, dict://, file://, ldap://, tftp://, ftp:// and the rest are refused (also libcurl’s ftp./dict./ldap. host-prefix protocol guess), and in block curl gets CURLOPT_PROTOCOLS=HTTP|HTTPS so libcurl itself refuses what a URL-parsing difference lets through, redirect hops included. The stream functions (file_get_contents, fopen, get_headers) refuse the remote wrappers (ftp, ftps, ssh2.*, ...); local wrappers (file, php, data, glob, zip) and phar are left alone. Only the scheme category is logged. Off by default; independent of ssrf.mode.' },
+    { key: 'ssrf.redirect', type: 'enum', values: MODES, default: 'off',
+      note: 'curl internal-redirect guard. When CURLOPT_FOLLOWLOCATION is on, a 3xx whose Location is an internal target (metadata 169.254.169.254, loopback, RFC1918, ...) or a non-http(s) scheme is not followed: the transfer aborts before libcurl acts on the header. Skipped when the script set its own CURLOPT_HEADERFUNCTION, and curl_multi_* is not covered. Stream-wrapper (file_get_contents / fopen) redirects are not re-checked. Off by default; independent of ssrf.mode.' },
     // 1.5 legacy-era sinks. Each mode inherits sinks.mode (detect = log only).
     { key: 'mail.mode', type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
       note: 'mail(): a 5th argument carrying any sendmail option other than -f<address> / -r<address> (so -oi, -t and -O… are expected detect noise), or a 4th-argument header string with a line break not followed by a header (body injection). block refuses the call (returns false). Rule name: mail_injection. All PHP versions.' },
@@ -165,8 +189,8 @@
       note: 'assert() with a string argument, which PHP 5.x/7.x evaluate as code (needs assert.active / zend.assertions on). 8.0 stopped evaluating strings, so nothing is installed there. Rule name: assert_string. block returns false.' },
     { key: 'callback.mode', type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
       note: 'A string callback naming system, exec, passthru, shell_exec, popen, proc_open, pcntl_exec, assert or create_function, passed to call_user_func(_array), array_map, array_filter, array_walk, usort/uasort/uksort, preg_replace_callback, register_shutdown_function or ob_start. Only the callback name is logged. Rule name: dangerous_callback. block returns false. Honest gap: on PHP 7.0+ a literal call_user_func(...) in the global namespace is compiled to its own opcode and is not seen (namespaced or dynamic calls are); PHP 5.x sees every form.' },
-    { key: 'xml.mode', type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
-      note: 'An XML string passed to simplexml_load_string or DOMDocument::loadXML that declares an external entity (refused in block) or references an external DTD (the XHTML/SVG doctypes: detect only, never blocked, so an SVG sanitizer on DOMDocument::loadXML keeps working but logs xxe lines). The attempt shape; whether PHP fetches anything depends on LIBXML_NOENT / DTDLOAD. Not simplexml_load_file, DOMDocument::load, new SimpleXMLElement, XMLReader or ext/xml. Rule name: xxe.' },
+    { key: 'xml.mode', type: 'enum', values: MODES, default: 'block',
+      note: 'XXE (rule name xxe). Unlike the sinks above this one is ENFORCED by default, whatever the global mode and sinks.mode (only its own mode, sinks.enabled and a global off change that). It acts only when a dangerous libxml flag (LIBXML_NOENT, DTDLOAD, DTDATTR or DTDVALID) is passed together with an XML string that declares an external entity (an ENTITY with SYSTEM or PUBLIC) or a nested-entity expansion bomb, to simplexml_load_string, new SimpleXMLElement, DOMDocument::loadXML, XMLReader::XML or, on PHP 8.4+, Dom\\XMLDocument::createFromString. block removes the dangerous flags and lets the parse continue (logged as block); it refuses the call only on libxml before 2.9, which ignores the flags. A bare DOCTYPE or an external DTD reference (SAML, SVG, XHTML, Office XML) is never blocked; with DTDLOAD or DTDATTR a bare external DTD is logged. detect logs only; off disables it. Not simplexml_load_file, DOMDocument::load, XMLReader::open or ext/xml; xml.external_entities covers loading by path. The document is never logged.' },
     { key: 'xml.external_entities', type: 'enum', values: ['allow', 'deny'], default: 'allow',
       note: 'deny turns libxml’s external entity loader off for every request (ext/libxml’s php_libxml_disable_entity_loader, resolved at run time). Side effect on every PHP version: loading a document BY PATH through libxml (DOMDocument::load, simplexml_load_file, XMLReader::open) also fails; load the file yourself and parse the string. PHP 8 already needs LIBXML_NOENT to substitute external entities. No event is written for this toggle.' },
     { key: 'tls.mode', type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',

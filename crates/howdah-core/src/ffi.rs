@@ -31,7 +31,10 @@ use crate::limits::{LimitHit, RuleId, Severity};
 use crate::log::{log_line, new_request_id, EventRecord};
 use crate::multipart::{Event, MultipartState};
 use crate::rules::{decide, Action};
-use crate::sinks::ssrf::{classify_ip, decode_literal_ip, host_allowed, parse_host, HostForm, IpRepr};
+use crate::sinks::ssrf::{
+    classify_ip, decode_literal_ip, denied_scheme, host_allowed, parse_host, resolve_pin_entry, HostForm, IpRepr,
+    SchemeCtx,
+};
 use crate::sinks::{command_allowed, include_allowed, legacy, phar_allowed, unserialize_classes, SinkId};
 
 /// Action codes returned over the ABI. Pinned: Allow=0, Log=1, Block=2.
@@ -69,6 +72,11 @@ pub const HOWDAH_SRC_GET: i32 = 0;
 pub const HOWDAH_SRC_POST: i32 = 1;
 pub const HOWDAH_SRC_COOKIE: i32 = 2;
 pub const HOWDAH_SRC_PATH: i32 = 3;
+/// The raw query string as the SAPI reports it (`request_info.query_string`),
+/// for the php-cgi argument-injection rule only. Not budgeted: the scan is one
+/// bounded pass and a flood of ordinary variables must not be able to exhaust a
+/// budget ahead of it.
+pub const HOWDAH_SRC_QUERY: i32 = 4;
 
 // Layer-3 sink ids (howdah_sink_check).
 pub const HOWDAH_SINK_COMMAND_EXEC: i32 = 0;
@@ -86,11 +94,74 @@ pub const HOWDAH_SINK_CALLBACK: i32 = 10;
 pub const HOWDAH_SINK_XML: i32 = 11;
 pub const HOWDAH_SINK_TLS: i32 = 12;
 
+// SSRF event kinds (`howdah_sink_check_ssrf_kind_at`). RANGE is the original
+// check-time reserved-range verdict; REBIND judges the address a connection
+// uses (resolve-at-connect); REDIRECT judges a curl 3xx hop's target.
+pub const HOWDAH_SSRF_KIND_RANGE: i32 = 0;
+pub const HOWDAH_SSRF_KIND_REBIND: i32 = 1;
+pub const HOWDAH_SSRF_KIND_REDIRECT: i32 = 2;
+
+// SSRF armed-mask bits (`howdah_ssrf_armed_mask`): which parts of the SSRF
+// hardening the C shim must run. PIN / PROTOCOLS say the rebind / scheme knob is
+// `block`, i.e. the shim may also change the curl handle's options; in `detect`
+// the shim only observes.
+pub const HOWDAH_SSRF_ARM_RANGE: i32 = 1;
+pub const HOWDAH_SSRF_ARM_REBIND: i32 = 2;
+pub const HOWDAH_SSRF_ARM_SCHEME: i32 = 4;
+pub const HOWDAH_SSRF_ARM_REDIRECT: i32 = 8;
+pub const HOWDAH_SSRF_ARM_PIN: i32 = 16;
+pub const HOWDAH_SSRF_ARM_PROTOCOLS: i32 = 32;
+
+// Where a URL was seen, for the egress-scheme denial (`howdah_sink_ssrf_scheme_at`).
+pub const HOWDAH_SSRF_VIA_STREAM: i32 = 0;
+pub const HOWDAH_SSRF_VIA_CURL: i32 = 1;
+
+// File-op classes for `howdah_sink_check_open_at` (the T4 file-open firewall;
+// the reusable foundation T5 extends with delete/rename ops). Mirrored in
+// howdah_sink.h.
+/// A read-open: fopen (read mode), file_get_contents, readfile.
+pub const HOWDAH_FILE_OP_READ: i32 = 0;
+/// A write-open: fopen (write/append/create mode).
+pub const HOWDAH_FILE_OP_WRITE: i32 = 1;
+/// A delete: unlink / rmdir (T5 delete guard).
+pub const HOWDAH_FILE_OP_DELETE: i32 = 2;
+/// The SOURCE operand of rename (T5 delete guard: moving wp-config.php away).
+pub const HOWDAH_FILE_OP_MOVE_SRC: i32 = 3;
+
+// `is_write_mode` codes for `howdah_behavior_check_php_write(_at)`.
+/// A read-mode open: never a php_write finding.
+pub const HOWDAH_WRITE_READ: i32 = 0;
+/// file_put_contents / write-mode fopen / rename / copy target.
+pub const HOWDAH_WRITE_PLAIN: i32 = 1;
+/// move_uploaded_file target (the always-on upload tier).
+pub const HOWDAH_WRITE_UPLOAD: i32 = 2;
+
+/// Action code from `howdah_sink_check_xml`: the dangerous call is neutralized
+/// by removing the dangerous libxml flags from its options argument (the glue
+/// then runs the original call with the rewritten flags) instead of refusing
+/// it. Logged as `block`. Never returned by any other entry point.
+pub const HOWDAH_STRIP: i32 = 3;
+/// `howdah_sink_check_xml` `caps` bit: the glue can rewrite the options
+/// argument, so a block may strip the flags instead of refusing the call.
+pub const HOWDAH_XML_CAN_STRIP: i32 = 1;
+/// `howdah_sink_check_xml` `caps` bit: the libxml in use is older than 2.9.0,
+/// which resolves external entities whatever the flags say.
+pub const HOWDAH_XML_ENGINE_IGNORES_FLAGS: i32 = 2;
+/// The dangerous `LIBXML_*` option bits (`NOENT|DTDLOAD|DTDATTR|DTDVALID`) the
+/// glue clears on a `HOWDAH_STRIP`. Mirrored in `howdah_sink.h`.
+pub const HOWDAH_XML_DANGEROUS_FLAGS: i64 = 30;
+
 // Layer-4 behavior facets (howdah_behavior_armed).
 pub const HOWDAH_BEHAVIOR_EXEC_DIR: i32 = 0;
 pub const HOWDAH_BEHAVIOR_BINARY: i32 = 1;
 pub const HOWDAH_BEHAVIOR_EGRESS: i32 = 2;
 pub const HOWDAH_BEHAVIOR_PHP_WRITE: i32 = 3;
+/// The enforced-by-default upload-write guard (`move_uploaded_file` only).
+pub const HOWDAH_BEHAVIOR_UPLOAD_WRITE: i32 = 4;
+/// The enforced-by-default delete guard (`unlink`/`rmdir`/`rename` source).
+pub const HOWDAH_BEHAVIOR_DELETE: i32 = 5;
+/// The opt-in secret-read guard (read-open sinks).
+pub const HOWDAH_BEHAVIOR_SECRET_READ: i32 = 6;
 
 fn code(a: Action) -> i32 {
     match a {
@@ -196,6 +267,12 @@ pub struct howdah_ctx {
     exceptions: Exceptions,
     /// Write matched exceptions as `excepted` events.
     exceptions_log: bool,
+    /// Runtime `session.save_path` for the poisonable-local-target firewall
+    /// (empty when the glue has not set it). Scanned, never logged.
+    session_save_path: String,
+    /// Runtime `error_log` for the poisonable-local-target firewall (empty when
+    /// unset / logging to SAPI). Scanned, never logged.
+    error_log: String,
 }
 
 fn describe(r: RuleId) -> &'static str {
@@ -218,25 +295,31 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::SqlInjection => "possible SQL injection in request input",
         RuleId::PathTraversal => "possible path traversal in request input",
         RuleId::CommandInjection => "possible command injection in request input",
+        RuleId::CgiArgInjection => "query string shaped like php-cgi command-line arguments",
         RuleId::CommandExec => "command execution sink called with a disallowed command",
         RuleId::Include => "file include sink called with a disallowed path",
         RuleId::Eval => "eval sink invoked",
         RuleId::Unserialize => "unserialize sink invoked on untrusted data",
         RuleId::Phar => "phar:// stream wrapper access outside the allowlist",
         RuleId::Ssrf => "outbound request to a disallowed destination",
+        RuleId::IncludeWrapper => "include/require of a non-file wrapper or a poisonable local target",
+        RuleId::FileOpen => "file-open sink called with a dangerous wrapper or a poisonable local target",
         RuleId::UploadExec => "possible executable or server-side code in an uploaded file",
         RuleId::UnexpectedBinary => "unexpected binary executed following an upload",
         RuleId::UnexpectedEgress => "possible unexpected outbound connection",
-        RuleId::PhpWrite => "PHP file written to disk",
+        RuleId::PhpWrite => "executable or handler-config file written to disk",
+        RuleId::FileDelete => "sensitive file deleted or moved away",
+        RuleId::SecretRead => "secret file read",
         RuleId::MailInjection => "mail() called with an unsafe sendmail option or header injection",
         RuleId::PregEval => "preg pattern with the /e modifier",
         RuleId::CreateFunction => "create_function invoked",
         RuleId::AssertString => "assert() evaluating a string as code",
         RuleId::DangerousCallback => "string callback naming a command or code execution function",
-        RuleId::Xxe => "XML document declaring an external entity",
+        RuleId::Xxe => "XML external entity or entity bomb parsed with a dangerous libxml flag",
         RuleId::TlsVerify => "curl TLS certificate verification disabled",
         RuleId::OutOfMemory => "worker ended on out-of-memory",
         RuleId::StartupFatal => "fatal error during request startup",
+        RuleId::FatalRecycle => "worker recycled after a poisoning-class fatal",
         RuleId::PostTooLarge => "request body exceeds post_max_size",
         RuleId::NestingBudget => "too many array-nesting levels across request inputs",
         RuleId::ParseMemoryEstimate => "estimated parse memory exceeds the memory_limit-based ceiling",
@@ -296,6 +379,8 @@ impl howdah_ctx {
             sink_log: None,
             exceptions,
             exceptions_log,
+            session_save_path: String::new(),
+            error_log: String::new(),
         }
     }
 
@@ -467,6 +552,212 @@ impl howdah_ctx {
         self.apply_with_mode(&hit, mode, &overrides, &reason)
     }
 
+    /// Layer-2 php-cgi argument-injection check on the raw query string
+    /// (CVE-2012-1823, CVE-2024-4577). The query is scanned, never logged: the
+    /// reason is a fixed string. Not subject to the per-request value/byte
+    /// budgets of `inspect_value`, so a flood of ordinary variables cannot
+    /// exhaust a budget before it runs. Its mode is `[inspect] cgi_arg` (default
+    /// `block`, whatever the global `detect`/`block`), see
+    /// `InspectConfig::cgi_arg_mode`.
+    fn inspect_query(&mut self, query: &[u8]) -> Action {
+        #[cfg(test)]
+        if tests::FORCE_PANIC.with(|f| f.get()) {
+            panic!("injected test panic");
+        }
+        let ins = &self.config.inspect;
+        let mode = ins.cgi_arg_mode(self.config.mode);
+        if mode == crate::config::Mode::Off {
+            return Action::Allow;
+        }
+        if !crate::inspect::cgi_arg_injection(query, ins.limits.max_total_bytes) {
+            return Action::Allow;
+        }
+        let rule = RuleId::CgiArgInjection;
+        // Scoped exception: URI or client facets (the "parameter" is the query
+        // string itself; a `param` facet is matched against that pseudo-name).
+        if let Some(m) = self.excepted(rule, None, None, Some(&b"QUERY_STRING"[..])) {
+            self.note_excepted_request(rule, &m);
+            return Action::Allow;
+        }
+        let reason = "php-cgi argument-injection pattern in query string".to_string();
+        let hit = LimitHit { rule, severity: Severity::Standard, detail: reason.clone() };
+        self.apply_with_mode(&hit, mode, &std::collections::BTreeMap::new(), &reason)
+    }
+
+    /// Stash a firewall hit (shared by the include and open paths): honor a
+    /// scoped exception, resolve the action from the rule's own mode (block →
+    /// Block, else Log), and record the line. `reason` carries only a
+    /// scheme/category label and the construct name — never the target content.
+    fn emit_firewall(
+        &mut self,
+        rule: RuleId,
+        mode: Mode,
+        reason: String,
+        script: Option<&str>,
+        sha: Option<&[u8; 32]>,
+    ) -> Action {
+        if let Some(m) = self.excepted(rule, script, sha, None) {
+            self.note_excepted_sink(rule, &m);
+            return Action::Allow;
+        }
+        let action = if mode == Mode::Block { Action::Block } else { Action::Log };
+        self.sink_log = Some(self.record(rule, action, reason));
+        action
+    }
+
+    /// Layer-3 include/require firewall (T4): classify the resolved target's
+    /// stream-wrapper scheme (`wrapper`, default block), then flag a poisonable
+    /// local target (`poison`, default block), then the legacy `allow_paths`
+    /// check (inherits `sinks.mode`). First hit wins. The target is scanned,
+    /// never logged. `arg` is the fully resolved include target the hook saw.
+    fn include_firewall_check(
+        &mut self,
+        name: &[u8],
+        arg: &[u8],
+        script: Option<&str>,
+        sha: Option<&[u8; 32]>,
+    ) -> Action {
+        use crate::sinks::wrapper::{classify_poison, classify_scheme};
+        let global = self.config.mode;
+        let n = String::from_utf8_lossy(&name[..name.len().min(64)]).into_owned();
+        let decision: Option<(RuleId, Mode, String)> = (|| {
+            let sinks = &self.config.sinks;
+            let wmode = sinks.include_wrapper_mode(global);
+            let pmode = sinks.include_poison_mode(global);
+            let imode = sinks.effective_mode(SinkId::Include, global);
+            let cls = classify_scheme(arg);
+            if wmode != Mode::Off && cls.blocks_include() {
+                return Some((RuleId::IncludeWrapper, wmode, format!("include of {} wrapper refused via {n}", cls.as_label())));
+            }
+            if pmode != Mode::Off {
+                if let Some(kind) =
+                    classify_poison(arg, self.session_save_path.as_bytes(), self.error_log.as_bytes())
+                {
+                    return Some((RuleId::IncludeWrapper, pmode, format!("include of poisonable local target ({}) via {n}", kind.as_label())));
+                }
+            }
+            if imode != Mode::Off
+                && !sinks.include.allow_paths.is_empty()
+                && !include_allowed(arg, &sinks.include.allow_paths)
+            {
+                return Some((RuleId::Include, imode, format!("include path outside allowlist via {n}")));
+            }
+            None
+        })();
+        match decision {
+            Some((rule, mode, reason)) => self.emit_firewall(rule, mode, reason, script, sha),
+            None => Action::Allow,
+        }
+    }
+
+    /// The file-op hub (T4 firewall + T5 guards). `op` is a `HOWDAH_FILE_OP_*`
+    /// class:
+    ///
+    /// * `DELETE` (unlink/rmdir) and `MOVE_SRC` (rename's source): the Layer-4
+    ///   delete guard only (`file_delete`).
+    /// * `READ`/`WRITE` opens (fopen/file_get_contents/readfile/file): the T3/T4
+    ///   Layer-3 firewall (dangerous wrapper, poisonable local target; remote is
+    ///   the SSRF sink's job), then for `READ` the Layer-4 secret-read guard.
+    ///
+    /// `script_raw`/`line` are the calling PHP script and line (origin; empty/0
+    /// when unknown); they are only turned into text on a hit. The target is
+    /// scanned, never logged; a Layer-4 line names a path CATEGORY and the origin.
+    fn open_check(
+        &mut self,
+        name: &[u8],
+        target: &[u8],
+        op: i32,
+        script_raw: &[u8],
+        line: u32,
+        sha: Option<&[u8; 32]>,
+    ) -> Action {
+        let script_str = std::str::from_utf8(script_raw).unwrap_or("");
+        let script = (!script_str.is_empty()).then_some(script_str);
+        if op == HOWDAH_FILE_OP_DELETE || op == HOWDAH_FILE_OP_MOVE_SRC {
+            return self.file_guard(name, target, op, script_str, line, script, sha);
+        }
+        let act = self.open_firewall(name, target, script, sha);
+        if act != Action::Allow || op != HOWDAH_FILE_OP_READ {
+            return act;
+        }
+        self.file_guard(name, target, op, script_str, line, script, sha)
+    }
+
+    /// The Layer-4 file guards that classify a path argument: the delete guard
+    /// (`DELETE`/`MOVE_SRC`) and the secret-read guard (`READ`). Cheap early-out
+    /// when the guard's own mode is off.
+    #[allow(clippy::too_many_arguments)]
+    fn file_guard(
+        &mut self,
+        name: &[u8],
+        target: &[u8],
+        op: i32,
+        file: &str,
+        line: u32,
+        script: Option<&str>,
+        sha: Option<&[u8; 32]>,
+    ) -> Action {
+        let b = &self.config.behavior;
+        let armed = if op == HOWDAH_FILE_OP_READ {
+            b.secret_read != Mode::Off
+        } else {
+            b.delete_guard != Mode::Off
+        };
+        if !armed {
+            return Action::Allow;
+        }
+        let Ok(t) = std::str::from_utf8(target) else {
+            return Action::Allow; // a non-UTF-8 path is never one of the named secrets
+        };
+        // The guarded function's name (a short ASCII constant); no allocation.
+        let n = std::str::from_utf8(&name[..name.len().min(32)]).unwrap_or("?");
+        let origin = crate::behavior::Origin { file, line };
+        if op == HOWDAH_FILE_OP_READ {
+            self.behavior_check(|cfg| crate::behavior::secret_read_hit(origin, n, t, cfg), script, sha)
+        } else {
+            let is_move = op == HOWDAH_FILE_OP_MOVE_SRC;
+            self.behavior_check(|cfg| crate::behavior::delete_hit(origin, n, t, is_move, cfg), script, sha)
+        }
+    }
+
+    /// Layer-3 file-open firewall (T4): a file-open sink (fopen/
+    /// file_get_contents/readfile) called with a dangerous wrapper
+    /// (`php://filter`/`data:`/`expect://`; remote is the SSRF sink's job) or a
+    /// poisonable local target. The verdict does not depend on the read/write
+    /// class. Target scanned, never logged.
+    fn open_firewall(
+        &mut self,
+        name: &[u8],
+        target: &[u8],
+        script: Option<&str>,
+        sha: Option<&[u8; 32]>,
+    ) -> Action {
+        use crate::sinks::wrapper::{classify_poison, classify_scheme};
+        let global = self.config.mode;
+        let n = String::from_utf8_lossy(&name[..name.len().min(64)]).into_owned();
+        let decision: Option<(RuleId, Mode, String)> = (|| {
+            let sinks = &self.config.sinks;
+            let wmode = sinks.include_wrapper_mode(global);
+            let pmode = sinks.include_poison_mode(global);
+            let cls = classify_scheme(target);
+            if wmode != Mode::Off && cls.blocks_open() {
+                return Some((RuleId::FileOpen, wmode, format!("open of {} wrapper refused via {n}", cls.as_label())));
+            }
+            if pmode != Mode::Off {
+                if let Some(kind) =
+                    classify_poison(target, self.session_save_path.as_bytes(), self.error_log.as_bytes())
+                {
+                    return Some((RuleId::FileOpen, pmode, format!("open of poisonable local target ({}) via {n}", kind.as_label())));
+                }
+            }
+            None
+        })();
+        match decision {
+            Some((rule, mode, reason)) => self.emit_firewall(rule, mode, reason, script, sha),
+            None => Action::Allow,
+        }
+    }
+
     /// Layer-3 sink check. `arg` is scanned, never logged. Independent of
     /// `worst`/`log`: a hit goes only to `sink_log`. All sinks honor block;
     /// include/eval block is enforced by the C opcode handler (PHP 7.0+); PHP
@@ -483,15 +774,20 @@ impl howdah_ctx {
         if tests::FORCE_PANIC.with(|f| f.get()) {
             panic!("injected test panic");
         }
+        // Include/require goes through the T4 firewall (wrapper scheme + poison
+        // local target, each with its own default-block mode), which also runs
+        // the legacy allow_paths check. Its modes are independent of the
+        // include sink's `effective_mode`, so it must not pass through the gate
+        // below.
+        if sink == SinkId::Include {
+            return self.include_firewall_check(name, arg, script, sha);
+        }
         let mode = self.config.sinks.effective_mode(sink, self.config.mode);
         if mode == Mode::Off {
             return Action::Allow;
         }
         let sinks = &self.config.sinks;
         let n = String::from_utf8_lossy(&name[..name.len().min(64)]).into_owned();
-        // xml: scanned once; a bare external DTD (XHTML/SVG doctypes) is a
-        // detect-only hit, an external entity declaration may block.
-        let xml_hit = if sink == SinkId::Xml { legacy::xml_external_entity_hit(arg) } else { None };
         let (rule, matched): (RuleId, Option<String>) = match sink {
             SinkId::CommandExec => (
                 RuleId::CommandExec,
@@ -530,7 +826,9 @@ impl howdah_ctx {
                 RuleId::DangerousCallback,
                 legacy::dangerous_callback(arg).map(|cb| format!("dangerous callback '{cb}' via {n}")),
             ),
-            SinkId::Xml => (RuleId::Xxe, xml_hit.map(|h| format!("{} via {n}", h.reason))),
+            // xml has its own entry point (howdah_sink_check_xml): the verdict
+            // needs the call's libxml flags, which this one-argument path lacks.
+            SinkId::Xml => (RuleId::Xxe, None),
             // `arg` is the option token the shim passes ("verifypeer" /
             // "verifyhost"), not user data.
             SinkId::Tls => (RuleId::TlsVerify, legacy::tls_reason(arg).map(|r| format!("{r} via {n}"))),
@@ -555,15 +853,66 @@ impl howdah_ctx {
             self.note_excepted_sink(rule, &m);
             return Action::Allow;
         }
-        // tls is detect-only in this release, and so is a bare external DTD
-        // under the xml sink: a block mode is logged as log for those.
-        let detect_only = sink == SinkId::Tls || xml_hit.is_some_and(|h| !h.external_entity);
+        // tls is detect-only in this release: a block mode is logged as log.
         let action = match mode {
-            Mode::Block if !detect_only => Action::Block,
+            Mode::Block if sink != SinkId::Tls => Action::Block,
             _ => Action::Log,
         };
         self.sink_log = Some(self.record(rule, action, reason));
         action
+    }
+
+    /// Layer-3 `xxe` check for an XML string about to be parsed with libxml
+    /// option mask `flags`. Flag-aware: nothing happens unless a dangerous
+    /// flag (`LIBXML_NOENT`/`DTDLOAD`/`DTDATTR`/`DTDVALID`) coincides with
+    /// an external entity or an entity bomb in `doc`; a bare DOCTYPE or a bare
+    /// external DTD (SAML, SVG, XHTML, Office XML) is never an attack. `caps`
+    /// is `HOWDAH_XML_CAN_STRIP` | `HOWDAH_XML_ENGINE_IGNORES_FLAGS` bits from
+    /// the glue. In block mode an attack is neutralized by removing the
+    /// dangerous flags when the glue can rewrite them (and the engine honours
+    /// them), else by refusing the call. A bare external DTD, fetched because
+    /// of `DTDLOAD`/`DTDATTR`, only ever logs. The document is scanned, never
+    /// logged. Returns the action and whether the caller should strip.
+    fn sink_check_xml(
+        &mut self,
+        name: &[u8],
+        doc: &[u8],
+        flags: i64,
+        caps: i32,
+        script: Option<&str>,
+        sha: Option<&[u8; 32]>,
+    ) -> (Action, bool) {
+        #[cfg(test)]
+        if tests::FORCE_PANIC.with(|f| f.get()) {
+            panic!("injected test panic");
+        }
+        let mode = self.config.sinks.effective_mode(SinkId::Xml, self.config.mode);
+        if mode == Mode::Off {
+            return (Action::Allow, false);
+        }
+        let legacy_engine = caps & HOWDAH_XML_ENGINE_IGNORES_FLAGS != 0;
+        let Some(hit) = legacy::xml_flag_aware_hit(doc, flags, legacy_engine) else {
+            return (Action::Allow, false);
+        };
+        let rule = RuleId::Xxe;
+        if let Some(m) = self.excepted(rule, script, sha, None) {
+            self.note_excepted_sink(rule, &m);
+            return (Action::Allow, false);
+        }
+        let n = String::from_utf8_lossy(&name[..name.len().min(64)]).into_owned();
+        let what = format!("{} ({}) via {n}", hit.reason, legacy::xml_flag_names(flags, legacy_engine));
+        let (action, strip, reason) = match mode {
+            Mode::Block if hit.is_attack() => {
+                let strip = caps & HOWDAH_XML_CAN_STRIP != 0
+                    && !legacy_engine
+                    && flags & legacy::XML_DANGEROUS_FLAGS != 0;
+                let how = if strip { "dangerous flags removed, parse continued" } else { "call refused" };
+                (Action::Block, strip, format!("{what}; {how}"))
+            }
+            _ => (Action::Log, false, what),
+        };
+        self.sink_log = Some(self.record(rule, action, reason));
+        (action, strip)
     }
 
     /// `mail()` check: the 4th (headers) and 5th (additional_parameters)
@@ -617,9 +966,12 @@ impl howdah_ctx {
         if mode == Mode::Off {
             return Action::Allow;
         }
-        let Some(crate::behavior::BehaviorHit { rule, detail }) = hit(&self.config.behavior) else {
+        let Some(crate::behavior::BehaviorHit { rule, detail, mode: own }) = hit(&self.config.behavior) else {
             return Action::Allow;
         };
+        // The file guards carry their own mode (enforced by default); the other
+        // facets follow the section mode. The section mode already gated Off above.
+        let mode = own.unwrap_or(mode);
         if let Some(m) = self.excepted(rule, script, sha, None) {
             self.note_excepted_sink(rule, &m);
             return Action::Allow;
@@ -644,9 +996,28 @@ impl howdah_ctx {
         action
     }
 
-    /// SSRF check; `recs` is a multiple of 17 bytes (see `howdah_sink_check_ssrf`).
+    /// Original check-time SSRF verdict (kind RANGE).
     fn sink_check_ssrf(
         &mut self,
+        scheme: &[u8],
+        host: &[u8],
+        port: u16,
+        recs: &[u8],
+        script: Option<&str>,
+        sha: Option<&[u8; 32]>,
+    ) -> Action {
+        self.sink_check_ssrf_kind(HOWDAH_SSRF_KIND_RANGE, scheme, host, port, recs, script, sha)
+    }
+
+    /// SSRF check; `recs` is a multiple of 17 bytes (see `howdah_sink_check_ssrf`).
+    /// `kind` picks the mode that governs the verdict and the wording of the
+    /// reason: RANGE the original `[sinks.ssrf] mode`, REBIND the connect-time
+    /// `rebind` knob (the addresses are those the connection resolved to or used),
+    /// REDIRECT the `redirect` knob (the addresses are a 3xx hop's target).
+    #[allow(clippy::too_many_arguments)]
+    fn sink_check_ssrf_kind(
+        &mut self,
+        kind: i32,
         scheme: &[u8],
         host: &[u8],
         port: u16,
@@ -658,7 +1029,11 @@ impl howdah_ctx {
         if tests::FORCE_PANIC.with(|f| f.get()) {
             panic!("injected test panic");
         }
-        let mode = self.config.sinks.effective_mode(SinkId::Ssrf, self.config.mode);
+        let mode = match kind {
+            HOWDAH_SSRF_KIND_REBIND => self.config.sinks.ssrf_rebind_mode(self.config.mode),
+            HOWDAH_SSRF_KIND_REDIRECT => self.config.sinks.ssrf_redirect_mode(self.config.mode),
+            _ => self.config.sinks.effective_mode(SinkId::Ssrf, self.config.mode),
+        };
         if mode == Mode::Off {
             return Action::Allow;
         }
@@ -707,8 +1082,13 @@ impl howdah_ctx {
             let auth = &h[..end];
             auth.rsplit_once('@').map_or(auth, |(_, host)| host).to_string()
         };
+        let lead = match kind {
+            HOWDAH_SSRF_KIND_REBIND => "ssrf rebind via",
+            HOWDAH_SSRF_KIND_REDIRECT => "ssrf redirect via",
+            _ => "ssrf via",
+        };
         let reason = format!(
-            "ssrf via {}: host={} port={} ip={} class={}",
+            "{lead} {}: host={} port={} ip={} class={}",
             clip(scheme),
             bare_host,
             port,
@@ -728,7 +1108,18 @@ impl howdah_ctx {
     /// legitimate and can hide a zero-padded numeric IP, so it is treated as
     /// suspicious per the effective mode. The host bytes are never logged.
     fn sink_ssrf_oversize(&mut self, script: Option<&str>, sha: Option<&[u8; 32]>) -> Action {
-        let mode = self.config.sinks.effective_mode(SinkId::Ssrf, self.config.mode);
+        self.sink_ssrf_oversize_kind(HOWDAH_SSRF_KIND_RANGE, script, sha)
+    }
+
+    /// [`Ctx::sink_ssrf_oversize`] for an SSRF event `kind`: the same verdict,
+    /// governed by the kind's own mode (a redirect hop with an oversize host is
+    /// judged by `redirect`, not by the range `mode`).
+    fn sink_ssrf_oversize_kind(&mut self, kind: i32, script: Option<&str>, sha: Option<&[u8; 32]>) -> Action {
+        let mode = match kind {
+            HOWDAH_SSRF_KIND_REBIND => self.config.sinks.ssrf_rebind_mode(self.config.mode),
+            HOWDAH_SSRF_KIND_REDIRECT => self.config.sinks.ssrf_redirect_mode(self.config.mode),
+            _ => self.config.sinks.effective_mode(SinkId::Ssrf, self.config.mode),
+        };
         if mode == Mode::Off {
             return Action::Allow;
         }
@@ -737,10 +1128,51 @@ impl howdah_ctx {
             return Action::Allow;
         }
         let action = if mode == Mode::Block { Action::Block } else { Action::Log };
+        let lead = if kind == HOWDAH_SSRF_KIND_REDIRECT { "ssrf redirect" } else { "ssrf" };
         self.sink_log = Some(self.record(
             RuleId::Ssrf,
             action,
-            "ssrf: oversize host (>256 bytes), not resolvable - treated as suspicious".to_string(),
+            format!("{lead}: oversize host (>256 bytes) or more than 32 resolved addresses - treated as suspicious"),
+        ));
+        action
+    }
+
+    /// Egress-scheme denial (`[sinks.ssrf] scheme`). `via` is `HOWDAH_SSRF_VIA_*`.
+    /// Only the scheme CATEGORY is logged, never the URL. `[[exceptions]]`
+    /// `rule = "ssrf"` applies; `allow_hosts` does not (it names destinations,
+    /// this is a protocol policy).
+    fn sink_ssrf_scheme(
+        &mut self,
+        via: i32,
+        url: &[u8],
+        script: Option<&str>,
+        sha: Option<&[u8; 32]>,
+    ) -> Action {
+        #[cfg(test)]
+        if tests::FORCE_PANIC.with(|f| f.get()) {
+            panic!("injected test panic");
+        }
+        let mode = self.config.sinks.ssrf_scheme_mode(self.config.mode);
+        if mode == Mode::Off {
+            return Action::Allow;
+        }
+        let (ctx, name) = if via == HOWDAH_SSRF_VIA_CURL {
+            (SchemeCtx::Curl, "curl")
+        } else {
+            (SchemeCtx::Stream, "stream")
+        };
+        let Some(label) = denied_scheme(url, ctx) else {
+            return Action::Allow;
+        };
+        if let Some(m) = self.excepted(RuleId::Ssrf, script, sha, None) {
+            self.note_excepted_sink(RuleId::Ssrf, &m);
+            return Action::Allow;
+        }
+        let action = if mode == Mode::Block { Action::Block } else { Action::Log };
+        self.sink_log = Some(self.record(
+            RuleId::Ssrf,
+            action,
+            format!("ssrf scheme via {name}: scheme={label} is not http/https"),
         ));
         action
     }
@@ -1297,6 +1729,11 @@ pub unsafe extern "C" fn howdah_note_name(
 /// Returns the action for this value (0 Allow, 1 Log, 2 Block); it never drops
 /// the variable. NULL ctx, unknown source or panic returns 0.
 ///
+/// `HOWDAH_SRC_QUERY` is different: `val` is the raw query string, `name` is
+/// ignored, and the check is the php-cgi argument-injection rule, whose mode is
+/// `[inspect] cgi_arg` (default `block`, independent of the global mode and of
+/// `[inspect] mode`) and which is exempt from the per-request scan budgets.
+///
 /// # Safety
 /// `ctx` NULL or live; `name`/`val` NULL or valid for their lengths.
 #[no_mangle]
@@ -1311,11 +1748,14 @@ pub unsafe extern "C" fn howdah_inspect_value(
     if ctx.is_null() {
         return HOWDAH_ALLOW;
     }
+    // `None` is the raw query string (the php-cgi argument-injection rule); the
+    // rest are the budgeted per-variable scans.
     let src = match source {
-        HOWDAH_SRC_GET => Source::Get,
-        HOWDAH_SRC_POST => Source::Post,
-        HOWDAH_SRC_COOKIE => Source::Cookie,
-        HOWDAH_SRC_PATH => Source::Path,
+        HOWDAH_SRC_GET => Some(Source::Get),
+        HOWDAH_SRC_POST => Some(Source::Post),
+        HOWDAH_SRC_COOKIE => Some(Source::Cookie),
+        HOWDAH_SRC_PATH => Some(Source::Path),
+        HOWDAH_SRC_QUERY => None,
         _ => return HOWDAH_ALLOW,
     };
     let r = catch_unwind(AssertUnwindSafe(|| {
@@ -1329,7 +1769,10 @@ pub unsafe extern "C" fn howdah_inspect_value(
         } else {
             std::slice::from_raw_parts(val as *const u8, val_len)
         };
-        code((*ctx).inspect_value(src, n, v))
+        code(match src {
+            Some(s) => (*ctx).inspect_value(s, n, v),
+            None => (*ctx).inspect_query(v),
+        })
     }));
     r.unwrap_or_else(|_| {
         report_panic(ctx);
@@ -1449,6 +1892,9 @@ pub unsafe extern "C" fn howdah_behavior_armed(ctx: *mut howdah_ctx, facet: i32)
             HOWDAH_BEHAVIOR_BINARY => scoped || !b.allow_exec_binaries.is_empty(),
             HOWDAH_BEHAVIOR_EGRESS => scoped || !b.allow_egress_hosts.is_empty(),
             HOWDAH_BEHAVIOR_PHP_WRITE => b.deny_php_writes,
+            HOWDAH_BEHAVIOR_UPLOAD_WRITE => b.upload_write != Mode::Off,
+            HOWDAH_BEHAVIOR_DELETE => b.delete_guard != Mode::Off,
+            HOWDAH_BEHAVIOR_SECRET_READ => b.secret_read != Mode::Off,
             _ => false,
         })
     }))
@@ -1559,7 +2005,9 @@ pub unsafe extern "C" fn howdah_behavior_check_php_write(
     catch_unwind(AssertUnwindSafe(|| {
         let c = copy_str(caller, caller_len);
         let t = copy_str(target, target_len);
-        code((*ctx).behavior_check(|cfg| crate::behavior::php_write_hit(&c, &t, is_write_mode != 0, cfg), None, None))
+        let op = crate::behavior::WriteOp::from_code(is_write_mode);
+        let org = crate::behavior::Origin { file: &c, line: 0 };
+        code((*ctx).behavior_check(|cfg| crate::behavior::php_write_hit(org, &t, op, cfg), None, None))
     }))
     .unwrap_or_else(|_| {
         report_panic(ctx);
@@ -1668,7 +2116,9 @@ pub unsafe extern "C" fn howdah_sink_check_ssrf(
 /// SSRF parse seam: parse the target of an intercepted outbound call so the C
 /// shim never parses URLs itself. `scheme_required != 0` selects
 /// `HostForm::SchemeRequired` (URL-only sinks), else `BareHostOk` (fsockopen,
-/// curl). Returns 2 when the host parsed but is longer than `out_host_cap`
+/// curl); `scheme_required == 2` is `SchemeRequired` for a redirect `Location`
+/// value, where a leading `//` (scheme-relative) is read as `http://` and a
+/// plain relative reference is a skip. Returns 2 when the host parsed but is longer than `out_host_cap`
 /// (suspicious: nothing is written; call `howdah_sink_ssrf_oversize`). Returns 1 ("act") after writing the clean host (no userinfo/brackets/
 /// port, lowercased) to `out_host`, its length to `*out_host_len` and the port
 /// (0 if none) to `*out_port`. Returns 0 ("skip") for a non-network target
@@ -1695,9 +2145,23 @@ pub unsafe extern "C" fn howdah_ssrf_prepare(
     }
     catch_unwind(AssertUnwindSafe(|| {
         let form = if scheme_required != 0 { HostForm::SchemeRequired } else { HostForm::BareHostOk };
-        let Some(h) = parse_host(std::slice::from_raw_parts(input, input_len), form) else {
+        let raw = std::slice::from_raw_parts(input, input_len);
+        // 2 = a redirect `Location` value: an absolute URL or a scheme-relative
+        // `//host/..` (which libcurl resolves against the current scheme). A plain
+        // relative reference stays on the same host: not a new target.
+        let scheme_relative;
+        let raw = if scheme_required == 2 && raw.trim_ascii_start().starts_with(b"//") {
+            scheme_relative = [b"http:".as_slice(), raw.trim_ascii_start()].concat();
+            &scheme_relative[..]
+        } else {
+            raw
+        };
+        let Some(h) = parse_host(raw, form) else {
             return 0;
         };
+        if h.suspicious {
+            return 2; // NUL in the authority: ambiguous host, treat as suspicious
+        }
         if h.name.len() > out_host_cap {
             return 2; // oversize: suspicious, see howdah_sink_ssrf_oversize
         }
@@ -1918,6 +2382,56 @@ pub unsafe extern "C" fn howdah_oom_armed(ctx: *mut howdah_ctx) -> i32 {
     .unwrap_or(0)
 }
 
+/// 1 iff the context's config has `recycle_on_fatal = true` (the §4.7 recycle
+/// facet opt-in); 0 otherwise, for NULL and on panic. Read by the glue at MINIT
+/// for the phpinfo row. Off by default. See [`howdah_recycle_armed`].
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_recycle_on_fatal(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| i32::from((*ctx).config.recycle_on_fatal))).unwrap_or(0)
+}
+
+/// 1 iff the config ARMS the §4.7 recycle facet: `recycle_on_fatal` is on AND
+/// the global mode is not `off` (a global `off` disables every layer, this one
+/// included; `detect` keeps it armed, like the OOM backstop). The glue applies
+/// the SAPI and patched-engine gates on top of this, and chooses observe vs
+/// enforce from [`howdah_recycle_observe`]. 0 for NULL and on panic (do not arm
+/// — the fail-open direction).
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_recycle_armed(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = &*ctx;
+        i32::from(c.config.recycle_on_fatal && c.config.mode != Mode::Off)
+    }))
+    .unwrap_or(0)
+}
+
+/// 1 iff the config has `recycle_observe = true`: the §4.7 facet logs a
+/// "would-recycle" event but does NOT exit, so an operator can size their
+/// uncaught-fatal rate before enforcing. Only meaningful when the facet is
+/// armed. 0 (enforce) for NULL and on panic.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_recycle_observe(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| i32::from((*ctx).config.recycle_observe))).unwrap_or(0)
+}
+
 /// 1 iff some exception has a `script_sha256` facet that could apply to
 /// `script` (so the glue should hash the file); else 0. NULL / panic is 0.
 ///
@@ -1993,6 +2507,111 @@ pub unsafe extern "C" fn howdah_sink_check_at(
         let s = copy_script(script, script_len);
         let h = copy_sha(sha256, sha256_len);
         code((*ctx).sink_check(id, n, a, s.as_deref(), h.as_ref()))
+    }));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// Store the runtime `session.save_path` and `error_log` for the include/open
+/// poisonable-local-target firewall (the glue reads them from PHP's ini). An
+/// empty value (NULL / 0 len) clears the slot, so that category simply does not
+/// fire. NULL ctx or panic is a no-op. Scanned, never logged.
+///
+/// # Safety
+/// `ctx` NULL or live; each pointer NULL or valid for its length.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_set_runtime_paths(
+    ctx: *mut howdah_ctx,
+    session: *const c_char,
+    session_len: usize,
+    error_log: *const c_char,
+    error_log_len: usize,
+) {
+    if ctx.is_null() {
+        return;
+    }
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        (*ctx).session_save_path = copy_str(session, session_len);
+        (*ctx).error_log = copy_str(error_log, error_log_len);
+    }));
+}
+
+/// 1 iff the file-op hub is armed: the include/open wrapper-or-poison firewall
+/// (either mode not off), or a T5 guard that shares it (the delete guard or the
+/// secret-read guard). The glue reads this once per process to decide whether to
+/// install the file-op trampolines; NULL ctx or panic is 0.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_sink_open_armed(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = &*ctx;
+        let g = c.config.mode;
+        let b = &c.config.behavior;
+        i32::from(
+            c.config.sinks.include_wrapper_mode(g) != Mode::Off
+                || c.config.sinks.include_poison_mode(g) != Mode::Off
+                // T5: the delete (unlink/rmdir) and secret-read guards share the
+                // file-op hub, so arming either arms the hub.
+                || b.delete_guard_mode(g) != Mode::Off
+                || b.secret_read_mode(g) != Mode::Off,
+        )
+    }))
+    .unwrap_or(0)
+}
+
+/// File-op hub check: the T4 file-open firewall for fopen / file_get_contents /
+/// readfile, plus the T5 Layer-4 guards (delete for unlink/rmdir/rename-source,
+/// secret-read for read opens). `name` is the guarded function, `target` the
+/// path/URL argument (scanned, never logged), `op` a `HOWDAH_FILE_OP_*` class,
+/// `script`/`line` the calling PHP script and line (logged on a Layer-4 hit and
+/// matched by `[[exceptions]]` `script` facets), `sha256` as the other `_at`
+/// entry points. Returns 0 Allow / 1 Log / 2 Block; NULL ctx or panic is 0
+/// (fail-open). A hit is retrievable with `howdah_take_sink_log_line`.
+///
+/// # Safety
+/// `ctx` NULL or live; every pointer NULL or valid for its length.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn howdah_sink_check_open_at(
+    ctx: *mut howdah_ctx,
+    name: *const c_char,
+    name_len: usize,
+    target: *const c_char,
+    target_len: usize,
+    op: i32,
+    script: *const c_char,
+    script_len: usize,
+    sha256: *const u8,
+    sha256_len: usize,
+    line: u32,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let slice = |p: *const c_char, n: usize| -> &[u8] {
+            if p.is_null() || n == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts(p as *const u8, n)
+            }
+        };
+        let h = copy_sha(sha256, sha256_len);
+        code((*ctx).open_check(
+            slice(name, name_len),
+            slice(target, target_len),
+            op,
+            slice(script, script_len),
+            line,
+            h.as_ref(),
+        ))
     }));
     r.unwrap_or_else(|_| {
         report_panic(ctx);
@@ -2077,6 +2696,213 @@ pub unsafe extern "C" fn howdah_sink_ssrf_oversize_at(
         code((*ctx).sink_ssrf_oversize(s.as_deref(), h.as_ref()))
     }))
     .unwrap_or(HOWDAH_ALLOW)
+}
+
+/// `howdah_sink_ssrf_oversize_at` for an SSRF event `kind` (`HOWDAH_SSRF_KIND_*`):
+/// a redirect hop whose host is longer than the resolver buffer is judged by the
+/// `redirect` mode, not the range `mode`. 0 Allow / 1 Log / 2 Block; NULL ctx or
+/// a panic is 0. The host bytes are never logged.
+///
+/// # Safety
+/// `ctx` NULL or live; pointers NULL or valid for their lengths.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_sink_ssrf_oversize_kind_at(
+    ctx: *mut howdah_ctx,
+    kind: i32,
+    script: *const c_char,
+    script_len: usize,
+    sha256: *const u8,
+    sha256_len: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let s = copy_script(script, script_len);
+        let h = copy_sha(sha256, sha256_len);
+        code((*ctx).sink_ssrf_oversize_kind(kind, s.as_deref(), h.as_ref()))
+    }))
+    .unwrap_or(HOWDAH_ALLOW)
+}
+
+/// Which parts of the SSRF hardening are armed, as a `HOWDAH_SSRF_ARM_*` mask
+/// (0 = nothing: the shim chains with zero overhead). RANGE is the original
+/// `[sinks.ssrf] mode`; REBIND / SCHEME / REDIRECT are the three hardening
+/// knobs; PIN and PROTOCOLS add that the rebind / scheme knob is `block` (the
+/// shim may then also set `CURLOPT_RESOLVE` / `CURLOPT_PROTOCOLS`). NULL ctx or
+/// a panic is 0. Never stashes a log line.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_ssrf_armed_mask(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = &*ctx;
+        let sinks = &c.config.sinks;
+        let mut m = 0;
+        if sinks.effective_mode(SinkId::Ssrf, c.config.mode) != Mode::Off {
+            m |= HOWDAH_SSRF_ARM_RANGE;
+        }
+        match sinks.ssrf_rebind_mode(c.config.mode) {
+            Mode::Off => {}
+            Mode::Detect => m |= HOWDAH_SSRF_ARM_REBIND,
+            Mode::Block => m |= HOWDAH_SSRF_ARM_REBIND | HOWDAH_SSRF_ARM_PIN,
+        }
+        match sinks.ssrf_scheme_mode(c.config.mode) {
+            Mode::Off => {}
+            Mode::Detect => m |= HOWDAH_SSRF_ARM_SCHEME,
+            Mode::Block => m |= HOWDAH_SSRF_ARM_SCHEME | HOWDAH_SSRF_ARM_PROTOCOLS,
+        }
+        if sinks.ssrf_redirect_mode(c.config.mode) != Mode::Off {
+            m |= HOWDAH_SSRF_ARM_REDIRECT;
+        }
+        m
+    }))
+    .unwrap_or(0)
+}
+
+/// SSRF verdict of a given kind (`HOWDAH_SSRF_KIND_*`) plus the executing
+/// script and optional SHA-256: the connect-time (REBIND) and redirect-hop
+/// (REDIRECT) variants of `howdah_sink_check_ssrf_at`. `ips` is `ips_count` x
+/// 17-byte records. 0 Allow / 1 Log / 2 Block; NULL ctx, malformed input or a
+/// panic is 0 (fail-open).
+///
+/// # Safety
+/// As `howdah_sink_check_ssrf_at`.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn howdah_sink_check_ssrf_kind_at(
+    ctx: *mut howdah_ctx,
+    kind: i32,
+    scheme: *const c_char,
+    scheme_len: usize,
+    host: *const c_char,
+    host_len: usize,
+    port: u16,
+    ips: *const u8,
+    ips_count: usize,
+    script: *const c_char,
+    script_len: usize,
+    sha256: *const u8,
+    sha256_len: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let sl = |p: *const c_char, n: usize| -> &[u8] {
+            if p.is_null() || n == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts(p as *const u8, n)
+            }
+        };
+        let recs: &[u8] = if ips.is_null() || ips_count == 0 {
+            &[]
+        } else {
+            match ips_count.checked_mul(17) {
+                Some(total) if total <= (1 << 24) => std::slice::from_raw_parts(ips, total),
+                _ => return HOWDAH_ALLOW,
+            }
+        };
+        let s = copy_script(script, script_len);
+        let h = copy_sha(sha256, sha256_len);
+        code((*ctx).sink_check_ssrf_kind(
+            kind,
+            sl(scheme, scheme_len),
+            sl(host, host_len),
+            port,
+            recs,
+            s.as_deref(),
+            h.as_ref(),
+        ))
+    }));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// Egress-scheme verdict for a URL (`via`: `HOWDAH_SSRF_VIA_STREAM` /
+/// `HOWDAH_SSRF_VIA_CURL`) plus the executing script and optional SHA-256. 0
+/// Allow / 1 Log / 2 Block per `[sinks.ssrf] scheme`; the log line carries the
+/// scheme category only. NULL ctx or a panic is 0.
+///
+/// # Safety
+/// `ctx` NULL or live; pointers NULL or valid for their lengths.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_sink_ssrf_scheme_at(
+    ctx: *mut howdah_ctx,
+    via: i32,
+    url: *const c_char,
+    url_len: usize,
+    script: *const c_char,
+    script_len: usize,
+    sha256: *const u8,
+    sha256_len: usize,
+) -> i32 {
+    if ctx.is_null() || url.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let u = std::slice::from_raw_parts(url as *const u8, url_len);
+        let s = copy_script(script, script_len);
+        let h = copy_sha(sha256, sha256_len);
+        code((*ctx).sink_ssrf_scheme(via, u, s.as_deref(), h.as_ref()))
+    }));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// Build the `CURLOPT_RESOLVE` entry that pins `input`'s hostname (an HTTP(S) or
+/// scheme-less curl URL) to the validated IPv4 addresses in `recs`
+/// (`recs_count` x 17-byte records), writing `host:port:ip[,ip...]` (no NUL) to
+/// `out`. `multi != 0` allows a comma list (libcurl 7.59+), else only the first
+/// address is pinned. Returns the byte count written, or 0 when there is
+/// nothing safe to pin (literal-IP host, non-HTTP(S) URL, IPv6-only/unresolved
+/// host, odd host spelling, or `out_cap` too small). NULL arguments or a panic
+/// is 0. Pure: no ctx, no logging.
+///
+/// # Safety
+/// `input` valid for `input_len`; `recs` NULL or valid for `recs_count * 17`
+/// bytes; `out` writable for `out_cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_ssrf_pin_entry(
+    input: *const u8,
+    input_len: usize,
+    recs: *const u8,
+    recs_count: usize,
+    multi: i32,
+    out: *mut u8,
+    out_cap: usize,
+) -> usize {
+    if input.is_null() || out.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let r: &[u8] = if recs.is_null() || recs_count == 0 {
+            &[]
+        } else {
+            match recs_count.checked_mul(17) {
+                Some(total) if total <= (1 << 24) => std::slice::from_raw_parts(recs, total),
+                _ => return 0,
+            }
+        };
+        let Some(e) = resolve_pin_entry(std::slice::from_raw_parts(input, input_len), r, multi != 0) else {
+            return 0;
+        };
+        if e.len() > out_cap {
+            return 0;
+        }
+        std::ptr::copy_nonoverlapping(e.as_ptr(), out, e.len());
+        e.len()
+    }))
+    .unwrap_or(0)
 }
 
 /// `howdah_behavior_check_exec_dir` plus an optional SHA-256 of the file at
@@ -2169,7 +2995,8 @@ pub unsafe extern "C" fn howdah_behavior_check_egress_at(
     })
 }
 
-/// `howdah_behavior_check_php_write` plus an optional SHA-256 of `caller`.
+/// `howdah_behavior_check_php_write` plus an optional SHA-256 of `caller` and the
+/// `line` of the call in `caller` (0 = unknown; logged as `file:line`).
 ///
 /// # Safety
 /// `ctx` NULL or live; pointers NULL or valid for their lengths.
@@ -2184,6 +3011,7 @@ pub unsafe extern "C" fn howdah_behavior_check_php_write_at(
     is_write_mode: i32,
     sha256: *const u8,
     sha256_len: usize,
+    line: u32,
 ) -> i32 {
     if ctx.is_null() {
         return HOWDAH_ALLOW;
@@ -2193,8 +3021,10 @@ pub unsafe extern "C" fn howdah_behavior_check_php_write_at(
         let t = copy_str(target, target_len);
         let h = copy_sha(sha256, sha256_len);
         let s = (!c.is_empty()).then_some(c.as_str());
+        let op = crate::behavior::WriteOp::from_code(is_write_mode);
+        let org = crate::behavior::Origin { file: &c, line };
         code((*ctx).behavior_check(
-            |cfg| crate::behavior::php_write_hit(&c, &t, is_write_mode != 0, cfg),
+            |cfg| crate::behavior::php_write_hit(org, &t, op, cfg),
             s,
             h.as_ref(),
         ))
@@ -2220,6 +3050,7 @@ pub const HOWDAH_HOOK_WHY_CONFIGURED: i32 = 0;
 pub const HOWDAH_HOOK_WHY_EVAL_ONLY: i32 = 1;
 pub const HOWDAH_HOOK_WHY_INCLUDE_ALLOW_PATHS: i32 = 2;
 pub const HOWDAH_HOOK_WHY_DENY_EXEC_DIRS: i32 = 3;
+pub const HOWDAH_HOOK_WHY_INCLUDE_FIREWALL: i32 = 4;
 
 /// The startup plan for the include/eval hook: `mechanism | (reason << 4)`
 /// with the `HOWDAH_HOOK_PLAN_*` / `HOWDAH_HOOK_WHY_*` codes. Mechanism
@@ -2255,6 +3086,7 @@ pub unsafe extern "C" fn howdah_sink_hook_plan(ctx: *mut howdah_ctx) -> i32 {
                     HookReason::EvalOnly => HOWDAH_HOOK_WHY_EVAL_ONLY,
                     HookReason::IncludeAllowPaths => HOWDAH_HOOK_WHY_INCLUDE_ALLOW_PATHS,
                     HookReason::DenyExecDirs => HOWDAH_HOOK_WHY_DENY_EXEC_DIRS,
+                    HookReason::IncludeFirewall => HOWDAH_HOOK_WHY_INCLUDE_FIREWALL,
                 };
                 m | (w << 4)
             }
@@ -2292,6 +3124,61 @@ pub unsafe extern "C" fn howdah_sink_check_mail(
             }
         };
         code((*ctx).sink_check_mail(sl(headers, headers_len), sl(params, params_len)))
+    }));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// XML sink check (`xxe`), flag-aware: `doc` is the XML string about to be
+/// parsed (`simplexml_load_string`, `DOMDocument::loadXML`, `new
+/// SimpleXMLElement`, `XMLReader::XML`), `flags` the libxml option mask the call
+/// passes (0 when absent), `caps` a `HOWDAH_XML_*` bit set, `script`/`sha256` the
+/// executing script for `[[exceptions]]`. Scanned, never logged. Returns 0
+/// Allow / 1 Log / 2 Block, or 3 (`HOWDAH_STRIP`) to neutralize by removing
+/// the dangerous flags from the options argument and continuing; a strip is
+/// logged as `block`. Nothing fires without a dangerous flag AND an external
+/// entity (or entity bomb) together. NULL ctx or panic is 0 (fail-open). A hit
+/// is retrievable with `howdah_take_sink_log_line`.
+///
+/// # Safety
+/// `ctx` NULL or live; every pointer NULL or valid for its length.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn howdah_sink_check_xml(
+    ctx: *mut howdah_ctx,
+    name: *const c_char,
+    name_len: usize,
+    doc: *const c_char,
+    doc_len: usize,
+    flags: i64,
+    caps: i32,
+    script: *const c_char,
+    script_len: usize,
+    sha256: *const u8,
+    sha256_len: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let sl = |p: *const c_char, n: usize| -> &[u8] {
+            if p.is_null() || n == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts(p as *const u8, n)
+            }
+        };
+        let s = copy_script(script, script_len);
+        let h = copy_sha(sha256, sha256_len);
+        let (action, strip) =
+            (*ctx).sink_check_xml(sl(name, name_len), sl(doc, doc_len), flags, caps, s.as_deref(), h.as_ref());
+        if strip {
+            HOWDAH_STRIP
+        } else {
+            code(action)
+        }
     }));
     r.unwrap_or_else(|_| {
         report_panic(ctx);
@@ -2631,6 +3518,122 @@ mod tests {
         unsafe { howdah_free(c) };
     }
 
+    const CGI_POC: &[u8] = b"%ADd+allow_url_include%3d1+%ADd+auto_prepend_file%3dphp://input";
+
+    fn query(c: *mut howdah_ctx, q: &[u8]) -> i32 {
+        unsafe { howdah_inspect_value(c, HOWDAH_SRC_QUERY, std::ptr::null(), 0, q.as_ptr() as _, q.len()) }
+    }
+
+    #[test]
+    fn cgi_arg_blocks_by_default_in_every_global_mode() {
+        // Default global mode is block; the shipped ini default is detect. The
+        // other Layer 2 rules only log in both.
+        for cfg in ["", "mode = \"block\"", "mode = \"detect\""] {
+            let c = init(cfg);
+            begin(c);
+            assert_eq!(inspect(c, HOWDAH_SRC_GET, "q", b"' OR 1=1 --"), HOWDAH_LOG, "{cfg}");
+            unsafe { howdah_request_end(c) };
+            take(c);
+            begin(c);
+            assert_eq!(query(c, CGI_POC), HOWDAH_BLOCK, "{cfg}");
+            assert_eq!(query(c, b"-d+allow_url_include%3d1+-d+auto_prepend_file%3dphp://input"), HOWDAH_BLOCK);
+            unsafe { howdah_free(c) };
+        }
+    }
+
+    #[test]
+    fn cgi_arg_benign_query_is_allowed_and_logs_nothing() {
+        let c = init("");
+        begin(c);
+        for q in [&b""[..], b"q=search&page=2", b"hello+world", b"-1", b"garc%C3%ADa", b"dGVzdA%3D%3D"] {
+            assert_eq!(query(c, q), HOWDAH_ALLOW, "{}", String::from_utf8_lossy(q));
+        }
+        assert!(take(c).is_none());
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn cgi_arg_log_omits_the_query() {
+        let c = init("");
+        begin(c);
+        assert_eq!(query(c, CGI_POC), HOWDAH_BLOCK);
+        let line = take(c).expect("log line");
+        assert!(line.contains("\"rule\":\"cgi_arg_injection\""), "{line}");
+        assert!(line.contains("\"action\":\"block\"") && line.contains("\"layer\":2"), "{line}");
+        for leak in ["allow_url_include", "auto_prepend_file", "php://input", "%AD", "%3d"] {
+            assert!(!line.contains(leak), "{leak} leaked: {line}");
+        }
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn cgi_arg_observe_disable_and_master_switches() {
+        let detect = init("[inspect]\ncgi_arg = \"detect\"");
+        begin(detect);
+        assert_eq!(query(detect, CGI_POC), HOWDAH_LOG);
+        assert!(take(detect).unwrap().contains("\"action\":\"log\""));
+        unsafe { howdah_free(detect) };
+        for cfg in [
+            "[inspect]\ncgi_arg = \"off\"",
+            "[inspect]\nenabled = false",
+            "mode = \"off\"",
+            "mode = \"off\"\n[inspect.rule_modes]\ncgi_arg_injection = \"block\"",
+        ] {
+            let c = init(cfg);
+            begin(c);
+            assert_eq!(query(c, CGI_POC), HOWDAH_ALLOW, "{cfg}");
+            assert!(take(c).is_none(), "{cfg}");
+            unsafe { howdah_free(c) };
+        }
+        // The per-class table can also raise an observe-only key back to block.
+        let c = init("[inspect]\ncgi_arg = \"detect\"\n[inspect.rule_modes]\ncgi_arg_injection = \"block\"");
+        begin(c);
+        assert_eq!(query(c, CGI_POC), HOWDAH_BLOCK);
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn cgi_arg_is_not_starved_by_the_value_budget() {
+        // 2000-variable budget spent on ordinary values, then the attack query.
+        let c = init("[inspect.limits]\nmax_values = 3");
+        begin(c);
+        for _ in 0..5 {
+            inspect(c, HOWDAH_SRC_GET, "a", b"hello");
+        }
+        assert_eq!(inspect(c, HOWDAH_SRC_GET, "q", b"' OR 1=1 --"), HOWDAH_ALLOW, "budget is spent");
+        assert_eq!(query(c, CGI_POC), HOWDAH_BLOCK, "the query check is not budgeted");
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn cgi_arg_null_ctx_and_panic_are_allow() {
+        assert_eq!(unsafe { howdah_inspect_value(std::ptr::null_mut(), HOWDAH_SRC_QUERY, std::ptr::null(), 0, CGI_POC.as_ptr() as _, CGI_POC.len()) }, 0);
+        let c = init("");
+        begin(c);
+        assert_eq!(unsafe { howdah_inspect_value(c, HOWDAH_SRC_QUERY, std::ptr::null(), 0, std::ptr::null(), 0) }, HOWDAH_ALLOW);
+        // A panic inside the check is caught and fails open; the ctx stays usable.
+        FORCE_PANIC.with(|f| f.set(true));
+        assert_eq!(query(c, CGI_POC), HOWDAH_ALLOW);
+        FORCE_PANIC.with(|f| f.set(false));
+        assert!(take(c).expect("panic noted").contains("panic caught"));
+        begin(c);
+        assert_eq!(query(c, CGI_POC), HOWDAH_BLOCK, "ctx usable after a caught panic");
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn cgi_arg_scoped_exception_by_client_and_uri() {
+        // begin() sets client 1.2.3.4 and uri /up.
+        let c = init("[[exceptions]]\nrule = \"inspect.cgi_arg_injection\"\nclient_cidr = \"1.2.3.0/24\"\nreason = \"scanner\"\n");
+        begin(c);
+        assert_eq!(query(c, CGI_POC), HOWDAH_ALLOW);
+        unsafe { howdah_free(c) };
+        let c = init("[[exceptions]]\nrule = \"inspect.cgi_arg_injection\"\nclient_cidr = \"9.9.9.0/24\"\nreason = \"other\"\n");
+        begin(c);
+        assert_eq!(query(c, CGI_POC), HOWDAH_BLOCK);
+        unsafe { howdah_free(c) };
+    }
+
     #[test]
     fn global_off_overrides_inspect_rule_modes() {
         let c = init("mode = \"off\"\n[inspect.rule_modes]\nsql_injection = \"block\"");
@@ -2792,6 +3795,325 @@ mod tests {
         unsafe { howdah_free(c) };
     }
 
+    // ---- T4 include/open wrapper-scheme firewall ------------------------------
+
+    fn open(c: *mut howdah_ctx, name: &str, target: &[u8], op: i32) -> i32 {
+        unsafe {
+            howdah_sink_check_open_at(
+                c,
+                name.as_ptr() as *const c_char,
+                name.len(),
+                target.as_ptr() as *const c_char,
+                target.len(),
+                op,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                0,
+            )
+        }
+    }
+
+    /// `open` with a calling script and line (origin attribution).
+    fn open_from(c: *mut howdah_ctx, name: &str, target: &[u8], op: i32, script: &str, line: u32) -> i32 {
+        unsafe {
+            howdah_sink_check_open_at(
+                c,
+                name.as_ptr() as *const c_char,
+                name.len(),
+                target.as_ptr() as *const c_char,
+                target.len(),
+                op,
+                script.as_ptr() as *const c_char,
+                script.len(),
+                std::ptr::null(),
+                0,
+                line,
+            )
+        }
+    }
+
+    #[test]
+    fn include_wrapper_firewall_blocks_by_default() {
+        // On by default (shipped detect), independent of the include sink mode.
+        let c = init("mode = \"detect\"");
+        begin(c);
+        for target in [
+            &b"php://filter/convert.base64-encode/resource=/etc/passwd"[..],
+            b"php://input",
+            b"data://text/plain;base64,PD9waHA=",
+            b"expect://id",
+            b"http://evil.example/shell.txt",
+            b"ftp://evil.example/x",
+        ] {
+            assert_eq!(sink(c, HOWDAH_SINK_INCLUDE, "include", target), HOWDAH_BLOCK, "{:?}", String::from_utf8_lossy(target));
+            let line = take_sink(c).expect("line");
+            assert!(line.contains("\"rule\":\"include_wrapper\"") && line.contains("\"action\":\"block\""), "{line}");
+            // The target content never appears; only a scheme label.
+            assert!(!line.contains("passwd") && !line.contains("evil.example") && !line.contains("PD9waHA"), "{line}");
+        }
+        // A plain template / config path is never blocked.
+        assert_eq!(sink(c, HOWDAH_SINK_INCLUDE, "include", b"templates/header.php"), HOWDAH_ALLOW);
+        assert_eq!(sink(c, HOWDAH_SINK_INCLUDE, "include", b"/var/www/app/config.php"), HOWDAH_ALLOW);
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn include_poison_firewall_blocks_proc_and_session() {
+        let c = init("mode = \"detect\"");
+        begin(c);
+        unsafe {
+            let s = "/var/lib/php/sessions";
+            let e = "/var/log/php_errors.log";
+            howdah_set_runtime_paths(c, s.as_ptr() as *const c_char, s.len(), e.as_ptr() as *const c_char, e.len());
+        }
+        for target in [
+            &b"/proc/self/environ"[..],
+            b"/var/lib/php/sessions/sess_abc",
+            b"/var/log/php_errors.log",
+        ] {
+            assert_eq!(sink(c, HOWDAH_SINK_INCLUDE, "include", target), HOWDAH_BLOCK, "{:?}", String::from_utf8_lossy(target));
+            let line = take_sink(c).expect("line");
+            assert!(line.contains("\"rule\":\"include_wrapper\"") && line.contains("poisonable"), "{line}");
+        }
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn open_firewall_is_tight() {
+        let c = init("mode = \"detect\"");
+        begin(c);
+        // Blocked: the dangerous wrappers.
+        for t in [&b"php://filter/resource=/etc/passwd"[..], b"data://text/plain;base64,x", b"expect://id"] {
+            assert_eq!(open(c, "fopen", t, HOWDAH_FILE_OP_READ), HOWDAH_BLOCK, "{:?}", String::from_utf8_lossy(t));
+            let line = take_sink(c).expect("line");
+            assert!(line.contains("\"rule\":\"file_open\"") && line.contains("\"action\":\"block\""), "{line}");
+        }
+        // Allowed: legitimate open targets (php://input is read-the-body; remote
+        // is the SSRF sink's job; php://temp is benign).
+        for t in [&b"php://input"[..], b"php://temp", b"https://api.example/x.json", b"/var/www/app/data.json"] {
+            assert_eq!(open(c, "file_get_contents", t, HOWDAH_FILE_OP_READ), HOWDAH_ALLOW, "{:?}", String::from_utf8_lossy(t));
+            assert!(take_sink(c).is_none());
+        }
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn open_firewall_poison_proc() {
+        let c = init("mode = \"detect\"");
+        begin(c);
+        assert_eq!(open(c, "readfile", b"/proc/self/environ", HOWDAH_FILE_OP_READ), HOWDAH_BLOCK);
+        assert!(take_sink(c).unwrap().contains("\"rule\":\"file_open\""));
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn firewall_off_disables_both() {
+        // The hub also serves the T5 delete / secret-read guards, so those are
+        // switched off too for "nothing armed".
+        let c = init("[sinks.include]\nwrapper = \"off\"\npoison = \"off\"\n[behavior]\ndelete_guard = \"off\"");
+        begin(c);
+        assert_eq!(sink(c, HOWDAH_SINK_INCLUDE, "include", b"php://filter/resource=x"), HOWDAH_ALLOW);
+        assert_eq!(open(c, "fopen", b"php://filter/resource=x", HOWDAH_FILE_OP_READ), HOWDAH_ALLOW);
+        assert_eq!(unsafe { howdah_sink_open_armed(c) }, 0);
+        unsafe { howdah_free(c) };
+        // Armed by default.
+        let c = init("mode = \"detect\"");
+        assert_eq!(unsafe { howdah_sink_open_armed(c) }, 1);
+        unsafe { howdah_free(c) };
+    }
+
+    // ---- T5 delete / secret-read / upload-write guards ------------------------
+
+    const WP_PLUGIN: &str = "/var/www/html/wp-content/plugins/x/x.php";
+
+    #[test]
+    fn delete_guard_blocks_by_default_and_logs_origin_not_target() {
+        // Shipped posture: global detect, [behavior] untouched -> the guard blocks.
+        let c = init("mode = \"detect\"");
+        begin(c);
+        for (name, target, op) in [
+            ("unlink", &b"/var/www/html/wp-config.php"[..], HOWDAH_FILE_OP_DELETE),
+            ("unlink", b"/var/www/html/.env", HOWDAH_FILE_OP_DELETE),
+            ("unlink", b"/var/www/html/uploads/../../../../etc/cron.d/x", HOWDAH_FILE_OP_DELETE),
+            ("rmdir", b"/var/www/html/../../../../etc/ssl", HOWDAH_FILE_OP_DELETE),
+            ("rename", b"/var/www/html/wp-config.php", HOWDAH_FILE_OP_MOVE_SRC),
+        ] {
+            assert_eq!(open_from(c, name, target, op, WP_PLUGIN, 42), HOWDAH_BLOCK, "{name} {:?}", String::from_utf8_lossy(target));
+            let line = take_sink(c).expect("line");
+            assert!(line.contains("\"rule\":\"file_delete\"") && line.contains("\"action\":\"block\"") && line.contains("\"layer\":4"), "{line}");
+            assert!(line.contains(&format!("{name} ")) && line.contains("x.php:42"), "origin/function missing: {line}");
+            assert!(!line.contains("wp-config.php\"") && !line.contains("/etc/") && !line.contains(".env"), "target leaked: {line}");
+        }
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn delete_guard_benign_corpus_allows() {
+        let c = init("mode = \"detect\"");
+        begin(c);
+        for t in [
+            &b"/tmp/phpAbC123"[..],
+            b"/var/lib/php/sessions/sess_x",
+            b"/var/www/html/wp-content/cache/x.html",
+            b"/var/www/html/wp-content/uploads/2026/10/a.jpg",
+            b"/var/www/html/wp-content/upgrade/tmp",
+            b"/var/www/app/storage/framework/views/a.php",
+            b"/var/www/app/.env.example",
+            b"/var/www/html/.maintenance",
+            b"/var/www/shared/../releases/1/cache/x",
+        ] {
+            assert_eq!(open_from(c, "unlink", t, HOWDAH_FILE_OP_DELETE, WP_PLUGIN, 1), HOWDAH_ALLOW, "{:?}", String::from_utf8_lossy(t));
+            assert_eq!(open_from(c, "rmdir", t, HOWDAH_FILE_OP_DELETE, WP_PLUGIN, 1), HOWDAH_ALLOW);
+            assert!(take_sink(c).is_none());
+        }
+        // rename SOURCE: ordinary renames (including a .env.production -> .env deploy) pass.
+        for t in [&b"/var/www/app/.env.production"[..], b"/var/www/html/cache/a.tmp", b"/var/www/html/uploads/a.jpg"] {
+            assert_eq!(open_from(c, "rename", t, HOWDAH_FILE_OP_MOVE_SRC, WP_PLUGIN, 1), HOWDAH_ALLOW);
+        }
+        // The T3/T4 firewall behaviour is unchanged for the read/write ops.
+        assert_eq!(open(c, "fopen", b"/var/www/html/data.json", HOWDAH_FILE_OP_READ), HOWDAH_ALLOW);
+        assert_eq!(open(c, "fopen", b"/var/www/html/.env", HOWDAH_FILE_OP_READ), HOWDAH_ALLOW); // secret_read is off
+        assert!(take_sink(c).is_none());
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn delete_guard_modes_observe_exceptions_and_master_switches() {
+        let target = b"/var/www/html/wp-config.php";
+        let run = |toml: &str| {
+            let c = init(toml);
+            begin(c);
+            let a = open_from(c, "unlink", target, HOWDAH_FILE_OP_DELETE, "/var/www/migrate/installer.php", 3);
+            let l = take_sink(c);
+            unsafe { howdah_free(c) };
+            (a, l)
+        };
+        assert_eq!(run("[behavior]\ndelete_guard = \"detect\"").0, HOWDAH_LOG);
+        assert_eq!(run("[behavior]\ndelete_guard = \"off\"").0, HOWDAH_ALLOW);
+        // Independent of the (log-only by default) section mode.
+        assert_eq!(run("[behavior]\nmode = \"detect\"").0, HOWDAH_BLOCK);
+        // observe is propose-only: never a block, line marked proposed.
+        let (a, l) = run("[behavior]\nobserve = true");
+        assert_eq!(a, HOWDAH_LOG);
+        assert!(l.unwrap().contains("proposed:"));
+        // Layer-4 master switches.
+        assert_eq!(run("mode = \"off\"").0, HOWDAH_ALLOW);
+        assert_eq!(run("[behavior]\nenabled = false").0, HOWDAH_ALLOW);
+        assert_eq!(run("[behavior]\nmode = \"off\"").0, HOWDAH_ALLOW);
+        // A scoped exception on the executing script lets a migration tool through.
+        let ex = "[[exceptions]]\nrule = \"behavior.file_delete\"\nscript = \"/var/www/migrate/**\"\nreason = \"migration installer\"\n";
+        assert_eq!(run(ex).0, HOWDAH_ALLOW);
+        // ... but not a different script.
+        let c = init(ex);
+        begin(c);
+        assert_eq!(open_from(c, "unlink", target, HOWDAH_FILE_OP_DELETE, WP_PLUGIN, 3), HOWDAH_BLOCK);
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn secret_read_is_off_by_default_and_opt_in() {
+        let target = b"/var/www/html/.env";
+        let read = |toml: &str| {
+            let c = init(toml);
+            begin(c);
+            let a = open_from(c, "file_get_contents", target, HOWDAH_FILE_OP_READ, WP_PLUGIN, 9);
+            let l = take_sink(c);
+            unsafe { howdah_free(c) };
+            (a, l)
+        };
+        assert_eq!(read("").0, HOWDAH_ALLOW);
+        assert_eq!(read("[behavior]\nmode = \"block\"").0, HOWDAH_ALLOW); // still off
+        let (a, l) = read("[behavior]\nsecret_read = \"detect\"");
+        assert_eq!(a, HOWDAH_LOG);
+        let l = l.unwrap();
+        assert!(l.contains("\"rule\":\"secret_read\"") && l.contains("\"layer\":4") && l.contains("\"action\":\"log\""), "{l}");
+        assert!(l.contains("file_get_contents reads a dotenv file at /var/www/html/wp-content/plugins/x/x.php:9"), "{l}");
+        assert_eq!(read("[behavior]\nsecret_read = \"block\"").0, HOWDAH_BLOCK);
+        // observe downgrades even an explicit block.
+        assert_eq!(read("[behavior]\nsecret_read = \"block\"\nobserve = true").0, HOWDAH_LOG);
+        assert_eq!(read("mode = \"off\"\n[behavior]\nsecret_read = \"block\"").0, HOWDAH_ALLOW);
+        // A write-mode open of .env is not a read.
+        let c = init("[behavior]\nsecret_read = \"block\"");
+        begin(c);
+        assert_eq!(open(c, "fopen", target, HOWDAH_FILE_OP_WRITE), HOWDAH_ALLOW);
+        // The firewall wins (and logs file_open) when both would fire.
+        assert_eq!(open(c, "fopen", b"/proc/self/environ", HOWDAH_FILE_OP_READ), HOWDAH_BLOCK);
+        assert!(take_sink(c).unwrap().contains("file_open"));
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn behavior_armed_facets_for_the_file_guards() {
+        let armed = |toml: &str, f: i32| {
+            let c = init(toml);
+            let r = unsafe { howdah_behavior_armed(c, f) };
+            unsafe { howdah_free(c) };
+            r
+        };
+        // Defaults: upload-write and delete on, secret-read off, scoped write off.
+        assert_eq!(armed("", HOWDAH_BEHAVIOR_UPLOAD_WRITE), 1);
+        assert_eq!(armed("", HOWDAH_BEHAVIOR_DELETE), 1);
+        assert_eq!(armed("", HOWDAH_BEHAVIOR_SECRET_READ), 0);
+        assert_eq!(armed("", HOWDAH_BEHAVIOR_PHP_WRITE), 0);
+        assert_eq!(armed("[behavior]\nsecret_read = \"detect\"", HOWDAH_BEHAVIOR_SECRET_READ), 1);
+        assert_eq!(armed("[behavior]\ndelete_guard = \"off\"", HOWDAH_BEHAVIOR_DELETE), 0);
+        assert_eq!(armed("[behavior]\nupload_write = \"off\"", HOWDAH_BEHAVIOR_UPLOAD_WRITE), 0);
+        assert_eq!(armed("mode = \"off\"", HOWDAH_BEHAVIOR_DELETE), 0);
+    }
+
+    #[test]
+    fn upload_write_guard_blocks_by_default_without_config() {
+        let c = init("mode = \"detect\"");
+        begin(c);
+        let call = |caller: &str, target: &str, mode: i32| unsafe {
+            howdah_behavior_check_php_write_at(
+                c,
+                caller.as_ptr() as _,
+                caller.len(),
+                target.as_ptr() as _,
+                target.len(),
+                mode,
+                std::ptr::null(),
+                0,
+                77,
+            )
+        };
+        let up = "/var/www/html/upload.php";
+        for t in ["/var/www/html/uploads/s.php", "/var/www/html/uploads/.htaccess", "/var/www/html/uploads/.user.ini", "/x/s.phtml", "/x/s.phar", "/x/web.config"] {
+            assert_eq!(call(up, t, HOWDAH_WRITE_UPLOAD), HOWDAH_BLOCK, "{t}");
+            let line = take_sink(c).expect("line");
+            assert!(line.contains("\"rule\":\"php_write\"") && line.contains("\"action\":\"block\"") && line.contains("upload.php:77"), "{line}");
+            assert!(!line.contains("uploads") && !line.contains(".htaccess") && !line.contains("s.php\""), "target leaked: {line}");
+        }
+        // Benign uploads and every plain write sink (no scoped tier) are allowed.
+        for t in ["/x/a.jpg", "/x/a.pdf", "/x/a.txt", "/x/a.json", "/x/a.zip", "/x/a.inc"] {
+            assert_eq!(call(up, t, HOWDAH_WRITE_UPLOAD), HOWDAH_ALLOW, "{t}");
+        }
+        for t in ["/x/s.php", "/x/.htaccess", "/x/.user.ini"] {
+            assert_eq!(call(up, t, HOWDAH_WRITE_PLAIN), HOWDAH_ALLOW, "{t}");
+            assert_eq!(call(up, t, HOWDAH_WRITE_READ), HOWDAH_ALLOW, "{t}");
+        }
+        assert!(take_sink(c).is_none());
+        unsafe { howdah_free(c) };
+        // Switchable.
+        let c = init("[behavior]\nupload_write = \"off\"");
+        begin(c);
+        assert_eq!(
+            unsafe { howdah_behavior_check_php_write(c, "/a.php".as_ptr() as _, 6, "/x/s.php".as_ptr() as _, 8, HOWDAH_WRITE_UPLOAD) },
+            HOWDAH_ALLOW
+        );
+        unsafe { howdah_free(c) };
+        let c = init("[behavior]\nupload_write = \"detect\"");
+        begin(c);
+        assert_eq!(
+            unsafe { howdah_behavior_check_php_write(c, "/a.php".as_ptr() as _, 6, "/x/s.php".as_ptr() as _, 8, HOWDAH_WRITE_UPLOAD) },
+            HOWDAH_LOG
+        );
+        unsafe { howdah_free(c) };
+    }
+
     #[test]
     fn unserialize_capped_fails_closed() {
         let c = init("[sinks.unserialize]\nmode=\"block\"\nallow_classes=[\"A\"]");
@@ -2862,6 +4184,276 @@ mod tests {
         let b = b"10.0.0.5";
         let r = unsafe { howdah_ssrf_prepare(b.as_ptr(), b.len(), 0, buf.as_mut_ptr(), 64, &mut n, &mut port) };
         assert_eq!((r, &buf[..n], port), (1, &b"10.0.0.5"[..], 0));
+    }
+
+    #[test]
+    fn ssrf_prepare_redirect_location_forms() {
+        let (mut buf, mut n, mut port) = ([0u8; 64], 0usize, 0u16);
+        let mut go = |loc: &str| -> (i32, String) {
+            let r = unsafe {
+                howdah_ssrf_prepare(loc.as_ptr(), loc.len(), 2, buf.as_mut_ptr(), 64, &mut n, &mut port)
+            };
+            (r, String::from_utf8_lossy(&buf[..n]).into_owned())
+        };
+        // Absolute and scheme-relative Locations are new targets.
+        assert_eq!(go("http://169.254.169.254/latest/meta-data"), (1, "169.254.169.254".into()));
+        assert_eq!(go("//127.0.0.1:8080/x"), (1, "127.0.0.1".into()));
+        assert_eq!(go("  //Evil.example/x").0, 1);
+        // A relative reference stays on the current host: not a target.
+        for rel in ["/admin", "admin", "../x", "?q=1", "#f", ""] {
+            assert_eq!(go(rel).0, 0, "{rel:?}");
+        }
+        // Unknown schemes are the scheme knob's job, not a network target here.
+        assert_eq!(go("dict://127.0.0.1:11211/x").0, 0);
+    }
+
+    #[test]
+    fn ssrf_armed_mask_reflects_knobs() {
+        let mask = |toml: &str| {
+            let c = init(toml);
+            let m = unsafe { howdah_ssrf_armed_mask(c) };
+            unsafe { howdah_free(c) };
+            m
+        };
+        // Off by default, and a global block arms nothing.
+        assert_eq!(mask(""), 0);
+        assert_eq!(mask("mode=\"block\""), 0);
+        assert_eq!(mask("[sinks.ssrf]\nmode=\"detect\""), HOWDAH_SSRF_ARM_RANGE);
+        // Each knob is independent of `mode` and of the others.
+        assert_eq!(mask("[sinks.ssrf]\nrebind=\"detect\""), HOWDAH_SSRF_ARM_REBIND);
+        assert_eq!(
+            mask("[sinks.ssrf]\nrebind=\"block\""),
+            HOWDAH_SSRF_ARM_REBIND | HOWDAH_SSRF_ARM_PIN
+        );
+        assert_eq!(mask("[sinks.ssrf]\nscheme=\"detect\""), HOWDAH_SSRF_ARM_SCHEME);
+        assert_eq!(
+            mask("[sinks.ssrf]\nscheme=\"block\""),
+            HOWDAH_SSRF_ARM_SCHEME | HOWDAH_SSRF_ARM_PROTOCOLS
+        );
+        assert_eq!(mask("[sinks.ssrf]\nredirect=\"detect\""), HOWDAH_SSRF_ARM_REDIRECT);
+        assert_eq!(mask("[sinks.ssrf]\nredirect=\"block\""), HOWDAH_SSRF_ARM_REDIRECT);
+        assert_eq!(
+            mask("[sinks.ssrf]\nmode=\"block\"\nrebind=\"block\"\nscheme=\"block\"\nredirect=\"block\""),
+            HOWDAH_SSRF_ARM_RANGE
+                | HOWDAH_SSRF_ARM_REBIND
+                | HOWDAH_SSRF_ARM_PIN
+                | HOWDAH_SSRF_ARM_SCHEME
+                | HOWDAH_SSRF_ARM_PROTOCOLS
+                | HOWDAH_SSRF_ARM_REDIRECT
+        );
+        // A global off and `enabled = false` silence every knob.
+        let all = "[sinks.ssrf]\nmode=\"block\"\nrebind=\"block\"\nscheme=\"block\"\nredirect=\"block\"";
+        assert_eq!(mask(&format!("mode=\"off\"\n{all}")), 0);
+        assert_eq!(mask(&format!("[sinks]\nenabled=false\n{}", all.trim_start_matches("[sinks.ssrf]\n"))), 0);
+        assert_eq!(unsafe { howdah_ssrf_armed_mask(std::ptr::null_mut()) }, 0);
+    }
+
+    fn ssrf_kind(c: *mut howdah_ctx, kind: i32, via: &str, host: &str, ips: &[[u8; 17]]) -> i32 {
+        let flat: Vec<u8> = ips.iter().flatten().copied().collect();
+        unsafe {
+            howdah_sink_check_ssrf_kind_at(
+                c,
+                kind,
+                via.as_ptr() as _,
+                via.len(),
+                host.as_ptr() as _,
+                host.len(),
+                80,
+                flat.as_ptr(),
+                ips.len(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            )
+        }
+    }
+
+    #[test]
+    fn ssrf_rebind_judges_the_connected_address() {
+        let c = init("[sinks.ssrf]\nrebind=\"block\"");
+        begin(c);
+        // The host name looks public, but the address the connection used is loopback.
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REBIND, "curl-connect", "rebind.example", &[rec4([127, 0, 0, 1])]),
+            HOWDAH_BLOCK
+        );
+        let line = take_sink(c).expect("line");
+        assert!(line.contains("\"rule\":\"ssrf\"") && line.contains("\"action\":\"block\""), "{line}");
+        assert!(
+            line.contains("ssrf rebind via curl-connect: host=rebind.example port=80 ip=127.0.0.1 class=loopback"),
+            "{line}"
+        );
+        // A public connected address is fine; so is metadata only via the knob's own class.
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REBIND, "curl-connect", "ok.example", &[rec4([93, 184, 216, 34])]),
+            HOWDAH_ALLOW
+        );
+        assert!(take_sink(c).is_none());
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REBIND, "tcp", "x.example", &[rec4([169, 254, 169, 254])]),
+            HOWDAH_BLOCK
+        );
+        assert!(take_sink(c).expect("line").contains("class=metadata"));
+        // allow_hosts still wins (the operator vouched for the destination).
+        unsafe { howdah_free(c) };
+        let c = init("[sinks.ssrf]\nrebind=\"block\"\nallow_hosts=[\"internal.example\",\"10.0.0.0/8\"]");
+        begin(c);
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REBIND, "tcp", "internal.example", &[rec4([127, 0, 0, 1])]),
+            HOWDAH_ALLOW
+        );
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REBIND, "tcp", "other.example", &[rec4([10, 1, 2, 3])]),
+            HOWDAH_ALLOW
+        );
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REBIND, "tcp", "other.example", &[rec4([192, 168, 1, 1])]),
+            HOWDAH_BLOCK
+        );
+        unsafe { howdah_free(c) };
+        // detect logs and allows; off is silent.
+        let c = init("[sinks.ssrf]\nrebind=\"detect\"");
+        begin(c);
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REBIND, "curl-connect", "h.example", &[rec4([127, 0, 0, 1])]),
+            HOWDAH_LOG
+        );
+        assert!(take_sink(c).expect("line").contains("\"action\":\"log\""));
+        unsafe { howdah_free(c) };
+        let c = init("[sinks.ssrf]\nmode=\"block\"");
+        begin(c);
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REBIND, "curl-connect", "h.example", &[rec4([127, 0, 0, 1])]),
+            HOWDAH_ALLOW,
+            "rebind is its own knob: `mode` alone does not arm it"
+        );
+        assert!(take_sink(c).is_none());
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn ssrf_redirect_judges_the_hop_target() {
+        let c = init("[sinks.ssrf]\nredirect=\"block\"");
+        begin(c);
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REDIRECT, "http", "169.254.169.254", &[]),
+            HOWDAH_BLOCK,
+            "a literal metadata hop needs no resolved address"
+        );
+        let line = take_sink(c).expect("line");
+        assert!(line.contains("ssrf redirect via http: host=169.254.169.254 port=80 ip=169.254.169.254 class=metadata"), "{line}");
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REDIRECT, "https", "evil.example", &[rec4([10, 0, 0, 5])]),
+            HOWDAH_BLOCK
+        );
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REDIRECT, "https", "cdn.example", &[rec4([93, 184, 216, 34])]),
+            HOWDAH_ALLOW
+        );
+        // An allowlisted hop target is untouched.
+        unsafe { howdah_free(c) };
+        let c = init("[sinks.ssrf]\nredirect=\"detect\"\nallow_hosts=[\"localhost\"]");
+        begin(c);
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REDIRECT, "http", "localhost", &[rec4([127, 0, 0, 1])]),
+            HOWDAH_ALLOW
+        );
+        assert_eq!(
+            ssrf_kind(c, HOWDAH_SSRF_KIND_REDIRECT, "http", "127.0.0.1", &[]),
+            HOWDAH_LOG
+        );
+        unsafe { howdah_free(c) };
+    }
+
+    fn ssrf_scheme(c: *mut howdah_ctx, via: i32, url: &str) -> i32 {
+        unsafe {
+            howdah_sink_ssrf_scheme_at(c, via, url.as_ptr() as _, url.len(), std::ptr::null(), 0, std::ptr::null(), 0)
+        }
+    }
+
+    #[test]
+    fn ssrf_scheme_denies_non_http_and_logs_only_the_category() {
+        let c = init("[sinks.ssrf]\nscheme=\"block\"");
+        begin(c);
+        for (u, label) in [
+            ("gopher://127.0.0.1:6379/_SECRETCMD", "gopher"),
+            ("dict://127.0.0.1:11211/SECRETCMD", "dict"),
+            ("file:///etc/SECRETFILE", "file"),
+            ("ldap://127.0.0.1/SECRETCMD", "ldap"),
+            ("tftp://127.0.0.1/SECRETCMD", "tftp"),
+        ] {
+            assert_eq!(ssrf_scheme(c, HOWDAH_SSRF_VIA_CURL, u), HOWDAH_BLOCK, "{u}");
+            let line = take_sink(c).expect("line");
+            assert!(line.contains("\"rule\":\"ssrf\"") && line.contains("\"action\":\"block\""), "{line}");
+            assert!(line.contains(&format!("ssrf scheme via curl: scheme={label}")), "{line}");
+            assert!(!line.contains("SECRET") && !line.contains("127.0.0.1") && !line.contains("//"), "leaked: {line}");
+        }
+        for ok in ["http://127.0.0.1/", "https://example.com/x", "example.com/x", "localhost:8080"] {
+            assert_eq!(ssrf_scheme(c, HOWDAH_SSRF_VIA_CURL, ok), HOWDAH_ALLOW, "{ok}");
+        }
+        // Stream functions: only the remote wrappers; local wrappers and phar are untouched.
+        assert_eq!(ssrf_scheme(c, HOWDAH_SSRF_VIA_STREAM, "ftp://127.0.0.1/x"), HOWDAH_BLOCK);
+        assert!(take_sink(c).expect("line").contains("ssrf scheme via stream: scheme=ftp"));
+        for ok in ["file:///etc/hostname", "php://temp", "data://text/plain,hi", "phar:///x.phar/y", "http://h/"] {
+            assert_eq!(ssrf_scheme(c, HOWDAH_SSRF_VIA_STREAM, ok), HOWDAH_ALLOW, "{ok}");
+        }
+        assert!(take_sink(c).is_none());
+        unsafe { howdah_free(c) };
+        // detect logs, off is silent, and the range `mode` does not arm it.
+        let c = init("[sinks.ssrf]\nscheme=\"detect\"");
+        begin(c);
+        assert_eq!(ssrf_scheme(c, HOWDAH_SSRF_VIA_CURL, "gopher://h/"), HOWDAH_LOG);
+        assert!(take_sink(c).expect("line").contains("\"action\":\"log\""));
+        unsafe { howdah_free(c) };
+        let c = init("[sinks.ssrf]\nmode=\"block\"");
+        begin(c);
+        assert_eq!(ssrf_scheme(c, HOWDAH_SSRF_VIA_CURL, "gopher://h/"), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        unsafe { howdah_free(c) };
+        assert_eq!(ssrf_scheme(std::ptr::null_mut(), HOWDAH_SSRF_VIA_CURL, "gopher://h/"), HOWDAH_ALLOW);
+    }
+
+    #[test]
+    fn ssrf_scheme_honours_exceptions_and_fails_open_on_panic() {
+        let toml = "[sinks.ssrf]\nscheme=\"block\"\n[[exceptions]]\nrule=\"ssrf\"\nscript=\"/app/trusted.php\"\nreason=\"partner ftp\"";
+        let c = init(toml);
+        begin(c);
+        let (url, s) = ("ftp://partner.example/x", "/app/trusted.php");
+        let r = |script: &str| unsafe {
+            howdah_sink_ssrf_scheme_at(
+                c,
+                HOWDAH_SSRF_VIA_CURL,
+                url.as_ptr() as _,
+                url.len(),
+                script.as_ptr() as _,
+                script.len(),
+                std::ptr::null(),
+                0,
+            )
+        };
+        assert_eq!(r(s), HOWDAH_ALLOW, "excepted script");
+        assert_eq!(r("/app/other.php"), HOWDAH_BLOCK, "any other script");
+        FORCE_PANIC.with(|f| f.set(true));
+        assert_eq!(ssrf_scheme(c, HOWDAH_SSRF_VIA_CURL, "gopher://h/"), HOWDAH_ALLOW);
+        FORCE_PANIC.with(|f| f.set(false));
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn ssrf_pin_entry_ffi_roundtrip() {
+        let recs = [rec4([93, 184, 216, 34]), rec4([93, 184, 216, 35])].concat();
+        let url = b"https://Example.com:8443/x?y=1";
+        let mut out = [0u8; 64];
+        let n = unsafe { howdah_ssrf_pin_entry(url.as_ptr(), url.len(), recs.as_ptr(), 2, 1, out.as_mut_ptr(), out.len()) };
+        assert_eq!(&out[..n], b"example.com:8443:93.184.216.34,93.184.216.35");
+        let n = unsafe { howdah_ssrf_pin_entry(url.as_ptr(), url.len(), recs.as_ptr(), 2, 0, out.as_mut_ptr(), out.len()) };
+        assert_eq!(&out[..n], b"example.com:8443:93.184.216.34");
+        // Too small a buffer, a literal host, NULLs: nothing.
+        assert_eq!(unsafe { howdah_ssrf_pin_entry(url.as_ptr(), url.len(), recs.as_ptr(), 2, 0, out.as_mut_ptr(), 8) }, 0);
+        let lit = b"http://127.0.0.1/";
+        assert_eq!(unsafe { howdah_ssrf_pin_entry(lit.as_ptr(), lit.len(), recs.as_ptr(), 2, 0, out.as_mut_ptr(), 64) }, 0);
+        assert_eq!(unsafe { howdah_ssrf_pin_entry(std::ptr::null(), 0, std::ptr::null(), 0, 0, out.as_mut_ptr(), 64) }, 0);
     }
 
     #[test]
@@ -3170,10 +4762,10 @@ mod tests {
     #[test]
     fn sink_hook_plan_follows_config() {
         assert_eq!(unsafe { howdah_sink_hook_plan(std::ptr::null_mut()) }, HOWDAH_HOOK_PLAN_NONE);
-        // Shipped defaults: eval inherits detect -> the hook is needed; auto
-        // picks compile (eval only), so the JIT stays on by default.
+        // Shipped defaults: the include firewall is on -> the hook is needed;
+        // auto picks compile (firewall + eval are compile-covered), JIT stays on.
         let c = init("");
-        assert_eq!(unsafe { howdah_sink_hook_plan(c) }, HOWDAH_HOOK_PLAN_COMPILE | (HOWDAH_HOOK_WHY_EVAL_ONLY << 4));
+        assert_eq!(unsafe { howdah_sink_hook_plan(c) }, HOWDAH_HOOK_PLAN_COMPILE | (HOWDAH_HOOK_WHY_INCLUDE_FIREWALL << 4));
         unsafe { howdah_free(c) };
         let c = init("[sinks]\nhook = \"compile\"");
         assert_eq!(unsafe { howdah_sink_hook_plan(c) }, HOWDAH_HOOK_PLAN_COMPILE | (HOWDAH_HOOK_WHY_CONFIGURED << 4));
@@ -3189,8 +4781,16 @@ mod tests {
         let c = init("[sinks]\nenabled = false\n[behavior]\ndeny_exec_dirs = [\"/var/www/uploads\"]");
         assert_eq!(unsafe { howdah_sink_hook_plan(c) }, HOWDAH_HOOK_PLAN_OPCODE | (HOWDAH_HOOK_WHY_DENY_EXEC_DIRS << 4));
         unsafe { howdah_free(c) };
-        // Nothing armed, or global off: plan NONE.
-        for toml in ["[sinks.eval]\nmode = \"off\"", "[sinks]\nenabled = false", "mode = \"off\"\n[behavior]\ndeny_exec_dirs = [\"/x\"]"] {
+        // eval off but the firewall is on by default -> still compile.
+        let c = init("[sinks.eval]\nmode = \"off\"");
+        assert_eq!(unsafe { howdah_sink_hook_plan(c) }, HOWDAH_HOOK_PLAN_COMPILE | (HOWDAH_HOOK_WHY_INCLUDE_FIREWALL << 4));
+        unsafe { howdah_free(c) };
+        // Nothing armed (firewall + eval off), or global off / disabled: NONE.
+        for toml in [
+            "[sinks.include]\nwrapper = \"off\"\npoison = \"off\"\n[sinks.eval]\nmode = \"off\"",
+            "[sinks]\nenabled = false",
+            "mode = \"off\"\n[behavior]\ndeny_exec_dirs = [\"/x\"]",
+        ] {
             let c = init(toml);
             assert_eq!(unsafe { howdah_sink_hook_plan(c) }, HOWDAH_HOOK_PLAN_NONE, "{toml}");
             unsafe { howdah_free(c) };
@@ -3236,13 +4836,13 @@ mod tests {
         assert!(l.contains("\"rule\":\"dangerous_callback\"") && l.contains("'system' via array_map"), "{l}");
         assert_eq!(sink(c, HOWDAH_SINK_CALLBACK, "array_map", b"trim"), HOWDAH_ALLOW);
         assert!(take_sink(c).is_none());
+        // xml has its own flag-aware entry point (xml_check below); the
+        // one-argument path never reports it.
         assert_eq!(
             sink(c, HOWDAH_SINK_XML, "simplexml_load_string", b"<!DOCTYPE r [<!ENTITY x SYSTEM \"file:///SECRETPATH\">]><r/>"),
-            HOWDAH_LOG
+            HOWDAH_ALLOW
         );
-        let l = take_sink(c).unwrap();
-        assert!(l.contains("\"rule\":\"xxe\"") && !l.contains("SECRETPATH"), "{l}");
-        assert_eq!(sink(c, HOWDAH_SINK_XML, "simplexml_load_string", b"<r/>"), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
         assert_eq!(sink(c, HOWDAH_SINK_TLS, "curl_setopt", b"verifypeer"), HOWDAH_LOG);
         let l = take_sink(c).unwrap();
         assert!(l.contains("\"rule\":\"tls_verify\"") && l.contains("VERIFYPEER"), "{l}");
@@ -3258,12 +4858,6 @@ mod tests {
         assert_eq!(sink(c, HOWDAH_SINK_CREATE_FUNCTION, "create_function", b"1;"), HOWDAH_BLOCK);
         assert_eq!(sink(c, HOWDAH_SINK_ASSERT, "assert", b"1"), HOWDAH_BLOCK);
         assert_eq!(sink(c, HOWDAH_SINK_CALLBACK, "call_user_func", b"\\exec"), HOWDAH_BLOCK);
-        // An external ENTITY blocks; a bare external DTD (XHTML/SVG) only logs.
-        assert_eq!(sink(c, HOWDAH_SINK_XML, "DOMDocument::loadXML", b"<!DOCTYPE r [<!ENTITY x SYSTEM \"f\">]><r/>"), HOWDAH_BLOCK);
-        assert!(take_sink(c).unwrap().contains("\"action\":\"block\""));
-        assert_eq!(sink(c, HOWDAH_SINK_XML, "DOMDocument::loadXML", b"<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"svg11.dtd\"><svg/>"), HOWDAH_LOG);
-        let l = take_sink(c).unwrap();
-        assert!(l.contains("\"action\":\"log\"") && l.contains("external DTD"), "{l}");
         assert_eq!(sink(c, HOWDAH_SINK_TLS, "curl_setopt_array", b"verifyhost"), HOWDAH_LOG);
         let l = take_sink(c).unwrap();
         assert!(l.contains("\"action\":\"log\"") && l.contains("VERIFYHOST"), "{l}");
@@ -3298,6 +4892,165 @@ mod tests {
         }
     }
 
+    fn xml_check(c: *mut howdah_ctx, name: &str, doc: &[u8], flags: i64, caps: i32) -> i32 {
+        unsafe {
+            howdah_sink_check_xml(
+                c,
+                name.as_ptr() as _,
+                name.len(),
+                doc.as_ptr() as _,
+                doc.len(),
+                flags,
+                caps,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            )
+        }
+    }
+
+    const XXE_DOC: &[u8] =
+        b"<?xml version=\"1.0\"?><!DOCTYPE r [<!ENTITY x SYSTEM \"file:///SECRETPATH\">]><r>&x;</r>";
+    const SVG_DOC: &[u8] = b"<?xml version=\"1.0\"?><!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\"><svg/>";
+
+    #[test]
+    fn xxe_blocks_only_a_dangerous_flag_with_an_external_entity_by_default() {
+        // Shipped config: no [sinks] section at all, global detect. The xxe rule
+        // still enforces (like cgi_arg_injection), and only on flag AND entity.
+        let c = init("");
+        begin(c);
+        let strip = HOWDAH_XML_CAN_STRIP;
+        // dangerous flag + external entity: stripped (block), logged as block,
+        // document never logged, flags named from a fixed vocabulary.
+        assert_eq!(xml_check(c, "simplexml_load_string", XXE_DOC, 2, strip), HOWDAH_STRIP);
+        let l = take_sink(c).unwrap();
+        assert!(l.contains("\"rule\":\"xxe\"") && l.contains("\"layer\":3"), "{l}");
+        assert!(l.contains("\"action\":\"block\"") && l.contains("LIBXML_NOENT"), "{l}");
+        assert!(l.contains("dangerous flags removed, parse continued"), "{l}");
+        assert!(!l.contains("SECRETPATH") && !l.contains("passwd"), "{l}");
+        // every dangerous flag, and combinations
+        for f in [4, 8, 16, 2 | 4, 14, 30, 2 | 16384, 2 | 1 << 19] {
+            assert_eq!(xml_check(c, "DOMDocument::loadXML", XXE_DOC, f, strip), HOWDAH_STRIP, "flags {f}");
+            assert!(take_sink(c).is_some());
+        }
+        // no dangerous flag: silent, whatever the document
+        for f in [0, 1, 32, 64, 256, 1024, 2048, 16384, 1 << 19] {
+            assert_eq!(xml_check(c, "simplexml_load_string", XXE_DOC, f, strip), HOWDAH_ALLOW, "flags {f}");
+            assert!(take_sink(c).is_none());
+        }
+        // A bare DOCTYPE / SAML / SVG / Office-style document: never blocked
+        // under any flags; a bare external DTD logs only when a flag fetches it.
+        for f in [0, 2, 4, 8, 16, 30, 31] {
+            for doc in [
+                &b"<!DOCTYPE html><html/>"[..],
+                b"<?xml version=\"1.0\"?><samlp:Response xmlns:samlp=\"urn:oasis:names:tc:SAML:2.0:protocol\"/>",
+                b"<?xml version=\"1.0\"?><!DOCTYPE r [<!ELEMENT r ANY><!ENTITY co \"ACME\">]><r>&co;</r>",
+                SVG_DOC,
+            ] {
+                let a = xml_check(c, "DOMDocument::loadXML", doc, f, strip);
+                assert!(a == HOWDAH_ALLOW || a == HOWDAH_LOG, "flags {f}: {a}");
+                let line = take_sink(c);
+                assert_eq!(a == HOWDAH_LOG, line.is_some());
+                if let Some(line) = line {
+                    assert!(f & 12 != 0 && line.contains("external DTD") && line.contains("\"action\":\"log\""), "{line}");
+                }
+            }
+        }
+        // Without the strip capability a block refuses the call.
+        assert_eq!(xml_check(c, "simplexml_load_string", XXE_DOC, 2, 0), HOWDAH_BLOCK);
+        assert!(take_sink(c).unwrap().contains("call refused"));
+        // libxml before 2.9 resolves entities whatever the flags: flags 0 is
+        // not a pass, and the flags cannot be stripped, so the call is refused.
+        let old = HOWDAH_XML_CAN_STRIP | HOWDAH_XML_ENGINE_IGNORES_FLAGS;
+        assert_eq!(xml_check(c, "simplexml_load_string", XXE_DOC, 0, old), HOWDAH_BLOCK);
+        let l = take_sink(c).unwrap();
+        assert!(l.contains("before 2.9") && l.contains("call refused") && !l.contains("SECRETPATH"), "{l}");
+        assert_eq!(xml_check(c, "simplexml_load_string", b"<r/>", 0, old), HOWDAH_ALLOW);
+        // an entity bomb is the same class
+        let mut bomb = String::from("<!DOCTYPE l [<!ENTITY a0 \"lol\">");
+        for k in 1..=9 {
+            bomb.push_str(&format!("<!ENTITY a{k} \"{}\">", format!("&a{};", k - 1).repeat(10)));
+        }
+        bomb.push_str("]><l>&a9;</l>");
+        assert_eq!(xml_check(c, "simplexml_load_string", bomb.as_bytes(), 2, strip), HOWDAH_STRIP);
+        assert!(take_sink(c).unwrap().contains("expand past 1 MiB"));
+        assert_eq!(xml_check(c, "simplexml_load_string", bomb.as_bytes(), 0, strip), HOWDAH_ALLOW);
+        unsafe { howdah_free(c) };
+
+        // Shipped howdah.mode = detect and an explicit [sinks] detect do not
+        // soften it; sinks off does not either (own knob); global off does.
+        let c = init("[sinks]\nmode=\"detect\"");
+        begin(c);
+        assert_eq!(xml_check(c, "simplexml_load_string", XXE_DOC, 2, strip), HOWDAH_STRIP);
+        unsafe { howdah_free(c) };
+        let c = init("mode=\"off\"");
+        begin(c);
+        assert_eq!(xml_check(c, "simplexml_load_string", XXE_DOC, 2, strip), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        unsafe { howdah_free(c) };
+        let c = init("[sinks]\nenabled=false");
+        begin(c);
+        assert_eq!(xml_check(c, "simplexml_load_string", XXE_DOC, 2, strip), HOWDAH_ALLOW);
+        unsafe { howdah_free(c) };
+
+        // [sinks.xml] mode: detect logs and leaves the call alone; off is silent.
+        let c = init("[sinks.xml]\nmode=\"detect\"");
+        begin(c);
+        assert_eq!(xml_check(c, "simplexml_load_string", XXE_DOC, 2, strip), HOWDAH_LOG);
+        let l = take_sink(c).unwrap();
+        assert!(l.contains("\"action\":\"log\"") && !l.contains("removed") && !l.contains("refused"), "{l}");
+        unsafe { howdah_free(c) };
+        let c = init("[sinks.xml]\nmode=\"off\"");
+        begin(c);
+        assert_eq!(xml_check(c, "simplexml_load_string", XXE_DOC, 2, strip), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        unsafe {
+            assert_eq!(howdah_sink_armed(c, HOWDAH_SINK_XML), 0);
+            howdah_free(c);
+        }
+        // Armed by default (so the glue installs the hooks with no config).
+        let c = init("");
+        unsafe {
+            assert_eq!(howdah_sink_armed(c, HOWDAH_SINK_XML), 1);
+            assert_eq!(
+                howdah_sink_check_xml(std::ptr::null_mut(), std::ptr::null(), 0, std::ptr::null(), 0, 2, 1, std::ptr::null(), 0, std::ptr::null(), 0),
+                HOWDAH_ALLOW
+            );
+            howdah_free(c);
+        }
+    }
+
+    #[test]
+    fn xml_dangerous_flags_mirror_the_scanner() {
+        assert_eq!(HOWDAH_XML_DANGEROUS_FLAGS, legacy::XML_DANGEROUS_FLAGS);
+        assert_eq!(HOWDAH_XML_DANGEROUS_FLAGS, 2 | 4 | 8 | 16); // NOENT|DTDLOAD|DTDATTR|DTDVALID
+    }
+
+    #[test]
+    fn xxe_script_exception_silences_the_rule() {
+        let c = init("[[exceptions]]\nrule = \"sinks.xxe\"\nscript = \"/srv/app/dom.php\"\nreason = \"trusted local DocBook build\"");
+        begin(c);
+        let at = |script: &str| unsafe {
+            howdah_sink_check_xml(
+                c,
+                b"DOMDocument::loadXML".as_ptr() as _,
+                20,
+                XXE_DOC.as_ptr() as _,
+                XXE_DOC.len(),
+                2,
+                HOWDAH_XML_CAN_STRIP,
+                script.as_ptr() as _,
+                script.len(),
+                std::ptr::null(),
+                0,
+            )
+        };
+        assert_eq!(at("/srv/app/dom.php"), HOWDAH_ALLOW);
+        assert_eq!(at("/srv/app/other.php"), HOWDAH_STRIP);
+        unsafe { howdah_free(c) };
+    }
+
     /// The ext glue routes every one-argument sink through the `_at` entry
     /// point (exceptions-aware), which has its own sink-id map: each legacy
     /// id must be known there too (the lab caught `array_map('system')`
@@ -3325,7 +5078,6 @@ mod tests {
             (HOWDAH_SINK_CREATE_FUNCTION, "create_function", b"1;", "create_function"),
             (HOWDAH_SINK_ASSERT, "assert", b"1", "assert_string"),
             (HOWDAH_SINK_CALLBACK, "array_map", b"system", "dangerous_callback"),
-            (HOWDAH_SINK_XML, "simplexml_load_string", b"<!DOCTYPE r [<!ENTITY x SYSTEM \"f\">]><r/>", "xxe"),
             (HOWDAH_SINK_TLS, "curl_setopt", b"verifypeer", "tls_verify"),
         ] {
             assert_eq!(at(id, name, arg), HOWDAH_LOG, "{rule} via _at");
@@ -3592,6 +5344,7 @@ mod tests {
                 1,
                 std::ptr::null(),
                 0,
+                0,
             )
         };
         assert_eq!(call("/var/www/app/compile.php"), HOWDAH_ALLOW);
@@ -3748,6 +5501,58 @@ mod tests {
             howdah_free(d);
             howdah_free(off);
             howdah_free(no);
+        }
+    }
+
+    // ---- howdah_recycle_*: the §4.7 recycle facet toggles ---------------------
+
+    #[test]
+    fn recycle_on_fatal_getter_defaults_off() {
+        let def = init(""); // off by default
+        assert_eq!(unsafe { howdah_recycle_on_fatal(def) }, 0);
+        let on = init("recycle_on_fatal = true\n");
+        assert_eq!(unsafe { howdah_recycle_on_fatal(on) }, 1);
+        assert_eq!(unsafe { howdah_recycle_on_fatal(std::ptr::null_mut()) }, 0);
+        unsafe {
+            howdah_free(def);
+            howdah_free(on);
+        }
+    }
+
+    #[test]
+    fn recycle_armed_honors_key_and_mode() {
+        // Off by default -> not armed.
+        let def = init("");
+        assert_eq!(unsafe { howdah_recycle_armed(def) }, 0);
+        // On, block mode -> armed.
+        let on = init("recycle_on_fatal = true\n");
+        assert_eq!(unsafe { howdah_recycle_armed(on) }, 1);
+        // detect keeps it armed (Critical fail-stop).
+        let d = init("mode = \"detect\"\nrecycle_on_fatal = true\n");
+        assert_eq!(unsafe { howdah_recycle_armed(d) }, 1);
+        // A global off disables it even with the key on.
+        let off = init("mode = \"off\"\nrecycle_on_fatal = true\n");
+        assert_eq!(unsafe { howdah_recycle_armed(off) }, 0);
+        assert_eq!(unsafe { howdah_recycle_on_fatal(off) }, 1, "key itself is still on");
+        assert_eq!(unsafe { howdah_recycle_armed(std::ptr::null_mut()) }, 0);
+        unsafe {
+            howdah_free(def);
+            howdah_free(on);
+            howdah_free(d);
+            howdah_free(off);
+        }
+    }
+
+    #[test]
+    fn recycle_observe_getter_defaults_enforce() {
+        let enforce = init("recycle_on_fatal = true\n"); // observe off -> enforce
+        assert_eq!(unsafe { howdah_recycle_observe(enforce) }, 0);
+        let observe = init("recycle_on_fatal = true\nrecycle_observe = true\n");
+        assert_eq!(unsafe { howdah_recycle_observe(observe) }, 1);
+        assert_eq!(unsafe { howdah_recycle_observe(std::ptr::null_mut()) }, 0);
+        unsafe {
+            howdah_free(enforce);
+            howdah_free(observe);
         }
     }
 

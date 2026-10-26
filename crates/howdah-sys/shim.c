@@ -16,3 +16,13 @@ const char *howdah_sys_build_id(void) {
 void howdah_sys_log_err(const char *msg) {
     php_log_err((char *)msg);
 }
+
+/* The resolved temporary directory. PHP's file session handler writes sess_*
+ * there when session.save_path is empty (the stock config on bare PHP / many
+ * docker images), so the wrapper firewall's session-poison check still has a
+ * base to anchor on. Declared in main/php_open_temporary_file.h since PHP 5.x
+ * and cached by PHP; may return NULL very early, so the caller handles that. */
+#include "main/php_open_temporary_file.h"
+const char *howdah_sys_temp_dir(void) {
+    return php_get_temporary_directory();
+}

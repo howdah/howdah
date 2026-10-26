@@ -240,6 +240,9 @@ mod tests {
         assert_eq!(v["config"]["mode"], "block");
         assert_eq!(v["config"]["limits"]["max_parts"], 2000);
         assert_eq!(v["config"]["sinks"]["unserialize"]["mode"], "off");
+        // xxe is enforced by default with its own mode (the editor reads this default).
+        assert_eq!(v["config"]["sinks"]["xml"]["mode"], "block");
+        assert_eq!(v["config"]["sinks"]["mode"], "detect");
         assert!(v["config"]["rules"].is_object());
     }
 
@@ -274,16 +277,41 @@ mod tests {
     }
 
     #[test]
+    fn ssrf_hardening_knobs_validate_and_default_off() {
+        // T6: the three SSRF hardening knobs are config keys (not rules): the
+        // catalog is unchanged, the defaults are off and each takes off|detect|block.
+        let d: serde_json::Value = serde_json::from_str(&validate_config(b"")).unwrap();
+        assert_eq!(d["ok"], true, "{d}");
+        for k in ["rebind", "scheme", "redirect"] {
+            assert_eq!(d["config"]["sinks"]["ssrf"][k], "off", "{k}");
+            let toml = format!("[sinks.ssrf]\n{k} = \"block\"");
+            let v: serde_json::Value = serde_json::from_str(&validate_config(toml.as_bytes())).unwrap();
+            assert_eq!(v["ok"], true, "{k}: {v}");
+            assert_eq!(v["config"]["sinks"]["ssrf"][k], "block");
+            let bad = format!("[sinks.ssrf]\n{k} = \"observe\"");
+            let v: serde_json::Value = serde_json::from_str(&validate_config(bad.as_bytes())).unwrap();
+            assert_eq!(v["ok"], false, "{k}");
+        }
+    }
+
+    #[test]
     fn rule_catalog_has_every_rule_with_severity() {
         let v: serde_json::Value = serde_json::from_str(&rule_catalog_json()).unwrap();
         let rules = v.as_array().unwrap();
         let names: Vec<&str> = rules.iter().map(|r| r["name"].as_str().unwrap()).collect();
-        assert_eq!(names.len(), 40, "{names:?}");
+        assert_eq!(names.len(), 46, "{names:?}");
         assert!(names.contains(&"max_parts") && names.contains(&"unserialize") && names.contains(&"ssrf"));
+        // The T4 include/open wrapper-scheme firewall rules.
+        assert!(names.contains(&"include_wrapper") && names.contains(&"file_open"));
         // Layer 4 (1.4) rule ids must reach the wasm catalog the config editor reads.
         assert!(names.contains(&"upload_exec") && names.contains(&"php_write"));
-        // The out-of-memory backstop's Layer-1 rules.
+        // The T5 delete and secret-read guards (Layer 4).
+        assert!(names.contains(&"file_delete") && names.contains(&"secret_read"));
+        // The out-of-memory backstop's Layer-1 rules, plus the §4.7 recycle rule.
         assert!(names.contains(&"out_of_memory") && names.contains(&"startup_fatal"));
+        assert!(names.contains(&"fatal_recycle"));
+        // The Layer 2 php-cgi argument-injection rule (CVE-2012-1823, CVE-2024-4577).
+        assert!(names.contains(&"cgi_arg_injection"));
         // Legacy-era sinks (1.5).
         for n in ["mail_injection", "preg_eval", "create_function", "assert_string", "dangerous_callback", "xxe", "tls_verify"] {
             assert!(names.contains(&n), "{n}");

@@ -11,7 +11,7 @@ use std::collections::VecDeque;
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixDatagram;
 use std::os::unix::process::CommandExt;
@@ -547,6 +547,23 @@ impl Settings {
     /// The `php --ri howdah` "Log hook" value, if a hook is set.
     pub fn describe_hook(&self) -> Option<String> {
         self.hook.as_ref().map(|h| format!("{} (at most {} per second)", h.path(), h.limit()))
+    }
+
+    /// A persistent append fd on the log FILE, for the OOM backstop's
+    /// async-signal-safe `write(2)` (it cannot `open` or allocate on that path).
+    /// `None` for syslog/stderr — the caller then uses stderr. Opened once; the
+    /// fd deliberately outlives this call (process lifetime). Never panics.
+    pub fn oom_fd(&self) -> Option<i32> {
+        match &self.target {
+            Target::File { path, .. } => OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(LOG_FILE_MODE)
+                .open(path)
+                .ok()
+                .map(|f| f.into_raw_fd()),
+            _ => None,
+        }
     }
 
     /// Write one event line to the destination (stderr if that fails), then

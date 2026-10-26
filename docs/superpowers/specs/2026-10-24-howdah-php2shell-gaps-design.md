@@ -258,6 +258,65 @@ damaged state.
   per-generation types as `input_filter.rs` does. The builder must confirm on
   each generation that the callback runs before the longjmp.
 
+### 4.7 Recycle the worker after a poisoning-class fatal (CVE-2026-109619) — opt-in
+
+§4.6 ends the worker on out-of-memory and on fatals during request startup,
+closing the out-of-memory and startup-window producers of CVE-2026-109619. It
+deliberately leaves one producer open: a **non-OOM bailout fatal during the
+script** — an uncaught `Error`, a parse/compile error, a failed `require`,
+`max_execution_time`. Exiting on every one would restart workers on apps that
+throw uncaught fatals in normal traffic, so §4.6 lets those run. This facet
+closes that last producer without that cost.
+
+- **Why recycling is enough, and why the request can still finish.**
+  CVE-2026-109619's consumer runs on a *later* request on the same worker,
+  *before* that request's executor is initialized — not during the producing
+  request. Upstream's fix (`3584a98bda0f`, "Avoid state corruption via
+  bailout"; 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12) confirms it: it clears
+  `EG(user_error_handler)`, `EG(errors)`, `EG(num_errors)`, `EG(exception)` and
+  the rest in `zend_shutdown_executor_values`, with the comment *"may be used by
+  `zend_error_zstr_at` before `init_executor`."* A worker that never serves
+  another request after the fatal cannot reach the consumer, so the producing
+  request can deliver its own error page first.
+- **Mechanism.** Reuse §4.6's `zend_error_cb` handler. On a bailout fatal
+  (`E_ERROR | E_CORE_ERROR | E_COMPILE_ERROR | E_USER_ERROR | E_PARSE`) that is
+  *not* out-of-memory and *not* during request startup, instead of `_exit()`-ing,
+  set a per-worker "tainted" flag and chain to the prior callback so PHP renders
+  its normal fatal (the client gets the 500). Then, at the end of request
+  teardown — Howdah's existing `post_deactivate` hook, which already runs after a
+  bailout — if the flag is set, `_exit(0)`. The master starts a fresh worker for
+  the next request. OOM and startup fatals keep §4.6's immediate exit.
+- **Why not the alternatives.** An immediate `_exit()` on the script fatal
+  fires on the same set of fatals, so it churns workers at the same rate but
+  drops the current response; recycle-after-teardown is strictly better where
+  the response is flushed before teardown. Replicating upstream's state reset
+  from the extension (zeroing those `EG()` fields ourselves) avoids all churn
+  but means tracking version-specific `EG()` layout across 5.4–8.4 and the full
+  producer/consumer set the advisory lists — the per-site repair §4.6 already
+  rejects — so it is out of scope here (a candidate for a future rule /
+  virtual-patch mechanism, not this facet).
+- **Better than the upstream stopgap.** The advisory's own mitigation is
+  `pm.max_requests=1` (recycle after *every* request). This facet gets the same
+  safety — the poisoned worker never serves a second request — while recycling
+  only after an actual fatal, and it works under Apache mod_php, which has no
+  `pm.max_requests`.
+- **Producer coverage.** The advisory's producer list — OOM, parse/compile
+  error, uncaught error, failed `require`, `max_execution_time` — all raise
+  bailout fatals through `zend_error_cb`. OOM is §4.6; the rest are covered here.
+- **Scope and config.** Same gates as §4.6: web SAPIs only, NTS, off on patched
+  releases (runtime version check). **Off by default** — an operator opt-in for
+  unpatched, long-lived-worker deployments — behind its own boolean key (name to
+  the builder), with an **observe mode** that logs a "would-recycle" event
+  without exiting, so an operator can size their uncaught-fatal rate before
+  enforcing. A new Layer-1 `Critical` RuleId (name to the builder). **(Whether to
+  ship, and the default, are the owner's call.)**
+- **Trade-off and the one thing to confirm.** Enforcing recycles a worker on
+  every covered fatal, so the cost scales with the app's fatal rate (observe
+  mode sizes it first). The builder must confirm, per SAPI, that the response is
+  flushed before `post_deactivate`; on any SAPI where it isn't, fall back to the
+  immediate `_exit()` there — safety over the preserved error page.
+  **(Builder's call.)**
+
 ## 5. Verification
 
 ### 5.1 Lab targets
@@ -353,7 +412,60 @@ and php-fpm behind nginx:
 - with the key turned off, PHP's normal fatal-error behavior is unchanged;
 - on a patched release (8.4.27) and on the CLI the handler stays off;
 - any other error (a warning, an uncaught exception in the script) reaches the
+  prior callback unchanged — with the §4.7 recycle facet off, the default.
+
+### 5.6 The recycle facet (§4.7)
+
+The §5.5 bed extended — no attack request, an ordinary script that throws an
+uncaught fatal during execution — under Apache mod_php and php-fpm behind nginx,
+on an unpatched image:
+
+- **Observe mode:** a "would-recycle" line is written and the worker pid is
+  unchanged (the next request is the same worker).
+- **Enforce mode:** the worker exits after the request, the next request is
+  served by a fresh worker (pid changes), and the producing request still
+  returned PHP's 500.
+- OOM and startup fatals keep §4.6's immediate exit; a warning still reaches the
   prior callback unchanged.
+- **Cross-request oracle (the CVE-2026-109619 shape):** request 1 runs the
+  producer (the fatal); request 2 reaches the same worker. Undefended, request 2
+  lands on the reused worker — the consumer window. Enforcing, request 2 lands on
+  a fresh worker. This is the web-SAPI translation of upstream's
+  state-corruption phpt intent.
+
+**Builder's flush-ordering finding (the "one thing to confirm").** The
+`lab/integration/recycle.sh` bed measured, per SAPI, whether the producing
+request's 500 reaches the client under recycle-after. On **both** tested web
+SAPIs the response is finalized *after* `post_deactivate`, so neither preserves
+it: php-fpm behind nginx sends `FCGI_END_REQUEST` only after
+`php_request_shutdown` returns (an exit at `post_deactivate` makes nginx answer
+502), and Apache mod_php finalizes the connection only after the handler returns
+(an exit there resets the connection, curl sees no response). Per §4.7's rule
+("on any SAPI where it isn't [flushed], fall back to the immediate `_exit()`
+there — safety over the preserved error page"), **both SAPIs therefore use the
+immediate-exit path**: `enforce` resolves to an immediate `_exit` from the
+`zend_error_cb` on fpm-fcgi, cgi-fcgi, apache2handler and litespeed. The 500 is
+dropped either way (502 on fpm/nginx, a reset on Apache); the full-safety
+guarantee — the worker never serves another request, so it never reaches the
+consumer — holds identically. The recycle-after-teardown code path (the tainted
+flag + `post_deactivate` exit) is kept and is auto-selected for any SAPI that
+*does* flush before teardown, but none of the supported web SAPIs do. Lab
+result: 5.4–8.5 × {fpm-nginx, Apache mod_php}, enforce recycles the worker (the
+next request lands on a fresh pid) and observe logs a would-recycle while the
+worker and PHP's own 500 are untouched; OOM and startup fatals keep §4.6's
+immediate exit; a warning still passes through; patched engines keep the facet
+off.
+
+On the upstream tests: the `oom_*.phpt` added in `3584a98bda0f` are **CLI engine**
+tests of upstream's remediation (recoverable OOM + state reset) — e.g.
+`oom_array_fill_001.phpt` asserts the `Fatal error: Allowed memory size …` line,
+`oom_after_main_script.phpt` that shutdown functions still run after the OOM.
+They are a good baseline **oracle for the CVE** — they show the old behavior on
+the unpatched images (8.1.34, 8.5.12RC1) and upstream's new behavior on the
+patched ones (8.2.35 / 8.3.36 / 8.4.27) — but **not a direct oracle for Howdah**:
+Howdah is CLI-off by design, and its remediation is a worker fail-stop, not
+engine-recoverable OOM, so the CLI phpt behavior is unchanged by loading it.
+Howdah's oracle is the web-SAPI bed above.
 
 ## 6. Release and claim
 

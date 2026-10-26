@@ -76,6 +76,36 @@ worker surviving) — on an unpatched engine that reopens the PHP2Shell window.
 Howdah does not fix the underlying PHP bug; patching remains the fix. It is a
 TOML key, not a php.ini directive.
 
+### `recycle_on_fatal`
+
+```toml
+recycle_on_fatal = false   # false (default) | true
+recycle_observe  = false   # true -> log a "would-recycle" event, do not recycle
+```
+
+Off by default, opt-in. A companion to `oom_exit` for the other half of the
+PHP2Shell window: a poisoning-class bailout fatal (an uncaught `Error`, a parse
+or compile error, a failed `require`, `max_execution_time`) during the script
+can leave request state half-built for the **next** request to read, on an
+engine without upstream's fix (CVE-2026-109619). With `recycle_on_fatal = true`,
+Howdah ends the worker after such a fatal, so it never serves another request on
+that state; the worker is replaced and the event is logged with rule
+`fatal_recycle`. Like `oom_exit`, it runs only on web SAPIs and turns itself off
+on engines that ship the upstream fix. On every supported web SAPI the worker
+takes the immediate exit (the 500 is not flushed before teardown there anyway),
+so the producing request's response is dropped and the next-request window is
+closed either way. Set `recycle_observe = true` to log a would-recycle event
+without ending the worker, to size your fatal rate before enforcing. Both are
+TOML keys, not php.ini directives.
+
+The backstop writes its one event line with an **async-signal-safe, allocation-free**
+path: the line is built on the stack and written with a single `write(2)` to a
+log-file descriptor captured at startup (or stderr for a syslog/stderr
+destination). So a `max_execution_time` timeout on PHP &le; 7.0 — which raises
+its fatal from the `SIGPROF` handler — and a genuine *system* out-of-memory
+(where the allocator itself fails) both log and `_exit` cleanly, without
+touching `malloc` on that path.
+
 ## Build a config in the browser
 
 [howdah.org/config/](https://howdah.org/config/) builds `howdah.ini` and
@@ -194,11 +224,13 @@ Rules carry a **severity**:
 
 ## `[inspect]` — Layer 2 input inspection (log-only by default)
 
-**These rules only LOG; they do not block any request.** Layer 2 looks at
-decoded request values for SQL-injection, path-traversal and
+**The three content classes only LOG; they do not block any request.** Layer 2
+looks at decoded request values for SQL-injection, path-traversal and
 command-injection shapes and writes an event when it sees one. A global
 `howdah.mode = block` does **not** arm them. To block, set `inspect.mode` (or
-one class via `[inspect.rule_modes]`) to `block` explicitly.
+one class via `[inspect.rule_modes]`) to `block` explicitly. The one
+exception is `cgi_arg_injection` (php-cgi argument injection, below), which is
+enforced by default.
 
 Signature inspection is best-effort and can be bypassed by a determined
 attacker. That is why it logs by default: use the log to see what is
@@ -216,6 +248,7 @@ mode = "detect"         # detect = log only (default); block; off. INDEPENDENT o
 sqli = true             # per-class toggles
 traversal = true
 cmdi = true
+cgi_arg = "block"       # php-cgi argument injection (CVE-2012-1823, CVE-2024-4577): block (default), detect = log only, off
 
 [inspect.limits]
 max_value_bytes = 16384   # scan at most this many bytes of one value
@@ -224,10 +257,13 @@ max_values = 2000         # per-request value count budget
 
 [inspect.rule_modes]      # optional per-class mode override; keys are the rule names
 # sql_injection = "block" # example only: opt ONE class into blocking (default is log-only). Also: path_traversal, command_injection
+# cgi_arg_injection = "detect" # overrides inspect.cgi_arg for that rule
 ```
 
-The rule names are `sql_injection`, `path_traversal` and `command_injection`.
-A `[inspect.rule_modes]` entry overrides `inspect.mode` for that class only.
+The rule names are `sql_injection`, `path_traversal`, `command_injection` and
+`cgi_arg_injection`.
+A `[inspect.rule_modes]` entry overrides `inspect.mode` for that class only (for
+`cgi_arg_injection`, it overrides `inspect.cgi_arg`).
 The `[inspect.limits]` budgets bound the scanning work per value and per
 request; values past a budget are not scanned.
 
@@ -243,12 +279,73 @@ That `$_SERVER` build is the one cost of arming Layer 2 on an application that
 never reads it; log-only mode does not pay it. Details and
 what stays post-hoc: "Enforcement timing" below.
 
+### `cgi_arg_injection` — php-cgi argument injection (blocks by default)
+
+When PHP runs as php-cgi behind a CGI front end (Apache `mod_cgi`, IIS), a
+query string that contains **no literal `=`** is handed to php-cgi as
+command-line words (RFC 3875 section 4.4: split on `+`, percent-decoded). A
+client can then drive php-cgi's own options: `?-d+allow_url_include%3d1+-d+auto_prepend_file%3dphp://input`
+is code execution and `?-s` is source disclosure (CVE-2012-1823).
+CVE-2024-4577 revives the same shape on Windows, where a soft hyphen (byte
+`0xAD`, written `%AD`) stands in for the `-` that the 2012 fix filters. Howdah
+refuses such a request **before the script runs** (clean 403, the worker
+survives) because the check reads only the request's query string. One caveat
+for the php-cgi SAPI itself: php-cgi parses the options during its own startup,
+before RINIT, so the refusal is in time only for what takes effect *after*
+RINIT — the code-execution shape (`-d auto_prepend_file`, `allow_url_include`),
+where the injected prepend compiles with the script. The `-s`/`-i`
+source/info-disclosure forms php-cgi emits during that same startup, before
+RINIT, so the check does not stop them under php-cgi (instrumentation: RINIT
+fired for `?x=1` but not `?-s`); under php-fpm, Apache and the CLI server, which
+never interpret the query string as argv, a `?-s` request is harmless anyway.
+Keep a web-server or front-proxy rule, or a patched php-cgi, for the `-s` form
+and for CVE-2019-11043.
+
+The match is deliberately narrow. The raw query string must contain no literal
+`=` (every working exploit writes it `%3d`), and then one of these:
+
+- a `+`/space-separated word that is a php-cgi option: a flag used on its own
+  (`-s`, `-w`, `-i`, `-m`, `-v`, `-h`, `-n`, `--info`, ...), or an option that
+  takes an argument (`-d`, `-c`, `-z`, `-f`, `-b`, `-T`, `-r`, `--define`, ...) followed by its
+  argument word or carrying an attached `name=value` or `scheme://` argument.
+  The dash may be a literal `-`, `%2d`, or a soft hyphen (`%AD`, `%C2%AD`);
+- a word that names a php-cgi directive (`auto_prepend_file`,
+  `auto_append_file`, `allow_url_include`, `cgi.force_redirect`,
+  `cgi.redirect_status_env`, `cgi.fix_pathinfo`);
+- a stray soft-hyphen byte (`0xAD`) in the decoded query that is not the
+  continuation byte of a well-formed UTF-8 character. (A bare `0xAD` test
+  would block every query containing an accented `i`, `C3 AD`, or many CJK
+  characters, `E4 B8 AD`; the UTF-8 walk avoids that.)
+
+Ordinary `=`-less queries stay clean: search words, ids, dates, slugs,
+negative numbers (`?-1`), dash-leading words (`?-sale`, `?-created`), base64 and
+base64url tokens, front-controller paths (`?/users/12/edit`) and UTF-8 text.
+Any query with a literal `=`, which is every ordinary form or API request, is
+never a match.
+
+Unlike the three classes above this rule is **on and enforcing by default**,
+under every global mode except `off`: `inspect.cgi_arg` is `"block"`, and
+neither `inspect.mode` nor the global `howdah.mode` changes it (a shipped
+`howdah.mode = detect` install still blocks it, as it does a Critical limit).
+The rule is Standard severity and Layer 2. Set `inspect.cgi_arg = "detect"` to
+log without refusing, or `"off"` to disable it. `inspect.enabled = false` (the
+Layer 2 master switch) and `howdah.mode = off` also silence it. The query
+string is scanned, never logged: the event carries the rule and a fixed reason
+only. It does not use the per-request value and byte budgets, so a flood of
+ordinary variables cannot spend a budget ahead of it. An `[[exceptions]]`
+entry for `inspect.cgi_arg_injection` with a `client_cidr` or `uri_prefix`
+facet exempts a scanner or a path.
+
 ## `[sinks]` — Layer 3 sink hardening (log-only by default)
 
 **Sinks log by default; they do not block.** Layer 3 watches dangerous PHP
 functions ("sinks") and writes an event when one is called with something your
-allowlist does not cover. It **actively guards six sinks** (four since 1.2;
-`phar` and `ssrf` were added in 1.3):
+allowlist does not cover. Two checks are enforced by default instead: `xxe`
+(XML external entities, under "Legacy-era sinks" below), but only when a
+dangerous libxml parse flag and an external entity meet in the same XML string;
+and the include/open stream-wrapper firewall (`wrapper` and `poison`, under
+"`include` / `require` and `eval`" below). Layer 3 **actively guards six sinks**
+(four since 1.2; `phar` and `ssrf` were added in 1.3):
 
 - `command_exec` — `system`, `exec`, `shell_exec`, `passthru`, `popen` and
   `proc_open`.
@@ -303,9 +400,11 @@ allow = []                # commands that are fine; anything else is logged (or 
 # mode = "detect"         # opt in (log only). "block" refuses non-allowlisted classes.
 allow_classes = []        # class names that may be unserialized
 
-[sinks.include]           # include/require. Inert until allow_paths is set.
-# mode = "block"          # optional per-sink override; unset inherits sinks.mode
+[sinks.include]           # include/require. The allowlist check is inert until allow_paths is set.
+# mode = "block"          # optional per-sink override for the ALLOWLIST check; unset inherits sinks.mode
 allow_paths = []          # directories include/require may load from
+# wrapper = "block"       # include/open wrapper-scheme firewall (default BLOCK; "detect"/"off"). See below.
+# poison  = "block"       # poisonable-local-target firewall (default BLOCK; "detect"/"off"). See below.
 [sinks.eval]              # eval
 
 # New in 1.3. Both are OFF by default and are armed only by an explicit
@@ -316,6 +415,11 @@ allow_paths = []          # realpath prefixes allowed even under block
 [sinks.ssrf]              # outbound requests to internal addresses
 # mode = "detect"         # opt in (log only); "block" denies
 allow_hosts = []          # hostname | IP | CIDR; no wildcards
+# Hardening on top of the range check (T6). Each is OFF by default, takes
+# "detect" or "block", and is independent of mode and of the other two:
+# rebind   = "block"      # resolve-at-connect (anti DNS rebinding)
+# scheme   = "block"      # only http/https may leave (curl gopher/dict/file/ldap/... refused)
+# redirect = "block"      # a curl 3xx to an internal target is not followed
 ```
 
 ### `command_exec`
@@ -347,6 +451,48 @@ running and the script continues. As always, the argument is never logged.
   `include` served from a **warm opcache** is not compiled again and is **not
   re-inspected**, so already-cached application files are not checked.
 
+#### `wrapper` / `poison`: the include/open stream-wrapper firewall
+
+Separate from the `allow_paths` allowlist above, and **enforced by default**,
+is a firewall that classifies the fully resolved target (the string after
+concatenation, variables and decoding, which an in-process hook sees but a
+network WAF cannot). It governs both `include`/`require` and the file-open sinks
+`fopen`, `file_get_contents` and `readfile`, through two keys under
+`[sinks.include]`:
+
+- **`wrapper`** (default `block`) — the stream-wrapper scheme. For
+  `include`/`require`, every non-`file` wrapper is refused: `php://filter`
+  chains, `php://input`, any other `php://*`, `data:`, `expect://`, remote
+  `http(s)`/`ftp(s)` and any other scheme (`zip://`, `compress.*://`, …).
+  Including a stream wrapper is never legitimate. `phar://` is **left to the
+  `phar` sink** (not double-guarded). For the file-open sinks the set is tighter
+  — only the near-zero-benign-use wrappers `php://filter`, `data:` and
+  `expect://` — so `file_get_contents('php://input')` (reading the request
+  body), `fopen('php://temp'|'php://memory', …)` and remote fetches (the `ssrf`
+  sink's job) are never false positives.
+- **`poison`** (default `block`) — a tight poisonable-local-target set:
+  `/proc/self/environ` and other `/proc/*`, a file under the runtime
+  `session.save_path`, and PHP's configured `error_log`. These are the classic
+  LFI->RCE log/session/proc poisoning sinks; nothing legitimate includes or
+  opens them. The match is anchored at the effective root (so a relative
+  `templates/…` or a plain app path never matches) and the `error_log` match is
+  exact.
+
+Both keys are **independent of the global `howdah.mode` and of `sinks.mode`**,
+like `xxe` and `cgi_arg_injection`: `block` (the default) refuses, `detect`
+logs only, `off` disables. A global `howdah.mode = off` or `[sinks] enabled =
+false` silences them. A block is a clean sink neutralization, not a
+request-level refusal: the `include` is skipped (returns `false`) or the open
+returns `false`, and the **script continues and the worker survives**. Rules:
+`include_wrapper` (the include path) and `file_open` (the open sinks), both
+Layer 3, Standard. Only a scheme/category label (`php://filter`, `data://`,
+`proc_environ`, `session`, `log`, …) and the guarded function name are logged;
+the target content is not. The file-open sinks are hooked whenever this firewall
+is armed. On PHP 5.x the firewall rides the compile-swap and shares its
+warm-opcache caveat (an already-cached include is not re-inspected); an attack
+include of a wrapper/poison target is a dynamic cache-miss, so it is compiled
+and seen.
+
 #### `hook`: the include/eval mechanism and OPcache JIT
 
 PHP's OPcache JIT refuses to run alongside any extension that installs a user
@@ -357,18 +503,21 @@ installed it unconditionally at startup, so loading Howdah turned the JIT off
 on PHP 8 even with `[sinks] enabled = false`. Now:
 
 - **A hook is installed only when something needs it**, decided once at
-  startup from the config: the `eval` sink is on (it is, in the shipped
-  defaults: `detect`), or the `include` sink is on **and** has `allow_paths`
-  (with no `allow_paths` it never produces an event, so it needs no hook), or
-  Layer 4 `[behavior] deny_exec_dirs` is set (its `require`d-file check runs in
-  the same hook). With all three off nothing is installed and the JIT stays on.
-  Like every other key, changing these needs a php-fpm/Apache restart.
+  startup from the config: the include/open firewall (`wrapper`/`poison`) is on
+  (it is, in the shipped defaults: `block`), or the `eval` sink is on (it is:
+  `detect`), or the `include` sink is on **and** has `allow_paths` (with no
+  `allow_paths` it never produces an event, so it needs no hook), or Layer 4
+  `[behavior] deny_exec_dirs` is set (its `require`d-file check runs in the same
+  hook). With all of those off nothing is installed and the JIT stays on. Like
+  every other key, changing these needs a php-fpm/Apache restart.
 - **`hook = "auto"` (the default)** picks the mechanism from what needs it:
-  `compile` when only `eval` does (the compile pointers cover every `eval`, so
-  the opcode handler would buy nothing and only cost the JIT), `opcode` when
-  `include` has `allow_paths` or `deny_exec_dirs` is set (the cases where an
-  include served from a warm opcache matters). So **a default install keeps
-  the JIT on** with `eval` still fully guarded.
+  `compile` when only `eval` and/or the include firewall need it (the compile
+  pointers cover every `eval`, and an attack include of a wrapper/poison target
+  is a dynamic cache-miss that the compile swap still sees, so the opcode
+  handler would only cost the JIT), `opcode` when `include` has `allow_paths` or
+  `deny_exec_dirs` is set (the cases where an *already-cached* include matters).
+  So **a default install keeps the JIT on** with the firewall and `eval` fully
+  guarded.
 - **`hook = "opcode"`:** the opcode handler. Full coverage: every
   `include`/`require` and `eval`, including files served from a warm opcache.
   The JIT is off. Whenever the opcode handler is what gets installed
@@ -399,9 +548,9 @@ on PHP 8 even with `[sinks] enabled = false`. Now:
   in the SAPI error log and PHP reports the `dl()` as failed.
 - `php --ri howdah` / `phpinfo()` show the result and why:
   `Include/eval hook => none | opcode handler (JIT disabled by PHP; <why>) | compile pointer (JIT compatible; <why>)`
-  where `<why>` is `auto: eval only`, `auto: include allow_paths set`,
-  `auto: deny_exec_dirs set` or `configured` (the JIT parentheticals appear on
-  PHP 8.0+, where the JIT exists).
+  where `<why>` is `auto: include firewall on`, `auto: eval only`,
+  `auto: include allow_paths set`, `auto: deny_exec_dirs set` or `configured`
+  (the JIT parentheticals appear on PHP 8.0+, where the JIT exists).
 
 The rest of Layer 3 (`command_exec`, `unserialize`, `phar`, `ssrf`) and
 Layers 1, 2 and 4 are function-table swaps, stream-wrapper proxies and
@@ -445,28 +594,185 @@ is checked, and a hit on a reserved or internal range is a match.
 - **DNS cost:** enabling it adds one `getaddrinfo` per distinct outbound host
   (cached for the request). There is **no timeout**: a stalled DNS server stalls
   the call. This is why it is off by default.
-- **Best effort, not a connection-time boundary.** The check resolves the host
-  when the call is made. It is bypassed by DNS rebinding, redirects to a new
-  host, `curl_multi_*` (not hooked), `CURLOPT_RESOLVE` / `CURLOPT_CONNECT_TO`,
-  and a non-string or absent `CURLOPT_URL`.
+- **Best effort, not a connection-time boundary.** `mode` alone resolves the
+  host when the call is made and PHP / libcurl resolve it again at connect. It is
+  bypassed by DNS rebinding, redirects to a new host, `curl_multi_*` (not
+  hooked), `CURLOPT_RESOLVE` / `CURLOPT_CONNECT_TO`, and a non-string or absent
+  `CURLOPT_URL`. The opt-in `rebind`, `scheme` and `redirect` knobs below close
+  several of these where PHP allows it, and say plainly where they cannot.
 - **Not hooked:** `copy`, `file`, `readfile`, `SoapClient`, `DOMDocument::load*`
   and `simplexml_load_file` can still make outbound requests unseen.
 - **Side effects of a block:** a blocked `fsockopen` / `stream_socket_client`
   leaves `$errno` and `$errstr` unset; a blocked `curl_exec` returns false with
   `curl_errno` 0 and an empty `curl_error`.
-- More than 32 resolved addresses for one host are capped; a host longer than
-  256 bytes is treated as suspicious. Literal-IP decoding mirrors glibc
-  `inet_aton`; libcurl and musl parse some encoded forms differently, so the
-  resolved addresses are the authority.
+- A host that resolves to **more than 32 addresses**, or a host longer than 256
+  bytes, is treated as suspicious — logged, and blocked when armed — never
+  silently skipped, so an attacker DNS answer cannot hide an internal address
+  past the cap. A curl URL longer than 8192 bytes is likewise treated as
+  suspicious rather than parsed from a truncated copy, so a padded `#fragment`
+  or a long userinfo cannot steer the cut to drop the handle out of the guard. Literal-IP decoding mirrors glibc `inet_aton`; libcurl and musl
+  parse some encoded forms differently, so the resolved addresses are the
+  authority. The host parse matches PHP and libcurl on the tricky shapes: a
+  `\` before `@` stays in the userinfo (the host is taken after the last `@`),
+  an unknown or nesting scheme (`dict://`, `compress.zlib://http://…`) is peeled
+  so the inner host is still classified, and an out-of-range or garbage port
+  classifies the host with no port rather than dropping it. A **NUL anywhere in
+  the authority** is treated as suspicious (blocked when armed): no legitimate
+  host has one, and PHP's URL parser (keeps the userinfo) and libc (stops at the
+  NUL) would otherwise resolve to different hosts, so both `public\0@127.0.0.1`
+  and its mirror `127.0.0.1\0@public` are caught.
+- **`allow_hosts` requires every resolved address.** A name is allowed by an IP
+  or CIDR entry only when *all* of its resolved addresses match it; a name that
+  answers `[an allowed address, 169.254.169.254]` is **not** allowed (PHP could
+  connect to the internal one). A hostname entry trusts the name itself — pair
+  it with the `rebind` knob for resolve-time safety.
+- **Not tracked:** a URL passed as a `Stringable` object instead of a string, a
+  `curl_setopt` using the numeric option id (`10002`) instead of the
+  `CURLOPT_URL` constant, and more than 256 live curl handles at once (the
+  per-request handle map is bounded and fails open when full).
+
+#### SSRF hardening: `rebind`, `scheme`, `redirect`
+
+Three opt-in knobs sit beside the range check. Each is **off by default**,
+takes `"detect"` or `"block"`, and is **independent** of `mode`, of
+`[sinks] mode` and of the other two (a global `howdah.mode = off` or
+`[sinks] enabled = false` still silences them). They log as the same `ssrf`
+rule (so `[[exceptions]]` `rule = "ssrf"` applies) and never log a URL, path or
+query: only a scheme *category*, or host, port, resolved IP and class.
+
+```toml
+[sinks.ssrf]
+mode     = "block"        # the range check at call time (above)
+rebind   = "block"        # resolve-at-connect
+scheme   = "block"        # only http/https may leave
+redirect = "block"        # a curl 3xx to an internal target is not followed
+allow_hosts = ["api.partner.example", "10.0.5.0/24"]
+```
+
+**`scheme`: only `http` and `https` may leave.**
+
+- *curl:* `gopher://`, `dict://`, `file://`, `ldap(s)://`, `tftp://`,
+  `ftp(s)://`, `sftp`, `scp`, `smb`, `imap`, `pop3`, `smtp`, `telnet`, `rtsp`,
+  `rtmp`, `mqtt` and any unknown scheme are refused, plus libcurl's host-prefix
+  protocol guess for a scheme-less URL (`ftp.example.com` is FTP; likewise
+  `dict.`, `ldap.`, `imap.`, `smtp.`, `pop3.`). `file://` reads a local file and
+  `gopher://` / `dict://` smuggle raw bytes to an internal service (Redis,
+  memcached), which is why curl gets an allowlist, not a denylist.
+- In `block` the curl handle is also given `CURLOPT_PROTOCOLS = HTTP|HTTPS` at
+  `curl_exec`, so libcurl itself refuses anything else, redirect hops included,
+  even where Howdah's URL parse and libcurl's differ. That **overrides a script's
+  own `CURLOPT_PROTOCOLS`** on that handle.
+- *`file_get_contents`, `fopen`, `get_headers`:* only the remote wrappers are
+  refused (`ftp`, `ftps`, `sftp`, `scp`, `gopher`, `dict`, `ldap(s)`, `tftp`,
+  `telnet`, `smb`, `imap`/`pop3`/`smtp`, `ssh2.*`). `http`, `https` and the local
+  wrappers (`file`, `php`, `data`, `glob`, `zip`, `compress.*`) are untouched;
+  `phar` stays the `phar` sink's and `php://filter` / `data:` / `expect://` the
+  include/open wrapper firewall's. The socket openers (`fsockopen`, ...) take
+  `tcp://` / `ssl://` transports, not URLs, so `scheme` does not apply to them.
+- `allow_hosts` does not apply (it names destinations; this is a protocol
+  policy). Exempt a trusted script with `[[exceptions]]`.
+- Log: `ssrf scheme via curl: scheme=gopher is not http/https`. The label is the
+  scheme (`other` for an unknown one, `guessed-ftp` for the host-prefix guess).
+
+**`rebind`: validate the address the connection really uses.** The range check
+resolves the host when the call is made and PHP / libcurl resolve it again when
+they connect, so a name can answer "public" to the first lookup and "internal"
+to the second. `rebind` closes that gap *where PHP lets it be closed*, and the
+guarantee differs per path:
+
+| Path | What `block` does | What it guarantees | What it cannot do |
+|---|---|---|---|
+| `curl_exec`, PHP 5.5+ | Judges the resolved set, then **pins** it into the handle with `CURLOPT_RESOLVE` (`host:port:ip`; a comma list on libcurl 7.59+, otherwise the first address). After the transfer it judges `CURLINFO_PRIMARY_IP`. | For the first hop libcurl connects to exactly the addresses that were checked; a rebinding name's second answer is never asked for. | Redirect hops are not pinned (the last hop is judged after the fact, see below). An IPv6-only host is not pinned (only the after-the-fact check applies). A literal IP has nothing to rebind. |
+| `curl_exec`, PHP 5.4 | PHP 5.4 has no `CURLOPT_RESOLVE`, so **nothing is pinned**. After the transfer `CURLINFO_PRIMARY_IP` (the address libcurl connected to) is judged and an internal one discards the response. | The response never reaches the script. | The request **was sent** to the internal address (a body already streamed to `CURLOPT_FILE` / `WRITEFUNCTION`, or echoed without `RETURNTRANSFER`, is out too). |
+| `fsockopen`, `pfsockopen`, `stream_socket_client` | After the connect, the **peer address of the returned stream** (what `getpeername` reports) is judged; an internal peer closes the stream the way `fclose` would and the call returns false. | Authoritative for the address the kernel used, however the name was resolved; nothing has been written yet (the script never held the stream). | The TCP handshake happened (a connect oracle). An unconnected `STREAM_CLIENT_ASYNC_CONNECT` socket and `unix://` are not judged. |
+| `fopen` of a URL | The same peer check on the returned stream. | The script cannot read the response. | The HTTP request had already been sent when `fopen` returned. |
+| `file_get_contents`, `get_headers` | **Nothing**: no stream or peer comes back. Only the call-time range check applies. | none beyond `mode` | A rebinding name is served. |
+
+- It judges with the same classifier and `allow_hosts` as `mode`, so a host,
+  IP or CIDR you allow is accepted at connect time too. It does not need `mode`:
+  `rebind = "block"` alone refuses a curl name that resolves to an internal
+  address at call time, before the connect, on every PHP version (pin or no pin).
+- *Ordering:* Howdah resolves with `getaddrinfo(AF_UNSPEC)` through the system
+  resolver (RFC 6724 sorting and `gai.conf` apply) and pins the IPv4 addresses in
+  the order returned; a name with A and AAAA records is pinned to its IPv4 set.
+  On libcurl before 7.59 only the first address is pinned, so a dead first A
+  record is not retried against the others.
+- *Resolve failure is fail-open (as for `mode`):* a name that does not resolve
+  when Howdah looks it up is allowed and cannot be pinned, so a resolver that
+  fails the first query and answers the second still gets through to libcurl's own
+  lookup; the after-the-fact check then judges the address it connected to (the
+  request has been sent by then).
+- A pin lives on the handle (libcurl keeps `CURLOPT_RESOLVE` entries until the
+  handle is freed or the entry is replaced); Howdah re-pins at every `curl_exec`
+  from that request's own resolution.
+- A proxy (`CURLOPT_PROXY`, or `http_proxy` / `https_proxy` / `all_proxy` in the
+  environment) means the connection goes to the proxy, which resolves the target
+  itself: neither the pin nor the connected-address check is applied. A script's
+  own `CURLOPT_RESOLVE` / `CURLOPT_CONNECT_TO` also suppresses the pin; the
+  connected-address check still catches it.
+- Log: `ssrf rebind via curl-connect: host=H port=P ip=I class=C` (the connected
+  address), `curl-resolve` (the set about to be pinned), `tcp-connect` (sockets),
+  `stream-connect` (`fopen`). `detect` pins nothing and discards nothing.
+
+**`redirect`: a curl `3xx` to an internal target is not followed.**
+
+- When `CURLOPT_FOLLOWLOCATION` is on (via `curl_setopt` or `curl_setopt_array`)
+  and the script has not set its own `CURLOPT_HEADERFUNCTION`, Howdah installs an
+  internal function, `howdah_curl_header_guard`, as the handle's header callback
+  at `curl_exec`. libcurl hands it every response header line *before it acts on
+  it*. On a `3xx` `Location` that is absolute or scheme-relative (`//host/..`),
+  whose host resolves to a reserved or internal address (the `mode` classifier,
+  `allow_hosts` honoured), or whose scheme is not http(s) while `scheme` is armed,
+  it returns a wrong length and libcurl aborts with `CURLE_WRITE_ERROR`
+  (`curl_errno` 23): the redirect is never followed, so the internal service is
+  never contacted. A relative `Location`, a `Location` on a non-3xx response and
+  `FOLLOWLOCATION` off are not new targets.
+- The function is registered at PHP startup, and only when `redirect` or `scheme`
+  is armed (it is visible in `get_defined_functions()['internal']`); a default
+  install registers nothing.
+- Log: `ssrf redirect via http: host=H port=P ip=I class=C`.
+- **Not covered:** a script that sets its own `CURLOPT_HEADERFUNCTION` together
+  with `FOLLOWLOCATION` (its hops are only judged after the fact when `rebind` is
+  armed); `curl_multi_*`; the PHP http stream wrapper's own redirect following
+  (`file_get_contents` / `fopen` follow up to 20 redirects internally and Howdah
+  never sees the hops: pass `'follow_location' => 0` in the stream context, or use
+  curl); and a hop to a *rebinding name*, which passes the hop check and is only
+  caught after the fact by `rebind` (the request was sent). Libraries that follow
+  redirects themselves (WordPress's curl transport and Guzzle do) call `curl_exec`
+  once per hop, so every hop gets the full call-time check.
+
+**Why not `CURLOPT_PREREQFUNCTION` / `CURLOPT_OPENSOCKETFUNCTION`?** They are the
+right tools (they see the address libcurl is about to connect to, once per hop)
+but they are C callbacks on the `CURL*`, which PHP keeps in a private `php_curl`
+struct whose layout differs per PHP version and whose headers are not installed
+on 5.x/7.x builds. PHP exposes `CURLOPT_PREREQFUNCTION` as a PHP callable only
+from 8.5 (libcurl 7.80+) and `CURLOPT_OPENSOCKETFUNCTION` not at all, so Howdah
+uses the controls every supported PHP shares: `CURLOPT_RESOLVE`,
+`CURLOPT_PROTOCOLS`, `CURLOPT_HEADERFUNCTION`, `CURLINFO_PRIMARY_IP` and the
+stream peer name. Howdah sets `CURLOPT_PROTOCOLS` (`scheme = "block"`) and
+`CURLOPT_RESOLVE` (`rebind = "block"`) only in `block`; the header callback for
+`redirect` / `scheme` is installed in `detect` too (it only observes there and
+never aborts). All of it goes through `curl_setopt` with errors silenced and is
+not logged.
+
+Verified by `lab/integration/sinks_fastfollow.sh` on PHP 5.4, 5.6, 7.0, 7.4, 8.0,
+8.1, 8.3 and 8.5 against a loopback target, a DNS server that rebinds a name from
+a decoy to `127.0.0.1` after the first answer, and a self-signed HTTPS target; the
+known gaps above are pinned by checks that fail if they ever close. Results in
+`docs/coverage-data.md`.
 
 ### Legacy-era sinks
 
 Seven more sinks guard functions and behaviours that mostly matter on the PHP
 5.x/7.x third of the web; each is a no-op where the function no longer exists.
-Each has its own `[sinks.<name>]` table whose `mode` inherits `sinks.mode`
-(so they log by default and block only when you set a mode to `"block"`; a
-global `howdah.mode = block` arms none of them), and, as everywhere in Layer
-3, the argument is never logged. `php --ri howdah` shows a `Layer-3 legacy
+Each has its own `[sinks.<name>]` table. For six of them `mode` inherits
+`sinks.mode` (so they log by default and block only when you set a mode to
+`"block"`; a global `howdah.mode = block` arms none of them). **`xml` (the
+`xxe` rule) is the exception: its `mode` defaults to `block`, whatever the
+global mode and `sinks.mode`**, like `[inspect] cgi_arg`; `[sinks.xml] mode =
+"off"`, `[sinks] enabled = false` or `howdah.mode = off` silence it, and
+`mode = "detect"` makes it log only. As everywhere in Layer 3, the argument is
+never logged. `php --ri howdah` shows a `Layer-3 legacy
 sinks` row naming which ones installed on your PHP.
 
 ```toml
@@ -476,7 +782,8 @@ sinks` row naming which ones installed on your PHP.
 [sinks.create_function]   # create_function() (PHP 5.x/7.x)
 [sinks.assert]            # assert("string") evaluated as code (PHP 5.x/7.x)
 [sinks.callback]          # a string callback naming a command/code-exec function
-[sinks.xml]               # XML external-entity declarations
+[sinks.xml]               # XML external entities parsed with a dangerous libxml flag (ENFORCED by default)
+# mode = "detect"         # default "block"; detect logs only, off disables. NOT inherited from [sinks] mode
 # external_entities = "deny"   # also turn libxml's external entity loader off (off by default)
 [sinks.tls]               # curl TLS verification turned off (detect-only this release)
 ```
@@ -488,7 +795,7 @@ sinks` row naming which ones installed on your PHP.
 | `create_function` (`create_function`) | detect + block | detect + block | not covered | any `create_function()` call (removed in PHP 8.0) |
 | `assert` (`assert_string`) | detect + block | detect + block | not covered | a string passed to `assert()` (needs `assert.active`/`zend.assertions`; PHP 8.0 stopped evaluating strings) |
 | `callback` (`dangerous_callback`) | detect + block | detect + block | detect + block | a string callback naming a command/code-exec function, passed to a callback-taking function |
-| `xml` (`xxe`) | detect + block | detect + block | detect + block | an XML string (`simplexml_load_string`, `DOMDocument::loadXML`) declaring an external entity / DTD |
+| `xml` (`xxe`) | **block by default** | **block by default** | **block by default** | an XML string parsed with a dangerous libxml flag (`LIBXML_NOENT`, `DTDLOAD`, `DTDATTR`, `DTDVALID`) while it declares an external entity or an entity bomb: `simplexml_load_string`, `new SimpleXMLElement`, `DOMDocument::loadXML`, `XMLReader::XML`, `Dom\XMLDocument::createFromString` (8.4+) |
 | `tls` (`tls_verify`) | detect | detect | detect | `curl_setopt`(`_array`) turning `CURLOPT_SSL_VERIFYPEER` off or `CURLOPT_SSL_VERIFYHOST` to 0 |
 
 - **`mail`.** The 5th argument is split on whitespace; anything that is not
@@ -520,21 +827,61 @@ sinks` row naming which ones installed on your PHP.
   a fully dynamic call (`$f = 'call_user_func'; $f(...)`) or any of the other
   hooked functions is seen. On PHP 5.x every form goes through the function
   and is seen. `lab/integration/legacy_sinks.sh` pins this per version.
-- **`xml`.** Only `simplexml_load_string` and `DOMDocument::loadXML` are
-  hooked (the string entry points). `simplexml_load_file`,
-  `DOMDocument::load`, `XMLReader::open` and other document-by-path readers are
-  not. The scan reads the prolog only (the first 64 KiB, up to the root
-  element), skipping comments and processing instructions, and squeezes the
-  NULs out of a UTF-16 document (BOM or NUL-interleaved `<?`) before looking.
-  Two shapes: an external **entity** declaration (`<!ENTITY ... SYSTEM|PUBLIC>`,
-  general or parameter) logs in detect and is refused in block; a **bare
-  external DTD** reference in the DOCTYPE (`SYSTEM`/`PUBLIC` with no external
-  entity), which every standard XHTML and SVG document carries, is **detect
-  only** and never blocked, so an SVG sanitizer built on
-  `DOMDocument::loadXML` will see `xxe` detect lines but keep working. It
-  flags the *attempt shape*; whether libxml would actually fetch anything
-  depends on the parser options (`LIBXML_NOENT`, `LIBXML_DTDLOAD`) and the
-  libxml version.
+- **`xml` (rule `xxe`): flag-aware, and enforced by default.** Howdah reads
+  the libxml *options* argument of the call as well as the XML string and acts
+  only when **both** are dangerous: a flag that makes libxml act on a DOCTYPE
+  (`LIBXML_NOENT` 2, `LIBXML_DTDLOAD` 4, `LIBXML_DTDATTR` 8 or `LIBXML_DTDVALID`
+  16) **and** an external entity declared in the document's internal subset
+  (`<!ENTITY ... SYSTEM|PUBLIC ...>`, general or parameter: the shape of every
+  file-read and out-of-band XXE payload) or a nested-entity expansion bomb
+  (internal entities whose references expand past 1 MiB: billion laughs and its
+  variants, in any declaration order). A call with none of those flags (the
+  default, `$options = 0`) is never looked at, and a document with a bare
+  `<!DOCTYPE>`, ordinary internal entities, or an external DTD reference
+  (SAML, SVG, XHTML, RSS, plist, ODF and Office XML legitimately carry them)
+  never triggers it. Hooked: `simplexml_load_string`, `new SimpleXMLElement`
+  (not when `$dataIsURL` is true), `DOMDocument::loadXML`, `XMLReader::XML`
+  (called statically or on an instance) and, on PHP 8.4+,
+  `Dom\XMLDocument::createFromString`. The scan reads the prolog only (up to
+  the root element, within the first 1 MiB), skipping comments and processing
+  instructions and quoted literals, and squeezes the NULs out of a UTF-16 or
+  UTF-32 document (BOM or NUL-interleaved `<`) before looking. It also reads
+  through the usual disguises: a `>` or `[` inside the DOCTYPE's system
+  literal, and a parameter entity whose literal declares the external entity
+  and is then expanded (`<!ENTITY % p "<!ENTITY x SYSTEM 'f'>"> %p;`, with
+  character references decoded).
+
+  **Documents it cannot read are reported, not waved through.** With a
+  dangerous flag set, a document is treated as an attack (the flags are removed)
+  when its text is in an encoding an ASCII scan cannot see into (UTF-7, an
+  EBCDIC code page, or a UTF-16/32 or UCS-2/4 encoding declared on a document
+  that does not look wide, which libxml honours mid-stream) or when its prolog
+  is still open after 1 MiB (padding with comments or whitespace to push the
+  DOCTYPE out of the window). Real documents are neither; the reason says
+  `encoding that hides its DOCTYPE` or `prolog is longer than the inspection
+  window`.
+
+  **What `block` does.** It removes the dangerous flags from the call's options
+  argument and lets the parse go on: the application keeps working and the
+  entity is simply not expanded (`&xxe;` stays an unresolved reference). The
+  event is logged as `action: block` with a reason ending `dangerous flags
+  removed, parse continued`. Only the callee sees the rewritten flags; the
+  caller's own variable keeps its value. It refuses the call (`false`, or the
+  "String could not be parsed as XML" exception from the `SimpleXMLElement`
+  constructor) only where stripping cannot help: **libxml older than 2.9.0**
+  (CentOS 6 era), which resolves external entities whatever the flags say, so
+  on that engine the flag test is skipped and the document alone decides. `detect`
+  logs (`action: log`) and changes nothing; `off` disables the rule. The
+  document and any path it names are never logged, only the rule, the guarded
+  function and the flag names.
+
+  **Bare external DTD.** A DOCTYPE that only references an external DTD is
+  never blocked, in any mode. It is logged (`action: log`, "references an
+  external DTD") only when a flag really fetches it (`LIBXML_DTDLOAD` or
+  `LIBXML_DTDATTR`), so an XHTML or SVG pipeline that sets those flags sees
+  `xxe` log lines and keeps working; without them nothing is logged. An
+  external entity with no dangerous flag is silent: libxml 2.9+ neither expands
+  nor fetches it.
 - **`[sinks.xml] external_entities = "deny"`** is a separate libxml-level
   toggle (off by default). When set, Howdah calls ext/libxml's C setter
   (`php_libxml_disable_entity_loader(1)`, found at run time) at every request
@@ -565,13 +912,24 @@ sinks` row naming which ones installed on your PHP.
   hook is not seen. A literal global-namespace `call_user_func` /
   `call_user_func_array` on PHP 7.0+ is compiled to its own opcode and is not
   seen (above).
-- The `xml` sink sees only `simplexml_load_string` / `DOMDocument::loadXML`.
-  Not hooked: `new SimpleXMLElement($xml)`, `simplexml_import_dom`,
-  `XMLReader::XML()` / `XMLReader::open`, `xml_parse()` /
-  `xml_parser_create` (ext/xml), `DOMDocument::loadHTML` / `loadHTMLFile`,
-  `DOMDocument::load`, `simplexml_load_file`. Only the first 64 KiB of the
-  document is scanned; a DOCTYPE past that is not seen. A bare external DTD is
-  never blocked. It does not prove the entity was fetched.
+- The `xml` sink needs the XML as a **string** to scan. Not hooked: the
+  by-path readers (`simplexml_load_file`, `DOMDocument::load`,
+  `XMLReader::open`, `new SimpleXMLElement($path, ..., true)`), whose content
+  Howdah cannot see; `[sinks.xml] external_entities = "deny"` closes that
+  door. Also not hooked: `simplexml_import_dom`, `xml_parse()` /
+  `xml_parser_create` (ext/xml, no libxml flags, no external fetch without a
+  user handler) and `DOMDocument::loadHTML` / `loadHTMLFile` (the HTML parser
+  does not resolve entities). `LIBXML_XINCLUDE` (XInclude file reads) is not a flag it acts on,
+  and a quadratic blow-up (one large entity referenced many times in the body,
+  past the prolog) is left to libxml's own limits. Signature inspection can be
+  bypassed by an encoding it does not know; the families above are the ones
+  libxml2 decodes in practice. An attacker-hosted external DTD that
+  `LIBXML_DTDLOAD` fetches is indistinguishable by shape from an XHTML doctype,
+  so it is logged (`action: log`) but not stopped: avoid `DTDLOAD` on
+  untrusted input, or set `[sinks.xml] external_entities = "deny"`. A
+  flag that is not a plain integer, string or boolean (an array, an object) is
+  left to PHP. A bare external DTD is never blocked. It does not prove an
+  entity was fetched.
 - `tls` cannot block in this release and does not see verification disabled
   through a `CURLOPT_*` constant passed as a variable the shim cannot read, nor
   through a stream context.
@@ -588,19 +946,19 @@ sinks` row naming which ones installed on your PHP.
   fixing the application. The `phar`, `ssrf` and legacy-sink limits are listed
   in their sections above.
 
-## `[behavior]` — Layer 4 after-breach behaviour (log-only by default)
+## `[behavior]` — Layer 4 after-breach behaviour (log-only by default, plus two enforced file guards)
 
-**Layer 4 logs by default; it does not block, and it does nothing until you set
-its lists.** It watches what PHP does once something has gone wrong, such as a
-webshell dropped in an upload directory. It has four facets, each switched on by
-its own setting:
+**The four list-driven facets below log by default; they do not block, and they
+do nothing until you set their lists.** They watch what PHP does once something
+has gone wrong, such as a webshell dropped in an upload directory. Each is
+switched on by its own setting:
 
 | Facet | Setting | Flags |
 |---|---|---|
 | Execution origin | `deny_exec_dirs` | a PHP file under a listed directory that runs as the requested script, or is `require`d/`include`d (rule `upload_exec`) |
 | Expected binaries | `allow_exec_binaries` | `exec`/`system`/`popen`/`proc_open`/`shell_exec`/`passthru` to a program not on the list (rule `unexpected_binary`) |
 | Expected egress | `allow_egress_hosts` | an outbound connection to a host not on the list (rule `unexpected_egress`) |
-| `.php` writes | `deny_php_writes` | writing a PHP file into a denied directory, or from a script that lives in one (rule `php_write`) |
+| Executable / handler-config writes | `deny_php_writes` | writing a PHP-executable or handler-config file name (`.php`, `.phtml`, `.pht`, `.php3`-`.php8`, `.phar`, `.inc`, `.htaccess`, `.user.ini`, `web.config`) into a denied directory, or from a script that lives in one (rule `php_write`) |
 
 `behavior.mode` defaults to `detect` (log only) and is **independent of the
 global `howdah.mode`**: `howdah.mode = block` does **not** arm Layer 4. As with
@@ -609,6 +967,72 @@ nothing is expected, so under `detect` every matching call is logged and under
 `block` it is refused. Layer 4 adds **no new php.ini directives**. Events name
 the script that made the call, so a finding points at the webshell even when a
 legitimate script `require`d it.
+
+**Three file guards sit beside those facets and carry their own mode** (so they
+do not follow the log-only `behavior.mode`):
+
+| Guard | Setting (default) | What it does | Rule |
+|---|---|---|---|
+| Delete guard | `delete_guard = "block"` | refuses `unlink`, `rmdir` and the source of `rename` for a sensitive file, or `unlink`/`rmdir` through a `..` traversal that lands in a system directory | `file_delete` |
+| Upload-write guard | `upload_write = "block"` | refuses `move_uploaded_file` into a PHP-executable or handler-config file name (the durable upload bypass) | `php_write` |
+| Secret-read guard | `secret_read = "off"` | with `"detect"` observes, with `"block"` refuses, a read of `.env`, `wp-config.php`, key material and `/etc/passwd`-class files | `secret_read` |
+
+Each takes `"off"`, `"detect"` or `"block"`. The delete and upload-write guards
+are **enforced by default**, like `xxe` and the include/open wrapper firewall,
+under every mode but `off`: a global `off`, `[behavior] enabled = false` and
+`[behavior] mode = "off"` silence all of Layer 4, and `observe = true` turns a
+guard `block` into a `proposed` line. They need no list. A blocked call is a
+clean neutralization like the Layer 3 sinks: the function returns `false`, the
+file is untouched, the script continues, the worker survives.
+
+*Delete guard (`file_delete`).* Deleting `wp-config.php` makes WordPress fall
+back to its installer, a takeover; arbitrary-file-delete bugs in plugins are
+usually exploited exactly that way. The sensitive set is deliberately tight:
+`wp-config.php`; `.env` and `.env.*` (except the templates `.env.example`,
+`.sample`, `.dist`, `.template`); private-key material (`id_rsa`, `id_dsa`,
+`id_ecdsa`, `id_ed25519`; a `.pem` named *private*/*privkey*/*secret*; a `.key`
+named exactly `private`, `privkey`, `server`, `ssl`, `tls` or `oauth-private`;
+a bare `.key` is not enough, because Keynote files end in `.key`). The name is tested on
+the lexically normalized path, so `uploads/../wp-config.php` is caught. A `..`
+traversal that resolves into `/etc`, `/root`, `/proc`, `/sys`, `/boot`, `/bin`,
+`/sbin`, `/usr` or `/lib*` is refused too. For `rename` only the live files
+`wp-config.php` and `.env` count as a source (moving them away is a delete;
+`.env.production` -> `.env` is an ordinary deploy step). Cache, temp, session, log,
+thumbnail and upload deletes, `.htaccess`, `.maintenance`, `wp-config-sample.php`
+and `cacert.pem` are never touched. Migration and restore tools (Duplicator's
+`installer.php`, restore plugins) legitimately move `wp-config.php`: add an
+`[[exceptions]]` entry with `rule = "behavior.file_delete"` and the tool's
+`script`.
+
+*Upload-write guard (`php_write`, upload tier).* An uploaded `.htaccess` or
+`.user.ini` re-enables PHP for the next `.jpg`, so it outlives any file-extension
+filter on the upload itself. `move_uploaded_file` is refused when the destination
+name ends in `.php`, `.php3`-`.php8`, `.phtml`, `.pht`, `.phar` or is
+`.htaccess`, `.user.ini` or `web.config` (case-insensitive). Nothing legitimate
+moves an HTTP upload to such a name; admin file managers that do (elFinder-class
+plugins) need an `[[exceptions]]` entry with `rule = "behavior.php_write"`. The
+other write sinks are **not** blocked by default, because applications legitimately
+write `.php` (Blade/Twig/Smarty caches, WordPress updates) and `.htaccess`
+(WordPress permalinks, WooCommerce download protection). They are covered by the
+scoped `deny_php_writes` tier below. `.inc` and double extensions
+(`shell.php.jpg`, which Apache's `AddHandler` runs) are not part of the upload
+tier.
+
+*Secret-read guard (`secret_read`).* Off by default because applications read
+their own `.env` and `wp-config.php` constantly. Armed, it covers
+`file_get_contents`, `readfile`, `file` and `fopen` in read mode: the delete
+guard's sensitive set plus `.htpasswd`, `/etc/passwd`/`shadow`/`gshadow`/`sudoers`,
+anything under a `.ssh` directory, `.pgpass`/`.my.cnf`/`.netrc`, and a `..`
+traversal into `/etc`, `/root`, `/proc`, `/sys` or `/var/log`. Start with
+`"detect"`, read the log, add `[[exceptions]]` for the scripts that own those files
+(your framework's config loader), and only then consider `"block"`.
+
+**What is logged.** Only the rule, a path *category* (`wp-config`, `dotenv`,
+`private-key`, `htpasswd`, `system-account`, `ssh`, `credentials`, `system
+directory`; for writes `php`, `phtml`, `phar`, `htaccess`, `user-ini`,
+`web-config`), the guarded function and the calling script as `file:line`, never
+the target path, its name or any content. For example:
+`unlink deletes a wp-config file at /var/www/html/wp-content/plugins/x/x.php:42`.
 
 ```toml
 [behavior]
@@ -619,8 +1043,16 @@ observe = false             # true -> log would-be findings as `proposed`; never
 deny_exec_dirs = []         # e.g. ["/var/www/uploads", "/var/www/storage", "/tmp"]
 allow_exec_binaries = []    # e.g. ["/usr/bin/gs", "convert"]  (empty = none expected)
 allow_egress_hosts = []     # e.g. ["api.stripe.com"]          (empty under detect = log all egress)
-deny_php_writes = false     # true -> flag writing a *.php/.phar/.phtml file into a denied
-                            # directory or from a script under one (origin-scoped; NOT any .php write)
+deny_php_writes = false     # true -> flag writing a PHP-executable or handler-config name
+                            # (.php .phtml .pht .php3-8 .phar .inc .htaccess .user.ini web.config)
+                            # via file_put_contents / fopen('w') / copy / rename / move_uploaded_file
+                            # into a denied directory or from a script under one (origin-scoped;
+                            # NOT any such write)
+
+# The file guards: their own modes, "off" | "detect" | "block".
+delete_guard = "block"      # enforced by default: wp-config.php, .env, key files, '..' into /etc...
+upload_write = "block"      # enforced by default: move_uploaded_file to .php/.phtml/.phar/.htaccess/...
+secret_read  = "off"        # opt-in: "detect" observes reads of .env / wp-config.php / keys
 ```
 
 **Observe mode.** `observe = true` logs the binary that was run, the host
@@ -635,6 +1067,16 @@ The Layer 4 lab script (27 checks) passed on PHP 5.4, 5.6, 7.4, 8.3, 8.4 and
 `detect` and `block`, that a framework-style view write and a plain read of a
 `.php` file are not flagged, that the default and empty configs are inert, and
 that observe proposes without blocking.
+
+The file guards have their own lab, `lab/integration/file_guard.sh`, run on PHP
+5.4, 5.6, 7.0, 7.4, 8.0, 8.1, 8.3 and 8.5: wp-config.php, `.env`, key-file and
+`..`-traversal deletes and renames refused (target survives, script continues,
+origin `file:line` logged, name never logged); real multipart uploads to twelve
+dangerous names refused with no configuration; the scoped tier across
+`file_put_contents`, `fopen`, `copy` and `rename`; secret reads logged but not
+blocked under `detect`; and a benign corpus (cache, tmp, session, upload and
+thumbnail deletes, `.jpg`/`.txt`/`.json`/`.log`/`.zip`/`.pdf` uploads and writes, reads of
+the app's own config) producing zero blocks.
 
 ### Known limitations
 
@@ -655,9 +1097,30 @@ that observe proposes without blocking.
   redirects, `curl_multi_*`, a non-string URL).
 - **`deny_php_writes` is origin-scoped and can still flag legitimate writes.**
   An application that compiles templates or caches PHP into a denied directory
-  will be flagged. Scope `deny_exec_dirs` before you ever use `block`. Detection
-  is by file extension, so a write to a non-`.php` name that is renamed later is
-  not caught.
+  will be flagged, and one that rewrites `.htaccess` there (WooCommerce
+  protecting a downloads directory) too. Scope `deny_exec_dirs` before you ever
+  use `block`. Detection is by file extension and the three handler-config
+  names, applied to the destination as written (a relative path outside a denied
+  directory is only caught through the calling script), so a write to a harmless
+  name that is renamed later is caught only if the rename target is dangerous.
+  It was widened from `.php`/`.php5`/`.phtml`/`.phar` to the full set in 1.7;
+  an existing `deny_php_writes = true` now also flags `.pht`, `.php3`/`4`/`7`/`8`,
+  `.inc`, `.htaccess`, `.user.ini` and `web.config` under `deny_exec_dirs`, and
+  also sees `copy()` targets.
+- **The file guards classify the path argument as written, lexically.** They
+  never touch the filesystem: a symlink named innocently that points at
+  `wp-config.php` is not seen, nor is a deletion through an open handle, a
+  Stringable passed to `unlink`, `SplFileObject`, `ZipArchive::extractTo`,
+  `fwrite` on an already-open handle, or a `rename` whose destination is the
+  sensitive name. `highlight_file`, `show_source`, `parse_ini_file` and
+  `SplFileObject` are not hooked by the secret-read guard (`readfile`,
+  `file_get_contents`, `file` and `fopen` are). The delete guard does not treat
+  `.htaccess` as sensitive (cache plugins delete their own), and the
+  `..`-traversal rule only fires when the path lands in a system directory,
+  because Howdah does not know your document root and apps legitimately delete
+  outside it (`/tmp`, `/var/cache`). Verified on PHP 5.4, 5.6, 7.0, 7.4, 8.0,
+  8.1, 8.3 and 8.5; the same function-table swaps as the Layer 3 sinks, so other
+  minors are expected to work but are not independently verified.
 - **Observe only proposes.** On a box that is already breached, the observed
   set may include attacker behaviour; do not accept it unreviewed.
 - Setting `deny_exec_dirs` arms the include/eval hook (its `require`d-file
@@ -1042,6 +1505,9 @@ application's first line:
   of the script. The cost is one `$_SERVER` build per request on applications
   that never read it (the same work every framework triggers on its first
   line). The default, log-only install does not pay it;
+- the Layer 2 `cgi_arg_injection` rule (on by default): it reads the SAPI's raw
+  query string, not `$_SERVER`, so it needs no forced `$_SERVER` build and is
+  refused before the script on every install, armed Layer 2 or not;
 - the Layer 4 `deny_exec_dirs` check on the requested script.
 
 For cron and other command-line users: a CLI main script refused by

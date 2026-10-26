@@ -47,16 +47,21 @@ impl Layer {
             | RuleId::MaxRequestHeaderBytes
             | RuleId::OutOfMemory
             | RuleId::StartupFatal
+            | RuleId::FatalRecycle
             | RuleId::PostTooLarge
             | RuleId::NestingBudget
             | RuleId::ParseMemoryEstimate => Layer::Limits,
-            RuleId::SqlInjection | RuleId::PathTraversal | RuleId::CommandInjection => Layer::Inspect,
+            RuleId::SqlInjection | RuleId::PathTraversal | RuleId::CommandInjection | RuleId::CgiArgInjection => {
+                Layer::Inspect
+            }
             RuleId::CommandExec
             | RuleId::Include
             | RuleId::Eval
             | RuleId::Unserialize
             | RuleId::Phar
             | RuleId::Ssrf
+            | RuleId::IncludeWrapper
+            | RuleId::FileOpen
             | RuleId::MailInjection
             | RuleId::PregEval
             | RuleId::CreateFunction
@@ -67,7 +72,9 @@ impl Layer {
             RuleId::UploadExec
             | RuleId::UnexpectedBinary
             | RuleId::UnexpectedEgress
-            | RuleId::PhpWrite => Layer::Behavior,
+            | RuleId::PhpWrite
+            | RuleId::FileDelete
+            | RuleId::SecretRead => Layer::Behavior,
         }
     }
 

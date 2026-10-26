@@ -210,6 +210,13 @@ pub struct InspectConfig {
     pub sqli: bool,
     pub traversal: bool,
     pub cmdi: bool,
+    /// The php-cgi argument-injection rule (CVE-2012-1823, CVE-2024-4577), which
+    /// unlike the three classes above is ENFORCED by default: `block` refuses the
+    /// request before the script runs, `detect` only logs it, `off` disables it.
+    /// Independent of `mode` and of the global mode (a global `detect` still
+    /// blocks it), like a Critical rule; a `[inspect.rule_modes] cgi_arg_injection`
+    /// entry overrides it. `enabled = false` and a global `off` still silence it.
+    pub cgi_arg: Mode,
     pub limits: InspectLimits,
     /// Per-class mode overrides.
     pub rule_modes: BTreeMap<RuleId, Mode>,
@@ -223,6 +230,7 @@ impl Default for InspectConfig {
             sqli: true,
             traversal: true,
             cmdi: true,
+            cgi_arg: Mode::Block,
             limits: InspectLimits::defaults(),
             rule_modes: BTreeMap::new(),
         }
@@ -247,6 +255,18 @@ impl InspectConfig {
             InspectClass::CommandInjection => self.cmdi,
         }
     }
+
+    /// Effective mode of the php-cgi argument-injection rule. Off if the global
+    /// mode is off or Layer 2 is disabled; otherwise a `[inspect.rule_modes]
+    /// cgi_arg_injection` entry, else `cgi_arg` (default `block`). The global
+    /// `detect`/`block` is deliberately ignored, as for the other Layer 2 rules.
+    pub fn cgi_arg_mode(&self, global: Mode) -> Mode {
+        if global == Mode::Off || !self.enabled {
+            Mode::Off
+        } else {
+            self.rule_modes.get(&RuleId::CgiArgInjection).copied().unwrap_or(self.cgi_arg)
+        }
+    }
 }
 
 /// Layer-3 command-execution sink settings. `mode: None` inherits `SinkConfig.mode`.
@@ -259,11 +279,38 @@ pub struct CommandExecConfig {
 }
 
 /// Layer-3 include/require sink settings.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+///
+/// `mode`/`allow_paths` are the legacy allowlist check (a `block` path outside
+/// `allow_paths`; inert with no allowlist, inherits `sinks.mode`). `wrapper`
+/// and `poison` are the T4 include/open firewall: each is ENFORCED by default
+/// (`block`) and INDEPENDENT of `sinks.mode` and of the global mode (like the
+/// `xxe`/`cgi_arg` rules), so the firewall is on out of the box. A global `off`
+/// or `[sinks] enabled = false` still silences them. The same two knobs govern
+/// the file-open sinks (fopen/file_get_contents/readfile), see `wrapper` below.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct IncludeConfig {
     pub mode: Option<Mode>,
     pub allow_paths: Vec<String>,
+    /// Non-`file` stream-wrapper firewall (`php://filter`/`input`/*, `data:`,
+    /// `expect://`, remote `http(s)`/`ftp(s)`). `block` refuses the
+    /// include/open, `detect` logs, `off` disables. Default `block`.
+    pub wrapper: Mode,
+    /// Poisonable-local-target firewall (`/proc/self/environ` and other
+    /// `/proc/*`, the runtime session dir, PHP's `error_log`). `block` refuses,
+    /// `detect` logs, `off` disables. Default `block`.
+    pub poison: Mode,
+}
+
+impl Default for IncludeConfig {
+    fn default() -> Self {
+        IncludeConfig {
+            mode: None,
+            allow_paths: Vec::new(),
+            wrapper: Mode::Block,
+            poison: Mode::Block,
+        }
+    }
 }
 
 /// Layer-3 eval sink settings.
@@ -302,17 +349,44 @@ impl Default for PharConfig {
 }
 
 /// Layer-3 SSRF sink settings. Off by default.
+///
+/// `mode`/`allow_hosts` are the original check-time range guard. `rebind`,
+/// `scheme` and `redirect` are the T6 hardening additions, each an independent
+/// opt-in (default `off`, like the facet itself) with its own `detect`/`block`:
+///
+/// * `rebind`: resolve-at-connect. Make the address the connection really uses
+///   match the address that was validated (pin it with `CURLOPT_RESOLVE` where
+///   PHP and libcurl allow it, then verify the connected peer).
+/// * `scheme`: refuse egress schemes other than `http`/`https` (curl:
+///   `gopher`, `dict`, `file`, `ldap`, `tftp`, ...; the stream functions: the
+///   remote wrappers such as `ftp`).
+/// * `redirect`: do not follow a curl `3xx` to an internal target.
+///
+/// Each is silenced by a global `off` or `[sinks] enabled = false` and is
+/// independent of `mode`, `sinks.mode` and the global `detect`/`block`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct SsrfConfig {
     pub mode: Option<Mode>,
     /// Exact hostnames, literal IPs, or CIDRs.
     pub allow_hosts: Vec<String>,
+    /// Resolve-at-connect (anti-DNS-rebinding). Default `off`.
+    pub rebind: Mode,
+    /// Egress scheme denial. Default `off`.
+    pub scheme: Mode,
+    /// curl internal-redirect guard. Default `off`.
+    pub redirect: Mode,
 }
 
 impl Default for SsrfConfig {
     fn default() -> Self {
-        SsrfConfig { mode: Some(Mode::Off), allow_hosts: Vec::new() }
+        SsrfConfig {
+            mode: Some(Mode::Off),
+            allow_hosts: Vec::new(),
+            rebind: Mode::Off,
+            scheme: Mode::Off,
+            redirect: Mode::Off,
+        }
     }
 }
 
@@ -349,6 +423,8 @@ pub enum HookReason {
     IncludeAllowPaths,
     /// `auto`: Layer 4 `deny_exec_dirs` is set.
     DenyExecDirs,
+    /// `auto`: the include/open wrapper-scheme firewall is on (the default).
+    IncludeFirewall,
 }
 
 impl HookReason {
@@ -359,6 +435,7 @@ impl HookReason {
             HookReason::EvalOnly => "auto: eval only",
             HookReason::IncludeAllowPaths => "auto: include allow_paths set",
             HookReason::DenyExecDirs => "auto: deny_exec_dirs set",
+            HookReason::IncludeFirewall => "auto: include firewall on",
         }
     }
 }
@@ -410,15 +487,31 @@ pub enum XmlExternalEntities {
     Deny,
 }
 
-/// Layer-3 XML sink settings: the `xxe` rule's mode (inherits `sinks.mode`)
-/// plus the libxml-level toggle.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+/// Layer-3 XML sink settings: the `xxe` rule's mode plus the libxml-level
+/// toggle.
+///
+/// Unlike the other legacy sinks the `xxe` rule is ENFORCED by default: `mode`
+/// defaults to `block` and does not inherit `sinks.mode` (like `[inspect]
+/// cgi_arg`). It only ever fires when a dangerous libxml parse flag
+/// (`LIBXML_NOENT`, `DTDLOAD`, `DTDATTR`, `DTDVALID`) coincides with an
+/// external entity or an entity bomb in the XML string being parsed, so a
+/// bare DOCTYPE (SAML, SVG, Office XML) never triggers it. `block` removes the
+/// dangerous flags and lets the parse continue where the engine honours that
+/// (otherwise it refuses the call), `detect` only logs, `off` disables it. A
+/// global `off` and `[sinks] enabled = false` still silence it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct XmlConfig {
-    pub mode: Option<Mode>,
+    pub mode: Mode,
     /// `None` = `allow`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_entities: Option<XmlExternalEntities>,
+}
+
+impl Default for XmlConfig {
+    fn default() -> Self {
+        XmlConfig { mode: Mode::Block, external_entities: None }
+    }
 }
 
 impl XmlConfig {
@@ -457,17 +550,79 @@ impl SinkConfig {
         self.hook.unwrap_or(SinkHook::Auto)
     }
 
-    /// True iff the `include` sink needs the hook: on AND with an allowlist
-    /// (with an empty `allow_paths` it never produces an event).
-    fn include_needs_hook(&self, global: Mode) -> bool {
+    /// Effective mode of the include/open wrapper-scheme firewall. Off if the
+    /// global mode is off or sinks are disabled; otherwise `[sinks.include]
+    /// wrapper` (default `block`). Independent of `sinks.mode` and the global
+    /// `detect`/`block`, like the `xxe`/`cgi_arg` rules.
+    pub fn include_wrapper_mode(&self, global: Mode) -> Mode {
+        if global == Mode::Off || !self.enabled {
+            Mode::Off
+        } else {
+            self.include.wrapper
+        }
+    }
+
+    /// Effective mode of the poisonable-local-target firewall. Same gating as
+    /// [`SinkConfig::include_wrapper_mode`]; `[sinks.include] poison` (default
+    /// `block`).
+    pub fn include_poison_mode(&self, global: Mode) -> Mode {
+        if global == Mode::Off || !self.enabled {
+            Mode::Off
+        } else {
+            self.include.poison
+        }
+    }
+
+    /// Effective mode of an SSRF hardening knob (`rebind`/`scheme`/`redirect`):
+    /// Off if the global mode is off or sinks are disabled, else the knob's own
+    /// mode. Independent of `[sinks.ssrf] mode`, `sinks.mode` and the global
+    /// `detect`/`block`.
+    fn ssrf_knob_mode(&self, own: Mode, global: Mode) -> Mode {
+        if global == Mode::Off || !self.enabled {
+            Mode::Off
+        } else {
+            own
+        }
+    }
+
+    /// Effective mode of the SSRF resolve-at-connect (anti-rebinding) guard.
+    pub fn ssrf_rebind_mode(&self, global: Mode) -> Mode {
+        self.ssrf_knob_mode(self.ssrf.rebind, global)
+    }
+
+    /// Effective mode of the SSRF egress-scheme denial.
+    pub fn ssrf_scheme_mode(&self, global: Mode) -> Mode {
+        self.ssrf_knob_mode(self.ssrf.scheme, global)
+    }
+
+    /// Effective mode of the SSRF curl internal-redirect guard.
+    pub fn ssrf_redirect_mode(&self, global: Mode) -> Mode {
+        self.ssrf_knob_mode(self.ssrf.redirect, global)
+    }
+
+    /// True iff the include firewall (wrapper or poison) is armed. On by
+    /// default; the compile-swap covers it (warm-opcache caveat documented), so
+    /// it does NOT by itself force the opcode mechanism (unlike `allow_paths`).
+    fn include_firewall_armed(&self, global: Mode) -> bool {
+        self.include_wrapper_mode(global) != Mode::Off || self.include_poison_mode(global) != Mode::Off
+    }
+
+    /// True iff the `include` allowlist check is armed: the sink is on AND has
+    /// an allowlist (with an empty `allow_paths` it never produces an event).
+    /// This is the case where a warm-opcache include matters, so `auto` picks
+    /// the opcode mechanism for it.
+    fn include_allowlist_armed(&self, global: Mode) -> bool {
         self.effective_mode(SinkId::Include, global) != Mode::Off && !self.include.allow_paths.is_empty()
     }
 
     /// True iff the include/eval hook has to be installed at all for the
-    /// Layer-3 sinks: `eval` is on, or `include` needs it. Layer 4's
+    /// Layer-3 sinks: `eval` is on, the `include` allowlist is armed, or the
+    /// include firewall (wrapper/poison, on by default) is armed. Layer 4's
     /// `deny_exec_dirs` is the other consumer; the FFI combines both.
     pub fn include_eval_hook_needed(&self, global: Mode) -> bool {
-        self.effective_mode(SinkId::Eval, global) != Mode::Off || self.include_needs_hook(global)
+        self.effective_mode(SinkId::Eval, global) != Mode::Off
+            || self.include_allowlist_armed(global)
+            || self.include_firewall_armed(global)
     }
 
     /// The startup plan for the include/eval hook: `None` when nothing needs
@@ -481,16 +636,23 @@ impl SinkConfig {
         global: Mode,
         deny_exec_dirs_armed: bool,
     ) -> Option<(SinkHook, HookReason)> {
-        let include = self.include_needs_hook(global);
+        let allowlist = self.include_allowlist_armed(global);
+        let firewall = self.include_firewall_armed(global);
         let eval = self.effective_mode(SinkId::Eval, global) != Mode::Off;
-        if !include && !eval && !deny_exec_dirs_armed {
+        if !allowlist && !firewall && !eval && !deny_exec_dirs_armed {
             return None;
         }
         Some(match self.hook() {
             SinkHook::Opcode => (SinkHook::Opcode, HookReason::Configured),
             SinkHook::Compile => (SinkHook::Compile, HookReason::Configured),
+            // Opcode (JIT off) only where a warm-opcache include matters: the
+            // include allowlist, or Layer 4's deny_exec_dirs.
             SinkHook::Auto if deny_exec_dirs_armed => (SinkHook::Opcode, HookReason::DenyExecDirs),
-            SinkHook::Auto if include => (SinkHook::Opcode, HookReason::IncludeAllowPaths),
+            SinkHook::Auto if allowlist => (SinkHook::Opcode, HookReason::IncludeAllowPaths),
+            // The wrapper/poison firewall and eval are both fully covered by the
+            // compile swap (attack includes are dynamic cache-misses; eval is
+            // never cached), so auto keeps the JIT on with compile.
+            SinkHook::Auto if firewall => (SinkHook::Compile, HookReason::IncludeFirewall),
             SinkHook::Auto => (SinkHook::Compile, HookReason::EvalOnly),
         })
     }
@@ -513,7 +675,8 @@ impl SinkConfig {
             SinkId::CreateFunction => self.create_function.mode,
             SinkId::Assert => self.assert.mode,
             SinkId::Callback => self.callback.mode,
-            SinkId::Xml => self.xml.mode,
+            // Enforced by default and independent of `sinks.mode` (see `XmlConfig`).
+            SinkId::Xml => Some(self.xml.mode),
             SinkId::Tls => self.tls.mode,
         };
         sub.unwrap_or(self.mode)
@@ -530,6 +693,23 @@ impl SinkConfig {
 
 /// Layer-4 post-breach behavior settings. Its `mode` is independent of the
 /// global mode: a global `block` never arms behavior enforcement.
+///
+/// Three file guards sit beside the scoped facets and carry their own mode, so
+/// they do NOT inherit the (log-only by default) section `mode`:
+///
+/// * `delete_guard` (default `block`): `unlink`/`rmdir`/`rename`-away of
+///   `wp-config.php`, `.env`, private keys, or a `..` traversal into a system
+///   directory. Delete-to-takeover.
+/// * `upload_write` (default `block`): `move_uploaded_file` into an executable
+///   (`.php`, `.phtml`, `.phar`, ...) or handler-config (`.htaccess`,
+///   `.user.ini`, `web.config`) file name. The durable upload bypass.
+/// * `secret_read` (default `off`, opt-in): a read of `.env`, `wp-config.php`,
+///   private keys or system account files. Higher false-positive rate (apps read
+///   their own config), so it ships off; `detect` observes, `block` refuses.
+///
+/// Each is silenced by a global `off`, `enabled = false` or the section
+/// `mode = "off"` (see [`BehaviorConfig::delete_guard_mode`]), and the
+/// `observe` flag downgrades a guard `block` to a proposal like every Layer-4 facet.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct BehaviorConfig {
@@ -542,6 +722,12 @@ pub struct BehaviorConfig {
     /// Exact hostnames, literal IPs, or CIDRs.
     pub allow_egress_hosts: Vec<String>,
     pub deny_php_writes: bool,
+    /// `delete_guard`: `block` (default) | `detect` | `off`.
+    pub delete_guard: Mode,
+    /// `upload_write`: `block` (default) | `detect` | `off`.
+    pub upload_write: Mode,
+    /// `secret_read`: `off` (default) | `detect` | `block`.
+    pub secret_read: Mode,
 }
 
 impl Default for BehaviorConfig {
@@ -554,11 +740,41 @@ impl Default for BehaviorConfig {
             allow_exec_binaries: Vec::new(),
             allow_egress_hosts: Vec::new(),
             deny_php_writes: false,
+            delete_guard: Mode::Block,
+            upload_write: Mode::Block,
+            secret_read: Mode::Off,
         }
     }
 }
 
 impl BehaviorConfig {
+    /// A guard's effective mode: Off whenever Layer 4 as a whole is off (global
+    /// `off`, `enabled = false` or the section `mode = "off"`), else the guard's
+    /// own mode. Independent of the global `detect`/`block` and of the section's
+    /// `detect`/`block` (the guards are enforced by default, like `xxe`).
+    fn guard_mode(&self, own: Mode, global: Mode) -> Mode {
+        if self.effective_mode(global) == Mode::Off {
+            Mode::Off
+        } else {
+            own
+        }
+    }
+
+    /// Effective mode of the delete guard (`file_delete`).
+    pub fn delete_guard_mode(&self, global: Mode) -> Mode {
+        self.guard_mode(self.delete_guard, global)
+    }
+
+    /// Effective mode of the upload-write guard (`php_write`, upload tier).
+    pub fn upload_write_mode(&self, global: Mode) -> Mode {
+        self.guard_mode(self.upload_write, global)
+    }
+
+    /// Effective mode of the secret-read guard (`secret_read`).
+    pub fn secret_read_mode(&self, global: Mode) -> Mode {
+        self.guard_mode(self.secret_read, global)
+    }
+
     /// Off if the global mode is off or behavior is disabled; otherwise the
     /// section's own mode (the global `block` is deliberately ignored).
     pub fn effective_mode(&self, global: Mode) -> Mode {
@@ -596,6 +812,18 @@ pub struct Config {
     /// PHP2Shell backstop (§4.6). On by default; web SAPIs only, and off on
     /// engines that carry upstream's fix (decided by the glue at startup).
     pub oom_exit: bool,
+    /// Recycle the PHP worker AFTER a poisoning-class bailout fatal during the
+    /// script — an uncaught `Error`, a parse/compile error, a failed `require`,
+    /// `max_execution_time` — so the worker never serves a second request on the
+    /// state CVE-2026-109619 leaves behind (§4.7). The producing request still
+    /// delivers its own 500. **Off by default** (an operator opt-in for
+    /// unpatched, long-lived-worker deployments). Same gates as `oom_exit`: web
+    /// SAPIs only, off on patched engines (decided by the glue at startup).
+    pub recycle_on_fatal: bool,
+    /// When `recycle_on_fatal` is on, only LOG a "would-recycle" event instead
+    /// of recycling, so an operator can size their uncaught-fatal rate before
+    /// enforcing. Off by default (enforce). No effect unless the facet is armed.
+    pub recycle_observe: bool,
 }
 
 #[derive(Deserialize)]
@@ -612,6 +840,8 @@ struct RawConfig {
     exceptions: Vec<ExceptionEntry>,
     exceptions_log: bool,
     oom_exit: bool,
+    recycle_on_fatal: bool,
+    recycle_observe: bool,
 }
 
 impl Default for RawConfig {
@@ -629,6 +859,8 @@ impl Default for RawConfig {
             exceptions: c.exceptions,
             exceptions_log: c.exceptions_log,
             oom_exit: c.oom_exit,
+            recycle_on_fatal: c.recycle_on_fatal,
+            recycle_observe: c.recycle_observe,
         }
     }
 }
@@ -702,6 +934,8 @@ impl Config {
             exceptions: raw.exceptions,
             exceptions_log: raw.exceptions_log,
             oom_exit: raw.oom_exit,
+            recycle_on_fatal: raw.recycle_on_fatal,
+            recycle_observe: raw.recycle_observe,
         })
     }
 
@@ -771,6 +1005,8 @@ impl Config {
             exceptions: Vec::new(),
             exceptions_log: false,
             oom_exit: true,
+            recycle_on_fatal: false,
+            recycle_observe: false,
         }
     }
 }
@@ -828,6 +1064,10 @@ self_test = "off"
         assert!(!c.behavior.observe);
         assert!(c.behavior.deny_exec_dirs.is_empty());
         assert!(!c.behavior.deny_php_writes);
+        // The T5 file guards: delete + upload-write enforced, secret-read off.
+        assert_eq!(c.behavior.delete_guard, Mode::Block);
+        assert_eq!(c.behavior.upload_write, Mode::Block);
+        assert_eq!(c.behavior.secret_read, Mode::Off);
     }
 
     #[test]
@@ -835,6 +1075,33 @@ self_test = "off"
         let c = Config::from_toml("mode=\"detect\"\n[behavior]\nmode=\"detect\"").unwrap();
         assert_eq!(c.behavior.effective_mode(Mode::Block), Mode::Detect);
         assert_eq!(c.behavior.effective_mode(Mode::Off), Mode::Off);
+    }
+
+    #[test]
+    fn behavior_file_guard_modes() {
+        let c = Config::safe_defaults();
+        for g in [Mode::Off, Mode::Detect, Mode::Block] {
+            // Independent of the global detect/block; only global off silences them.
+            let want = |m: Mode| if g == Mode::Off { Mode::Off } else { m };
+            assert_eq!(c.behavior.delete_guard_mode(g), want(Mode::Block), "{g:?}");
+            assert_eq!(c.behavior.upload_write_mode(g), want(Mode::Block), "{g:?}");
+            assert_eq!(c.behavior.secret_read_mode(g), Mode::Off, "{g:?}");
+        }
+        let c = Config::from_toml("[behavior]\ndelete_guard=\"detect\"\nupload_write=\"off\"\nsecret_read=\"detect\"").unwrap();
+        assert_eq!(c.behavior.delete_guard_mode(Mode::Detect), Mode::Detect);
+        assert_eq!(c.behavior.upload_write_mode(Mode::Detect), Mode::Off);
+        assert_eq!(c.behavior.secret_read_mode(Mode::Detect), Mode::Detect);
+        // The section mode="off" is the Layer-4 master switch; enabled=false likewise.
+        let c = Config::from_toml("[behavior]\nmode=\"off\"").unwrap();
+        assert_eq!(c.behavior.delete_guard_mode(Mode::Detect), Mode::Off);
+        let c = Config::from_toml("[behavior]\nenabled=false\nsecret_read=\"block\"").unwrap();
+        assert_eq!(c.behavior.secret_read_mode(Mode::Detect), Mode::Off);
+        // A section detect/block does not change the guards' own mode.
+        let c = Config::from_toml("[behavior]\nmode=\"block\"\nsecret_read=\"detect\"").unwrap();
+        assert_eq!(c.behavior.secret_read_mode(Mode::Detect), Mode::Detect);
+        let c = Config::from_toml("[behavior]\nmode=\"detect\"").unwrap();
+        assert_eq!(c.behavior.delete_guard_mode(Mode::Detect), Mode::Block);
+        assert!(Config::from_toml("[behavior]\ndelete_guard=\"banana\"").is_err());
     }
 
     #[test]
@@ -1016,6 +1283,41 @@ self_test = "off"
     }
 
     #[test]
+    fn cgi_arg_blocks_by_default_under_every_global_mode_but_off() {
+        // The other Layer 2 rules are log-only by default; this one is enforced.
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.inspect.cgi_arg, Mode::Block);
+        assert_eq!(c.inspect.effective_mode(Mode::Block), Mode::Detect);
+        for g in [Mode::Block, Mode::Detect] {
+            assert_eq!(c.inspect.cgi_arg_mode(g), Mode::Block, "{g:?}");
+        }
+        assert_eq!(c.inspect.cgi_arg_mode(Mode::Off), Mode::Off);
+        // The shipped file default (howdah.ini: howdah.mode = detect) is the same.
+        let d = Config::from_toml("mode = \"detect\"").unwrap();
+        assert_eq!(d.inspect.cgi_arg_mode(d.mode), Mode::Block);
+    }
+
+    #[test]
+    fn cgi_arg_key_observe_disable_and_override() {
+        let c = Config::from_toml("[inspect]\ncgi_arg = \"detect\"").unwrap();
+        assert_eq!(c.inspect.cgi_arg_mode(Mode::Block), Mode::Detect);
+        // Observe-only does not touch the other classes.
+        assert_eq!(c.inspect.mode, Mode::Detect);
+        let c = Config::from_toml("[inspect]\ncgi_arg = \"off\"").unwrap();
+        assert_eq!(c.inspect.cgi_arg_mode(Mode::Block), Mode::Off);
+        // Layer 2's master switch silences it.
+        let c = Config::from_toml("[inspect]\nenabled = false").unwrap();
+        assert_eq!(c.inspect.cgi_arg_mode(Mode::Block), Mode::Off);
+        // The per-class override table wins over the key.
+        let c = Config::from_toml("[inspect]\ncgi_arg = \"block\"\n[inspect.rule_modes]\ncgi_arg_injection = \"detect\"").unwrap();
+        assert_eq!(c.inspect.cgi_arg_mode(Mode::Block), Mode::Detect);
+        // Turning the other classes to block does not change this rule's key.
+        let c = Config::from_toml("[inspect]\nmode = \"block\"\ncgi_arg = \"off\"").unwrap();
+        assert_eq!(c.inspect.cgi_arg_mode(Mode::Block), Mode::Off);
+        assert!(Config::from_toml("[inspect]\ncgi_arg = \"yes\"").is_err());
+    }
+
+    #[test]
     fn global_block_does_not_arm_inspect() {
         let c = Config::from_toml("mode = \"block\"").unwrap();
         assert_eq!(c.inspect.effective_mode(Mode::Block), Mode::Detect);
@@ -1097,6 +1399,53 @@ self_test = "off"
         assert_eq!(c.sinks.ssrf.mode, Some(Mode::Off));
         assert!(c.sinks.ssrf.allow_hosts.is_empty());
         assert_eq!(c.sinks.effective_mode(SinkId::Ssrf, Mode::Detect), Mode::Off);
+    }
+
+    #[test]
+    fn ssrf_hardening_knobs_default_off_and_are_independent() {
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.sinks.ssrf.rebind, Mode::Off);
+        assert_eq!(c.sinks.ssrf.scheme, Mode::Off);
+        assert_eq!(c.sinks.ssrf.redirect, Mode::Off);
+        for g in [Mode::Detect, Mode::Block] {
+            assert_eq!(c.sinks.ssrf_rebind_mode(g), Mode::Off);
+            assert_eq!(c.sinks.ssrf_scheme_mode(g), Mode::Off);
+            assert_eq!(c.sinks.ssrf_redirect_mode(g), Mode::Off);
+        }
+        // Each knob is set on its own, and `mode` / the others do not move it.
+        let c = Config::from_toml(
+            "[sinks.ssrf]\nrebind=\"block\"\nscheme=\"detect\"\nredirect=\"block\"",
+        )
+        .unwrap();
+        assert_eq!(c.sinks.ssrf_rebind_mode(Mode::Detect), Mode::Block);
+        assert_eq!(c.sinks.ssrf_scheme_mode(Mode::Detect), Mode::Detect);
+        assert_eq!(c.sinks.ssrf_redirect_mode(Mode::Block), Mode::Block);
+        // The range guard stays off: the knobs do not arm it.
+        use crate::sinks::SinkId;
+        assert_eq!(c.sinks.effective_mode(SinkId::Ssrf, Mode::Block), Mode::Off);
+        // A global off and `enabled = false` silence every knob.
+        assert_eq!(c.sinks.ssrf_rebind_mode(Mode::Off), Mode::Off);
+        assert_eq!(c.sinks.ssrf_scheme_mode(Mode::Off), Mode::Off);
+        assert_eq!(c.sinks.ssrf_redirect_mode(Mode::Off), Mode::Off);
+        let c = Config::from_toml(
+            "[sinks]\nenabled=false\n[sinks.ssrf]\nrebind=\"block\"\nscheme=\"block\"\nredirect=\"block\"",
+        )
+        .unwrap();
+        assert_eq!(c.sinks.ssrf_rebind_mode(Mode::Detect), Mode::Off);
+        assert_eq!(c.sinks.ssrf_scheme_mode(Mode::Detect), Mode::Off);
+        assert_eq!(c.sinks.ssrf_redirect_mode(Mode::Detect), Mode::Off);
+    }
+
+    #[test]
+    fn ssrf_hardening_knob_values_are_validated() {
+        for k in ["rebind", "scheme", "redirect"] {
+            for ok in ["off", "detect", "block"] {
+                Config::from_toml(&format!("[sinks.ssrf]\n{k}=\"{ok}\"")).unwrap();
+            }
+            assert!(Config::from_toml(&format!("[sinks.ssrf]\n{k}=\"observe\"")).is_err(), "{k}");
+            assert!(Config::from_toml(&format!("[sinks.ssrf]\n{k}=true")).is_err(), "{k}");
+        }
+        assert!(Config::from_toml("[sinks.ssrf]\nrebinds=\"block\"").is_err());
     }
 
     #[test]
@@ -1200,50 +1549,91 @@ self_test = "off"
         use HookReason::*;
         use SinkHook::*;
         let plan = |toml: &str, l4: bool| Config::from_toml(toml).unwrap().sinks.include_eval_hook_plan(Mode::Detect, l4);
-        // Shipped defaults: eval detect, include inert, no deny_exec_dirs ->
-        // compile, so a default install keeps the JIT on.
-        assert_eq!(plan("", false), Some((Compile, EvalOnly)));
+        // Shipped defaults: the include firewall is on, and both it and eval are
+        // covered by the compile swap, so auto keeps the JIT on.
+        assert_eq!(plan("", false), Some((Compile, IncludeFirewall)));
+        // Firewall-only (eval off): still compile.
+        assert_eq!(plan("[sinks.eval]\nmode=\"off\"", false), Some((Compile, IncludeFirewall)));
+        // Pure eval-only (firewall off too): compile, reason eval.
+        assert_eq!(
+            plan("[sinks.include]\nwrapper=\"off\"\npoison=\"off\"", false),
+            Some((Compile, EvalOnly))
+        );
         // include with allow_paths -> opcode (warm-opcache includes matter).
         assert_eq!(plan("[sinks.include]\nallow_paths=[\"/srv/app\"]", false), Some((Opcode, IncludeAllowPaths)));
         // Layer 4 deny_exec_dirs -> opcode, even with eval off.
         assert_eq!(plan("[sinks.eval]\nmode=\"off\"", true), Some((Opcode, DenyExecDirs)));
-        // Nothing needs it -> None.
-        assert_eq!(plan("[sinks.eval]\nmode=\"off\"", false), None);
+        // Nothing needs it -> None (firewall AND eval off, no allowlist/deny).
+        assert_eq!(plan("[sinks.include]\nwrapper=\"off\"\npoison=\"off\"\n[sinks.eval]\nmode=\"off\"", false), None);
         assert_eq!(plan("[sinks]\nenabled=false", false), None);
         // Explicit settings win over auto, in both directions.
         assert_eq!(plan("[sinks]\nhook=\"opcode\"", false), Some((Opcode, Configured)));
         assert_eq!(plan("[sinks]\nhook=\"compile\"\n[sinks.include]\nallow_paths=[\"/srv\"]", true), Some((Compile, Configured)));
         // Explicit still installs nothing when nothing needs it.
-        assert_eq!(plan("[sinks]\nhook=\"opcode\"\n[sinks.eval]\nmode=\"off\"", false), None);
+        assert_eq!(plan("[sinks]\nhook=\"opcode\"\n[sinks.include]\nwrapper=\"off\"\npoison=\"off\"\n[sinks.eval]\nmode=\"off\"", false), None);
         // Global off beats everything (Layer 4 is off too then; the FFI passes false).
         assert_eq!(Config::from_toml("").unwrap().sinks.include_eval_hook_plan(Mode::Off, false), None);
         assert_eq!(IncludeAllowPaths.label(), "auto: include allow_paths set");
+        assert_eq!(IncludeFirewall.label(), "auto: include firewall on");
     }
 
     #[test]
-    fn include_eval_hook_needed_follows_eval_and_include_allowlist() {
-        // Shipped defaults: eval inherits detect, so the hook is needed.
+    fn include_eval_hook_needed_follows_eval_firewall_and_allowlist() {
+        // Shipped defaults: the firewall is on, so the hook is needed.
         let c = Config::from_toml("").unwrap();
         assert!(c.sinks.include_eval_hook_needed(Mode::Detect));
         // Global off / sinks disabled: nothing needs it.
         assert!(!c.sinks.include_eval_hook_needed(Mode::Off));
         let c = Config::from_toml("[sinks]\nenabled = false").unwrap();
         assert!(!c.sinks.include_eval_hook_needed(Mode::Block));
-        // eval off, include detect but inert (no allow_paths): not needed.
+        // eval off but the firewall is on by default: still needed.
         let c = Config::from_toml("[sinks.eval]\nmode = \"off\"").unwrap();
+        assert!(c.sinks.include_eval_hook_needed(Mode::Detect));
+        // Firewall explicitly off AND eval off, no allowlist: not needed.
+        let c = Config::from_toml("[sinks.include]\nwrapper=\"off\"\npoison=\"off\"\n[sinks.eval]\nmode=\"off\"").unwrap();
         assert!(!c.sinks.include_eval_hook_needed(Mode::Detect));
-        // include armed with an allowlist: needed even with eval off.
+        // include armed with an allowlist: needed even with everything else off.
         let c = Config::from_toml(
-            "[sinks.eval]\nmode = \"off\"\n[sinks.include]\nmode = \"detect\"\nallow_paths = [\"/srv/app\"]",
+            "[sinks.eval]\nmode = \"off\"\n[sinks.include]\nwrapper=\"off\"\npoison=\"off\"\nmode = \"detect\"\nallow_paths = [\"/srv/app\"]",
         )
         .unwrap();
         assert!(c.sinks.include_eval_hook_needed(Mode::Detect));
-        // Section mode off, eval explicitly block: needed.
-        let c = Config::from_toml("[sinks]\nmode = \"off\"\n[sinks.eval]\nmode = \"block\"").unwrap();
-        assert!(c.sinks.include_eval_hook_needed(Mode::Detect));
-        // Everything off: not needed.
+        // Section mode off does NOT silence the firewall (it has its own mode).
         let c = Config::from_toml("[sinks]\nmode = \"off\"").unwrap();
-        assert!(!c.sinks.include_eval_hook_needed(Mode::Block));
+        assert!(c.sinks.include_eval_hook_needed(Mode::Block));
+        // Everything off (global off): not needed.
+        let c = Config::from_toml("[sinks]\nmode = \"off\"").unwrap();
+        assert!(!c.sinks.include_eval_hook_needed(Mode::Off));
+    }
+
+    #[test]
+    fn include_wrapper_poison_default_block_independent_of_section_and_global() {
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.sinks.include.wrapper, Mode::Block);
+        assert_eq!(c.sinks.include.poison, Mode::Block);
+        // On under detect and block; silenced only by global off / disabled.
+        for g in [Mode::Detect, Mode::Block] {
+            assert_eq!(c.sinks.include_wrapper_mode(g), Mode::Block, "{g:?}");
+            assert_eq!(c.sinks.include_poison_mode(g), Mode::Block, "{g:?}");
+        }
+        assert_eq!(c.sinks.include_wrapper_mode(Mode::Off), Mode::Off);
+        assert_eq!(c.sinks.include_poison_mode(Mode::Off), Mode::Off);
+        // [sinks] mode = off does not touch the firewall (own mode, like xxe).
+        let c = Config::from_toml("[sinks]\nmode = \"off\"").unwrap();
+        assert_eq!(c.sinks.include_wrapper_mode(Mode::Block), Mode::Block);
+        // Its own knobs: detect logs, off disables.
+        let c = Config::from_toml("[sinks.include]\nwrapper = \"detect\"\npoison = \"off\"").unwrap();
+        assert_eq!(c.sinks.include_wrapper_mode(Mode::Block), Mode::Detect);
+        assert_eq!(c.sinks.include_poison_mode(Mode::Block), Mode::Off);
+        // enabled = false silences both.
+        let c = Config::from_toml("[sinks]\nenabled = false").unwrap();
+        assert_eq!(c.sinks.include_wrapper_mode(Mode::Block), Mode::Off);
+        assert_eq!(c.sinks.include_poison_mode(Mode::Block), Mode::Off);
+        // The defaults are visible in the serialized config (the editor reads them).
+        let j = serde_json::to_value(Config::from_toml("").unwrap()).unwrap();
+        assert_eq!(j["sinks"]["include"]["wrapper"], "block");
+        assert_eq!(j["sinks"]["include"]["poison"], "block");
+        assert!(Config::from_toml("[sinks.include]\nwrapper = \"maybe\"").is_err());
     }
 
     // ---- legacy-era sinks (mail, preg_eval, create_function, assert, callback, xml, tls)
@@ -1258,7 +1648,6 @@ self_test = "off"
             SinkId::CreateFunction,
             SinkId::Assert,
             SinkId::Callback,
-            SinkId::Xml,
             SinkId::Tls,
         ] {
             assert_eq!(c.sinks.effective_mode(s, Mode::Detect), Mode::Detect, "{s:?}");
@@ -1273,7 +1662,9 @@ self_test = "off"
         assert_eq!(c.sinks.effective_mode(SinkId::Mail, Mode::Detect), Mode::Block);
         assert_eq!(c.sinks.effective_mode(SinkId::Callback, Mode::Detect), Mode::Detect);
         assert_eq!(c.sinks.effective_mode(SinkId::PregEval, Mode::Detect), Mode::Off);
-        assert_eq!(c.sinks.effective_mode(SinkId::Xml, Mode::Detect), Mode::Off);
+        // xml does not inherit sinks.mode: the explicit [sinks] off above leaves
+        // it enforcing (it has its own default, see xml_xxe_is_enforced_by_default).
+        assert_eq!(c.sinks.effective_mode(SinkId::Xml, Mode::Detect), Mode::Block);
         assert!(c.sinks.xml_deny_external_entities(Mode::Detect));
         assert!(!c.sinks.xml_deny_external_entities(Mode::Off));
         let c = Config::from_toml("[sinks]\nenabled=false\n[sinks.xml]\nexternal_entities=\"deny\"").unwrap();
@@ -1286,6 +1677,38 @@ self_test = "off"
         // A global or [sinks] block never arms them past what the others get.
         let c = Config::from_toml("mode=\"block\"").unwrap();
         assert_eq!(c.sinks.effective_mode(SinkId::Callback, Mode::Block), Mode::Detect);
+    }
+
+    #[test]
+    fn xml_xxe_is_enforced_by_default_under_every_global_mode_but_off() {
+        use crate::sinks::SinkId;
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.sinks.xml.mode, Mode::Block);
+        // The shipped detect still enforces; so does block; off silences.
+        for g in [Mode::Detect, Mode::Block] {
+            assert_eq!(c.sinks.effective_mode(SinkId::Xml, g), Mode::Block, "{g:?}");
+        }
+        assert_eq!(c.sinks.effective_mode(SinkId::Xml, Mode::Off), Mode::Off);
+        // [sinks] mode = "detect" (explicit) and the other sinks do not change it.
+        let d = Config::from_toml("[sinks]\nmode=\"detect\"").unwrap();
+        assert_eq!(d.sinks.effective_mode(SinkId::Xml, Mode::Detect), Mode::Block);
+        assert_eq!(d.sinks.effective_mode(SinkId::Mail, Mode::Detect), Mode::Detect);
+        // Its own knob: detect logs only, off disables, block is the default.
+        for (toml, want) in [
+            ("[sinks.xml]\nmode=\"detect\"", Mode::Detect),
+            ("[sinks.xml]\nmode=\"off\"", Mode::Off),
+            ("[sinks.xml]\nmode=\"block\"", Mode::Block),
+            ("[sinks.xml]\nexternal_entities=\"deny\"", Mode::Block),
+        ] {
+            let c = Config::from_toml(toml).unwrap();
+            assert_eq!(c.sinks.effective_mode(SinkId::Xml, Mode::Detect), want, "{toml}");
+        }
+        // [sinks] enabled = false silences it like every Layer 3 sink.
+        let c = Config::from_toml("[sinks]\nenabled=false").unwrap();
+        assert_eq!(c.sinks.effective_mode(SinkId::Xml, Mode::Block), Mode::Off);
+        assert!(Config::from_toml("[sinks.xml]\nmode=\"inherit\"").is_err());
+        // The default is visible in the serialized config (the editor reads it).
+        assert_eq!(serde_json::to_value(Config::from_toml("").unwrap()).unwrap()["sinks"]["xml"]["mode"], "block");
     }
 
     // ---- [log] (schema 2 log contract) ------------------------------------
@@ -1391,6 +1814,30 @@ self_test = "off"
         assert!(!Config::from_toml("oom_exit = false\n").unwrap().oom_exit);
         assert!(Config::from_toml("oom_exit = true\n").unwrap().oom_exit);
         assert!(Config::from_toml("oom_exit = \"no\"").is_err());
+    }
+
+    // ---- recycle_on_fatal / recycle_observe (the §4.7 recycle facet) ----------
+
+    #[test]
+    fn recycle_keys_default_off_and_serialize() {
+        let c = Config::safe_defaults();
+        assert!(!c.recycle_on_fatal, "recycle facet is off by default");
+        assert!(!c.recycle_observe, "enforce (not observe) by default");
+        let j = serde_json::to_value(&c).unwrap();
+        assert_eq!(j["recycle_on_fatal"], false);
+        assert_eq!(j["recycle_observe"], false);
+        // Absent in the file -> defaults.
+        let d = Config::from_toml("mode = \"block\"\n").unwrap();
+        assert!(!d.recycle_on_fatal && !d.recycle_observe);
+    }
+
+    #[test]
+    fn recycle_keys_parse_and_reject_non_bool() {
+        assert!(Config::from_toml("recycle_on_fatal = true\n").unwrap().recycle_on_fatal);
+        assert!(Config::from_toml("recycle_on_fatal = true\nrecycle_observe = true\n").unwrap().recycle_observe);
+        assert!(!Config::from_toml("recycle_on_fatal = false\n").unwrap().recycle_on_fatal);
+        assert!(Config::from_toml("recycle_on_fatal = \"yes\"").is_err());
+        assert!(Config::from_toml("recycle_observe = 1").is_err());
     }
 
     // ---- [[exceptions]] -------------------------------------------------------

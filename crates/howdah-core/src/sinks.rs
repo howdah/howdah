@@ -6,6 +6,7 @@
 
 pub mod legacy;
 pub mod ssrf;
+pub mod wrapper;
 
 /// Dangerous PHP sinks guarded by Layer 3. The variants after `Ssrf` are the
 /// legacy-era sinks (see `legacy.rs`): cheap checks on functions or

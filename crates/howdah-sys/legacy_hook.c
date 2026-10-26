@@ -12,9 +12,16 @@
  *                   passed to call_user_func(_array), array_map, array_filter,
  *                   array_walk, usort/uasort/uksort, preg_replace_callback,
  *                   register_shutdown_function, ob_start
- *   xml             an XML document (simplexml_load_string, DOMDocument::loadXML)
- *                   declaring an external entity / DTD, plus the libxml-level
- *                   `external_entities = "deny"` toggle (howdah_xml_deny_...)
+ *   xml             an XML string (simplexml_load_string, DOMDocument::loadXML,
+ *                   new SimpleXMLElement, XMLReader::XML, and on 8.4+
+ *                   Dom\XMLDocument::createFromString) parsed with a dangerous
+ *                   libxml flag (LIBXML_NOENT/DTDLOAD/DTDATTR/DTDVALID) while
+ *                   it declares an external entity or an entity bomb. Flag
+ *                   aware: the options argument is read first and a call with
+ *                   no dangerous flag never reaches the core. A block rewrites
+ *                   the flags (STRIP) instead of failing the parse where it
+ *                   can. Plus the libxml-level `external_entities = "deny"`
+ *                   toggle (howdah_xml_deny_...)
  *   tls             curl_setopt / curl_setopt_array turning
  *                   CURLOPT_SSL_VERIFYPEER off or CURLOPT_SSL_VERIFYHOST to 0
  *                   (detect-only: the chain is never neutralized)
@@ -32,8 +39,10 @@
 #include "main/php.h"
 #include "Zend/zend_API.h"
 #include "Zend/zend_execute.h"
+#include "Zend/zend_exceptions.h"
 
 #include <string.h>
+#include <stdlib.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <dlfcn.h>
@@ -46,8 +55,15 @@ typedef int (*howdah_sink_decide_t)(int sink, const char *name, size_t name_len,
 typedef int (*howdah_mail_decide_t)(const char *headers, size_t headers_len,
                                     const char *params, size_t params_len);
 
+/* xml: the document (argument 1), the libxml option mask the call passes and a
+ * HOWDAH_XML_* capability set. 0 ALLOW / 1 LOG / 2 BLOCK / 3 STRIP. */
+typedef int (*howdah_xml_decide_t)(const char *name, size_t name_len,
+                                   const char *doc, size_t doc_len,
+                                   int64_t flags, int caps);
+
 static howdah_sink_decide_t g_decide = NULL;
 static howdah_mail_decide_t g_mail_decide = NULL;
+static howdah_xml_decide_t g_xml_decide = NULL;
 
 typedef void (*howdah_zif)(INTERNAL_FUNCTION_PARAMETERS);
 
@@ -117,9 +133,179 @@ HOWDAH_DEFINE_LEGACY_SINK(preg_replace_callback, "preg_replace_callback", HOWDAH
 HOWDAH_DEFINE_LEGACY_SINK(register_shutdown_function, "register_shutdown_function", HOWDAH_SINK_CALLBACK, 1, RETVAL_FALSE, HOWDAH_CALLBACK_MAX)
 HOWDAH_DEFINE_LEGACY_SINK(ob_start, "ob_start", HOWDAH_SINK_CALLBACK, 1, RETVAL_FALSE, HOWDAH_CALLBACK_MAX)
 
-/* ---- XML documents ------------------------------------------------------- */
-HOWDAH_DEFINE_LEGACY_SINK(simplexml_load_string, "simplexml_load_string", HOWDAH_SINK_XML, 1, RETVAL_FALSE, 0)
-HOWDAH_DEFINE_LEGACY_SINK(domdocument_loadxml, "DOMDocument::loadXML", HOWDAH_SINK_XML, 1, RETVAL_FALSE, 0)
+/* ---- XML documents (flag-aware) ------------------------------------------ */
+/* libxml older than 2.9.0 resolves external entities whatever the parse flags
+ * say, so the flags prove nothing there and cannot be stripped. Probed once
+ * through the libxml2 global every libxml2 build exports as a "NNNNN" string
+ * (20904 = 2.9.4); an unreadable symbol means a modern libxml. */
+static int howdah_libxml_legacy(void) {
+    static int state = -1;
+    if (state < 0) {
+        const char *const *pv = (const char *const *)dlsym(RTLD_DEFAULT, "xmlParserVersion");
+        long v = (pv && *pv) ? strtol(*pv, NULL, 10) : 0;
+        state = (v > 0 && v < 20900) ? 1 : 0;
+    }
+    return state;
+}
+
+/* Read an options argument as a libxml flag mask. An absent argument is the
+ * default (0). Returns 0 when the argument is not a scalar this can read (the
+ * original call then decides what to do with it). */
+static int howdah_xml_flags_of(zval *z, int64_t *out) {
+    *out = 0;
+    if (!z) return 1;
+    switch (Z_TYPE_P(z)) {
+        case IS_LONG: *out = (int64_t)Z_LVAL_P(z); return 1;
+        case IS_NULL: return 1;
+#if PHP_VERSION_ID >= 70000
+        case IS_FALSE: return 1;
+        case IS_TRUE: *out = 1; return 1;
+#else
+        case IS_BOOL: *out = Z_BVAL_P(z) ? 1 : 0; return 1;
+#endif
+        case IS_DOUBLE: *out = (int64_t)zend_dval_to_lval(Z_DVAL_P(z)); return 1;
+        case IS_STRING: *out = (int64_t)strtol(Z_STRVAL_P(z), NULL, 10); return 1;
+        default: return 0;
+    }
+}
+
+/* Replace the n-th call argument with the integer v (the stripped option
+ * mask). Only the callee's frame sees it; the caller's variable is untouched. */
+#if PHP_VERSION_ID >= 70000
+static void howdah_xml_set_flags(INTERNAL_FUNCTION_PARAMETERS, int n, int64_t v) {
+    zval *slot = ZEND_CALL_ARG(execute_data, n);
+    zval_ptr_dtor(slot); /* drops a reference or string; a no-op for a plain long */
+    ZVAL_LONG(slot, (zend_long)v);
+}
+#else
+static void howdah_xml_set_flags(INTERNAL_FUNCTION_PARAMETERS, int n, int64_t v) {
+    zval **all[8];
+    if (ZEND_NUM_ARGS() >= n && ZEND_NUM_ARGS() <= 8
+        && zend_get_parameters_array_ex(ZEND_NUM_ARGS(), all) == SUCCESS) {
+        zval **slot = all[n - 1];
+        zval *nz;
+        MAKE_STD_ZVAL(nz);
+        ZVAL_LONG(nz, (long)v);
+        zval_ptr_dtor(slot); /* the stack cell's share of the old value */
+        *slot = nz;          /* the callee (and the frame cleanup) now own nz */
+    }
+}
+#endif
+
+/* The gate every XML-string sink runs first. The document is argument docn,
+ * its libxml options argument optn. The hot path (no dangerous flag, modern
+ * libxml) is a few compares and never calls the core. Returns 1 when the call
+ * must be refused, else 0 (chain); a STRIP verdict has already rewritten the
+ * options argument by then. */
+static int howdah_xml_gate(INTERNAL_FUNCTION_PARAMETERS, const char *fn, size_t fnlen, int docn, int optn) {
+    zval *d, *o;
+    int64_t f;
+    int legacy, caps, act;
+    if (!g_xml_decide) return 0;
+    HOWDAH_ARG(docn, d);
+    if (!HOWDAH_IS_STR(d)) return 0;
+    HOWDAH_ARG(optn, o);
+    if (!howdah_xml_flags_of(o, &f)) return 0;
+    legacy = howdah_libxml_legacy();
+    if (!legacy && !(f & HOWDAH_XML_DANGEROUS_FLAGS)) return 0;
+    caps = legacy ? HOWDAH_XML_ENGINE_IGNORES_FLAGS : (o ? HOWDAH_XML_CAN_STRIP : 0);
+    act = g_xml_decide(fn, fnlen, Z_STRVAL_P(d), Z_STRLEN_P(d), f, caps);
+    if (act == HOWDAH_ACTION_STRIP) {
+        howdah_xml_set_flags(INTERNAL_FUNCTION_PARAM_PASSTHRU, optn, f & ~(int64_t)HOWDAH_XML_DANGEROUS_FLAGS);
+        return 0;
+    }
+    return act == HOWDAH_ACTION_BLOCK;
+}
+
+/* One XML-string sink; `refuse` is the statement a refused call runs. */
+#define HOWDAH_DEFINE_XML_SINK(cname, phpname, docn, optn, refuse)                \
+    static howdah_zif howdah_orig_##cname = NULL;                                 \
+    static void howdah_hook_##cname(INTERNAL_FUNCTION_PARAMETERS) {               \
+        if (howdah_xml_gate(INTERNAL_FUNCTION_PARAM_PASSTHRU, (phpname),          \
+                            sizeof(phpname) - 1, (docn), (optn))) {               \
+            refuse;                                                               \
+            return;                                                               \
+        }                                                                         \
+        howdah_orig_##cname(INTERNAL_FUNCTION_PARAM_PASSTHRU);                    \
+    }
+
+HOWDAH_DEFINE_XML_SINK(simplexml_load_string, "simplexml_load_string", 1, 3, RETVAL_FALSE)
+HOWDAH_DEFINE_XML_SINK(domdocument_loadxml, "DOMDocument::loadXML", 1, 2, RETVAL_FALSE)
+HOWDAH_DEFINE_XML_SINK(xmlreader_xml, "XMLReader::XML", 1, 3, RETVAL_FALSE)
+#if PHP_VERSION_ID >= 80400
+HOWDAH_DEFINE_XML_SINK(dom_xmldocument_createfromstring, "Dom\\XMLDocument::createFromString", 1, 2, RETVAL_FALSE)
+#endif
+
+#if PHP_VERSION_ID >= 80000
+/* PHP 8's XMLReader::XML() and ::open() are static, but `$reader->XML(...)` is
+ * still allowed: ext/xmlreader's object handlers return, for an instance call,
+ * a private NON-static copy of the function (made with memcpy at MINIT, so it
+ * is not the entry in the class's function table and a swap of that entry never
+ * sees an instance call). Ask a throwaway XMLReader object for the function an
+ * instance call would run and point that copy at the same trampoline. The copy
+ * still holds the original handler (the table entry was swapped after the
+ * memcpy), so the trampoline's saved original is correct for both. A PHP that
+ * returns the table entry itself (no override) needs nothing. Returns 1 when a
+ * copy was hooked. */
+static int howdah_hook_xmlreader_instance_copy(void) {
+    zend_class_entry *ce = (zend_class_entry *)zend_hash_str_find_ptr(CG(class_table), "xmlreader", 9);
+    zend_function *table, *copy;
+    zend_string *nm;
+    zval zv;
+    zend_object *obj;
+    int hooked = 0;
+    if (!ce || !howdah_orig_xmlreader_xml) return 0;
+    table = (zend_function *)zend_hash_str_find_ptr(&ce->function_table, "xml", 3);
+    if (!table) return 0;
+    if (object_init_ex(&zv, ce) != SUCCESS) return 0;
+    obj = Z_OBJ(zv);
+    nm = zend_string_init("xml", 3, 0);
+    if (obj->handlers && obj->handlers->get_method) {
+        copy = obj->handlers->get_method(&obj, nm, NULL);
+        if (copy && copy != table && copy->type == ZEND_INTERNAL_FUNCTION
+            && copy->internal_function.handler == howdah_orig_xmlreader_xml) {
+            copy->internal_function.handler = howdah_hook_xmlreader_xml;
+            hooked = 1;
+        }
+    }
+    zend_string_release(nm);
+    zval_ptr_dtor(&zv);
+    return hooked;
+}
+#endif
+
+/* new SimpleXMLElement($data, $options, $dataIsURL): a URL or path (argument 3
+ * true) is loaded by libxml itself, not parsed from the string, so it is left
+ * alone. A refusal mirrors an unparseable document: the exception PHP throws. */
+static howdah_zif howdah_orig_simplexmlelement_ctor = NULL;
+static void howdah_hook_simplexmlelement_ctor(INTERNAL_FUNCTION_PARAMETERS) {
+    zval *u;
+    int is_url = 0;
+    HOWDAH_ARG(3, u);
+    if (u) {
+        switch (Z_TYPE_P(u)) {
+            case IS_LONG: is_url = Z_LVAL_P(u) != 0; break;
+#if PHP_VERSION_ID >= 70000
+            case IS_TRUE: is_url = 1; break;
+#else
+            case IS_BOOL: is_url = Z_BVAL_P(u) != 0; break;
+#endif
+            case IS_STRING: is_url = Z_STRLEN_P(u) != 0; break;
+            default: break;
+        }
+    }
+    if (!is_url
+        && howdah_xml_gate(INTERNAL_FUNCTION_PARAM_PASSTHRU, "SimpleXMLElement::__construct",
+                          sizeof("SimpleXMLElement::__construct") - 1, 1, 2)) {
+#if PHP_VERSION_ID >= 70000
+        zend_throw_exception(zend_ce_exception, "String could not be parsed as XML", 0);
+#else
+        zend_throw_exception(zend_exception_get_default(TSRMLS_C), "String could not be parsed as XML", 0 TSRMLS_CC);
+#endif
+        return;
+    }
+    howdah_orig_simplexmlelement_ctor(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
 
 /* ---- mail ---------------------------------------------------------------- */
 static howdah_zif howdah_orig_mail = NULL;
@@ -299,10 +485,12 @@ static int howdah_swap_method(const char *cls, size_t clen, const char *m, size_
  * at first RINIT (shared curl/dom/simplexml extensions may load after howdah
  * at MINIT). A sink whose function does not exist on this PHP is skipped;
  * the returned mask says what was actually installed (for phpinfo). */
-int howdah_install_legacy_hooks(howdah_sink_decide_t cb, howdah_mail_decide_t mail_cb, int mask) {
+int howdah_install_legacy_hooks(howdah_sink_decide_t cb, howdah_mail_decide_t mail_cb,
+                                howdah_xml_decide_t xml_cb, int mask) {
     int done = 0;
     g_decide = cb;
     g_mail_decide = mail_cb;
+    g_xml_decide = xml_cb;
     if ((mask & HOWDAH_LEGACY_MAIL) && HOWDAH_SWAP(mail, "mail")) done |= HOWDAH_LEGACY_MAIL;
 #if PHP_VERSION_ID < 70000
     if (mask & HOWDAH_LEGACY_PREG_EVAL) {
@@ -332,10 +520,22 @@ int howdah_install_legacy_hooks(howdah_sink_decide_t cb, howdah_mail_decide_t ma
         if (n) done |= HOWDAH_LEGACY_CALLBACK;
     }
     if (mask & HOWDAH_LEGACY_XML) {
-        int a = HOWDAH_SWAP(simplexml_load_string, "simplexml_load_string");
-        int b = howdah_swap_method("domdocument", 11, "loadxml", 7, howdah_hook_domdocument_loadxml,
-                                   &howdah_orig_domdocument_loadxml);
-        if (a || b) done |= HOWDAH_LEGACY_XML;
+        int n = 0;
+        n += HOWDAH_SWAP(simplexml_load_string, "simplexml_load_string");
+        n += howdah_swap_method("domdocument", 11, "loadxml", 7, howdah_hook_domdocument_loadxml,
+                                &howdah_orig_domdocument_loadxml);
+        n += howdah_swap_method("simplexmlelement", 16, "__construct", 11, howdah_hook_simplexmlelement_ctor,
+                                &howdah_orig_simplexmlelement_ctor);
+        n += howdah_swap_method("xmlreader", 9, "xml", 3, howdah_hook_xmlreader_xml, &howdah_orig_xmlreader_xml);
+#if PHP_VERSION_ID >= 80000
+        (void)howdah_hook_xmlreader_instance_copy();
+#endif
+#if PHP_VERSION_ID >= 80400
+        n += howdah_swap_method("dom\\xmldocument", 15, "createfromstring", 16,
+                                howdah_hook_dom_xmldocument_createfromstring,
+                                &howdah_orig_dom_xmldocument_createfromstring);
+#endif
+        if (n) done |= HOWDAH_LEGACY_XML;
     }
     if (mask & HOWDAH_LEGACY_TLS) {
         int a = HOWDAH_SWAP(curl_setopt, "curl_setopt");

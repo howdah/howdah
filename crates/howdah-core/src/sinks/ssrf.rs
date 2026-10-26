@@ -37,6 +37,11 @@ pub struct Host {
     pub scheme: Option<Scheme>,
     pub name: Vec<u8>,
     pub port: Option<u16>,
+    /// The authority contained a NUL byte. No legitimate host does; the two
+    /// consumers (PHP's `php_url_parse`, which keeps userinfo, and libc, which
+    /// stops at the NUL) can then resolve to different hosts, so the caller must
+    /// treat it as suspicious rather than trust a single parse.
+    pub suspicious: bool,
 }
 
 fn scheme_from(s: &[u8]) -> Option<Scheme> {
@@ -70,40 +75,90 @@ pub fn parse_host(input: &[u8], form: HostForm) -> Option<Host> {
     {
         return None;
     }
-    // `://` is a scheme delimiter only before any `/`, `?` or `#`; otherwise it
-    // is part of a path/query (e.g. `127.0.0.1/?u=http://x`) of a bare host.
-    let delim = find_sub(input, b"://")
-        .filter(|&i| !input[..i].iter().any(|b| matches!(b, b'/' | b'?' | b'#')));
-    let (scheme, rest) = match delim {
-        Some(i) => {
-            let sch = &input[..i];
-            if sch.is_empty()
-                || !sch
-                    .iter()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
-            {
-                return None;
+    // Peel leading `scheme://` prefixes. `://` is a delimiter only before any
+    // `/`, `?` or `#` (otherwise it is part of a bare host's path/query, e.g.
+    // `127.0.0.1/?u=http://x`). A known network scheme fixes the scheme and what
+    // follows is the authority. An UNKNOWN scheme is peeled and we retry on the
+    // remainder, so a curl scheme (`dict://127.0.0.1`) and a nesting wrapper
+    // (`compress.zlib://http://169.254.169.254/`) both classify the inner host
+    // instead of slipping past the range check as "not a network target" (F4).
+    // Iterative, not recursive: every step drops a `scheme://`, so a crafted
+    // `a://a://a://…` cannot overflow the stack.
+    let mut rest = input;
+    let scheme = loop {
+        let delim = find_sub(rest, b"://")
+            .filter(|&i| !rest[..i].iter().any(|b| matches!(b, b'/' | b'?' | b'#')));
+        match delim {
+            Some(i) => {
+                let sch = &rest[..i];
+                if sch.is_empty()
+                    || !sch
+                        .iter()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+                {
+                    // Not a valid scheme, so this `://` is not a delimiter. A
+                    // bare host (curl) takes the authority as the text BEFORE it
+                    // (`127.0.0.1:80://x` connects to 127.0.0.1:80); a stream URL
+                    // needs a real scheme (F3 re-review).
+                    if form == HostForm::SchemeRequired {
+                        return None;
+                    }
+                    rest = &rest[..i];
+                    break None;
+                }
+                match scheme_from(sch) {
+                    Some(s) => {
+                        rest = &rest[i + 3..];
+                        break Some(s);
+                    }
+                    None => {
+                        rest = &rest[i + 3..];
+                        continue;
+                    }
+                }
             }
-            (Some(scheme_from(sch)?), &input[i + 3..])
-        }
-        None => {
-            if form == HostForm::SchemeRequired {
-                return None;
+            None => {
+                if form == HostForm::SchemeRequired {
+                    return None;
+                }
+                break None;
             }
-            (None, input)
         }
     };
+    // Authority ends at `/`, `?` or `#` only. A backslash is NOT a terminator:
+    // PHP's `php_url_parse` (the http/ftp stream wrappers) and libcurl both keep
+    // `\` in the userinfo and take the host after the last `@`, so
+    // `http://public.example\@169.254.169.254/` connects to 169.254.169.254 on
+    // both (PoC-confirmed, PHP 5.6 and 8.3). Terminating at `\` here would make
+    // us read `public.example` and allow the request.
     let end = rest
         .iter()
-        .position(|b| matches!(b, b'/' | b'?' | b'#' | b'\\'))
+        .position(|b| matches!(b, b'/' | b'?' | b'#'))
         .unwrap_or(rest.len());
+    // A NUL anywhere in the authority (userinfo, host or port) makes the host
+    // ambiguous between the URL-parser view (keeps userinfo) and the libc view
+    // (stops at the NUL): e.g. `127.0.0.1\0@public` is `public` to one and
+    // `127.0.0.1` to the other. No legitimate host has a NUL, so flag the whole
+    // request suspicious rather than trust either single view.
+    let suspicious = rest[..end].contains(&0);
     let mut auth = &rest[..end];
     if let Some(at) = auth.iter().rposition(|&b| b == b'@') {
         auth = &auth[at + 1..];
     }
+    // A NUL terminates the authority for libc / PHP < 7, so classify only the
+    // bytes before the first NUL. One cut on the whole authority (after the
+    // userinfo strip), BEFORE the split, so garbage AFTER the NUL — a bad port,
+    // or a stray `]` — cannot make the parse fail open (libc ignores everything
+    // past the NUL): `127.0.0.1\0:99999` -> 127.0.0.1, `127.0.0.1:80\0x` -> :80,
+    // `[::1\0]` and `[::1]\0:80` -> ::1 (F3).
+    if let Some(z) = auth.iter().position(|&b| b == 0) {
+        auth = &auth[..z];
+    }
     let (name, port_s): (&[u8], &[u8]) = if auth.first() == Some(&b'[') {
-        let close = auth.iter().position(|&b| b == b']')?;
-        let after = &auth[close + 1..];
+        // Tolerate a missing `]` (a NUL cut may have removed it): take the rest
+        // as the address so `[::1\0]` yields `::1` rather than failing open.
+        let close = auth.iter().position(|&b| b == b']').unwrap_or(auth.len());
+        let after = if close < auth.len() { &auth[close + 1..] } else { &[][..] };
         let port = match after.split_first() {
             None => &[][..],
             Some((b':', p)) => p,
@@ -116,14 +171,12 @@ pub fn parse_host(input: &[u8], form: HostForm) -> Option<Host> {
     } else {
         (auth, &[][..])
     };
-    let port = if port_s.is_empty() {
-        None
-    } else {
-        if port_s.len() > 5 || !port_s.iter().all(u8::is_ascii_digit) {
-            return None;
-        }
-        Some(std::str::from_utf8(port_s).ok()?.parse::<u16>().ok()?)
-    };
+    // An unparseable or out-of-range port does NOT drop the host: classify it
+    // with port None. Otherwise `127.0.0.1:99999` (out of u16 range) or a
+    // leading-zero port would fail the whole parse and slip the host past the
+    // check (round-5). The port only narrows the match; the host is what must
+    // not be lost.
+    let port = std::str::from_utf8(port_s).ok().and_then(|s| s.parse::<u16>().ok());
     // Zone-id only exists on IPv6; elsewhere `%` is percent-encoding, so never
     // truncate a non-IPv6 name at it.
     let name = match name.iter().position(|&b| b == b'%') {
@@ -137,7 +190,141 @@ pub fn parse_host(input: &[u8], form: HostForm) -> Option<Host> {
     if name.is_empty() {
         return None;
     }
-    Some(Host { scheme, name, port })
+    Some(Host { scheme, name, port, suspicious })
+}
+
+/// Where a URL is about to be used, for the egress-scheme policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemeCtx {
+    /// A `curl_exec` target (or a redirect hop): anything but `http`/`https`
+    /// is refused, because libcurl is purely an egress tool (`file://` reads a
+    /// local file, `gopher://` / `dict://` smuggle raw bytes to an internal
+    /// service).
+    Curl,
+    /// A URL handed to `file_get_contents` / `fopen` / `get_headers`: only the
+    /// remote (network) wrappers are refused. Local wrappers (`file`, `php`,
+    /// `data`, `glob`, `zip`, `compress.*`) are not egress and are left alone;
+    /// `phar` is the phar sink's job.
+    Stream,
+}
+
+/// Schemes libcurl speaks (or that a PHP wrapper extension may add) that are
+/// not HTTP(S). The label is what the log carries: a category, never the URL.
+const CURL_SCHEMES: &[&str] = &[
+    "file", "gopher", "gophers", "dict", "ldap", "ldaps", "tftp", "ftp", "ftps", "sftp", "scp",
+    "telnet", "smb", "smbs", "imap", "imaps", "pop3", "pop3s", "smtp", "smtps", "rtsp", "rtmp",
+    "rtmps", "mqtt", "ws", "wss",
+];
+
+/// libcurl guesses the protocol of a scheme-less URL from the host's first
+/// label (`ftp.example.com` is FTP). Those host prefixes and their labels.
+const GUESS_PREFIXES: &[(&str, &str)] = &[
+    ("ftp.", "guessed-ftp"),
+    ("dict.", "guessed-dict"),
+    ("ldap.", "guessed-ldap"),
+    ("imap.", "guessed-imap"),
+    ("smtp.", "guessed-smtp"),
+    ("pop3.", "guessed-pop3"),
+    ("gopher.", "guessed-gopher"),
+];
+
+fn known_label(s: &[u8]) -> &'static str {
+    CURL_SCHEMES.iter().copied().find(|k| k.as_bytes() == s).unwrap_or("other")
+}
+
+/// Category label of an egress scheme the policy refuses, or `None` when the
+/// URL is allowed (HTTP(S), or no scheme where the context does not guess).
+///
+/// A scheme is the leading `alpha *(alnum / + / - / .)` run followed by `:/`;
+/// `host:port` (a colon then a digit) is not a scheme. For [`SchemeCtx::Curl`]
+/// a scheme-less URL is judged by libcurl's host-prefix protocol guess. This is
+/// a first line only: in `block` mode the C glue also sets `CURLOPT_PROTOCOLS`
+/// so libcurl itself refuses anything a parser difference lets through.
+pub fn denied_scheme(url: &[u8], ctx: SchemeCtx) -> Option<&'static str> {
+    let u = url.trim_ascii_start();
+    let n = u
+        .iter()
+        .take_while(|&&b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+        .count();
+    if n > 0 && u[0].is_ascii_alphabetic() && u.get(n) == Some(&b':') && u.get(n + 1) == Some(&b'/')
+    {
+        let s = u[..n].to_ascii_lowercase();
+        if s == b"http" || s == b"https" {
+            return None;
+        }
+        return match ctx {
+            SchemeCtx::Curl => Some(known_label(&s)),
+            SchemeCtx::Stream => {
+                if s.starts_with(b"ssh2.") {
+                    return Some("ssh2");
+                }
+                // Not egress / not ours: leave local wrappers and phar alone.
+                match known_label(&s) {
+                    "other" | "file" | "ws" | "wss" => None,
+                    k => Some(k),
+                }
+            }
+        };
+    }
+    if ctx == SchemeCtx::Curl {
+        let end = u
+            .iter()
+            .position(|&b| matches!(b, b'/' | b'?' | b'#' | b':' | b'\\'))
+            .unwrap_or(u.len());
+        let host = u[..end].to_ascii_lowercase();
+        for (p, label) in GUESS_PREFIXES {
+            if host.starts_with(p.as_bytes()) {
+                return Some(label);
+            }
+        }
+    }
+    None
+}
+
+/// Default port for the scheme-less / `http` / `https` URLs the resolve pin
+/// covers.
+fn pin_port(h: &Host) -> Option<u16> {
+    match h.scheme {
+        None | Some(Scheme::Http) => Some(h.port.unwrap_or(80)),
+        Some(Scheme::Https) => Some(h.port.unwrap_or(443)),
+        _ => None,
+    }
+}
+
+/// Build a `CURLOPT_RESOLVE` entry (`host:port:ip[,ip...]`) that pins the URL's
+/// hostname to the validated IPv4 addresses in `recs` (17-byte records), so
+/// libcurl connects to exactly what was checked instead of re-resolving
+/// (DNS rebinding). `multi` allows a comma list (libcurl 7.59+); otherwise only
+/// the first address is pinned. `None` when there is nothing safe to pin: a
+/// literal-IP host (no DNS to rebind), a non-HTTP(S) URL, an IPv6-only or
+/// unresolved host, or a name carrying anything but hostname characters (which
+/// libcurl would also spell differently).
+pub fn resolve_pin_entry(url: &[u8], recs: &[u8], multi: bool) -> Option<String> {
+    let h = parse_host(url, HostForm::BareHostOk)?;
+    let port = pin_port(&h)?;
+    if decode_literal_ip(&h.name).is_some()
+        || h.name.contains(&b':')
+        || !h.name.iter().all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+    {
+        return None;
+    }
+    let mut ips: Vec<String> = Vec::new();
+    #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)] // as_chunks needs Rust 1.88+
+    for r in recs.chunks_exact(17) {
+        if r[0] == 4 && ips.len() < 8 {
+            let s = format!("{}.{}.{}.{}", r[1], r[2], r[3], r[4]);
+            if !ips.contains(&s) {
+                ips.push(s);
+            }
+        }
+    }
+    if ips.is_empty() {
+        return None;
+    }
+    if !multi {
+        ips.truncate(1);
+    }
+    Some(format!("{}:{}:{}", String::from_utf8_lossy(&h.name), port, ips.join(",")))
 }
 
 /// Raw IP address bytes (no `std::net`).
@@ -443,22 +630,32 @@ pub fn host_allowed(
     literal: Option<IpRepr>,
     allow: &[String],
 ) -> bool {
-    allow.iter().any(|entry| {
-        if entry.is_empty() {
-            return false;
-        }
-        let mut ips = resolved.iter().copied().chain(literal);
-        if entry.contains('/') {
-            return match parse_cidr(entry) {
-                Some((net, p)) => ips.any(|ip| cidr_contains(net, p, ip)),
-                None => false,
-            };
-        }
-        if let Some(ip) = decode_literal_ip(entry.as_bytes()) {
-            return ips.any(|x| norm(x) == norm(ip));
-        }
-        entry.as_bytes().eq_ignore_ascii_case(host)
-    })
+    // Name-based trust: the operator allowlisted this hostname by name. (The
+    // `rebind` knob is the resolve-time defence for a name that answers internal.)
+    let name_allowed = allow.iter().any(|e| {
+        !e.is_empty()
+            && !e.contains('/')
+            && decode_literal_ip(e.as_bytes()).is_none()
+            && e.as_bytes().eq_ignore_ascii_case(host)
+    });
+    if name_allowed {
+        return true;
+    }
+    // IP-based: EVERY resolved/literal address must be covered by an IP or CIDR
+    // allow entry. Requiring all, not any, stops an attacker-controlled name
+    // that resolves to [an allowed address, 169.254.169.254] from passing while
+    // PHP connects to the internal one (F6).
+    let covers = |ip: IpRepr| {
+        allow.iter().any(|e| {
+            if e.contains('/') {
+                matches!(parse_cidr(e), Some((net, p)) if cidr_contains(net, p, ip))
+            } else {
+                matches!(decode_literal_ip(e.as_bytes()), Some(x) if norm(x) == norm(ip))
+            }
+        })
+    };
+    let mut ips = resolved.iter().copied().chain(literal).peekable();
+    ips.peek().is_some() && ips.all(covers)
 }
 
 /// True iff `entry` is a well-formed `allow_hosts` entry: a non-empty,
@@ -562,6 +759,67 @@ mod tests {
         assert_eq!(h.name, b"127.0.0.1");
     }
     #[test]
+    fn parse_host_after_backslash_userinfo() {
+        // F2: PHP/curl keep `\` in the userinfo and take the host after the last
+        // `@`, so the authority must not terminate at `\`.
+        let h = ph("http://public.example\\@127.0.0.1/x", HostForm::SchemeRequired).unwrap();
+        assert_eq!(h.name, b"127.0.0.1");
+        let h = ph("http://public.example\\@169.254.169.254/latest", HostForm::SchemeRequired).unwrap();
+        assert_eq!(h.name, b"169.254.169.254");
+    }
+    #[test]
+    fn parse_flags_nul_in_authority_suspicious() {
+        // A NUL anywhere in the authority is suspicious: libc stops at it while
+        // PHP's URL parser keeps the userinfo, so the two can resolve to
+        // different hosts. Both `public\0@127.0.0.1` (URL-view internal) and its
+        // mirror `127.0.0.1\0@public` (libc-view internal) are caught, along
+        // with host-, port- and bracket-embedded NULs.
+        for s in [
+            "http://127.0.0.1\0.example.com/",
+            "127.0.0.1\0.evil.com",
+            "http://127.0.0.1:80\0x/",
+            "http://public\0@127.0.0.1/",
+            "http://127.0.0.1\0@public/",
+            "http://[::1\0]/",
+            "http://127.0.0.1\0:99999/",
+            "http://[::1]\0:80/",
+        ] {
+            let form = if s.starts_with("http") { HostForm::SchemeRequired } else { HostForm::BareHostOk };
+            assert!(ph(s, form).is_some_and(|h| h.suspicious), "not suspicious: {s:?}");
+        }
+        // The host is still cut for non-range consumers (scheme/guess-prefix).
+        assert_eq!(ph("127.0.0.1\0.evil.com", HostForm::BareHostOk).unwrap().name, b"127.0.0.1");
+        // A NUL-free authority is NOT suspicious.
+        assert!(!ph("http://127.0.0.1/", HostForm::SchemeRequired).unwrap().suspicious);
+        assert!(!ph("http://example.com:8080/", HostForm::SchemeRequired).unwrap().suspicious);
+    }
+    #[test]
+    fn parse_bare_host_with_invalid_scheme() {
+        // Re-review (2b): `host:port://path` is not a scheme (`:` is not a
+        // scheme char), and curl connects to the host:port, so a bare host
+        // classifies it rather than returning None (fail-open).
+        let h = ph("127.0.0.1:80://x", HostForm::BareHostOk).unwrap();
+        assert_eq!(h.name, b"127.0.0.1");
+        assert_eq!(h.port, Some(80));
+        // A stream URL with an invalid scheme is still rejected.
+        assert!(ph("127.0.0.1:80://x", HostForm::SchemeRequired).is_none());
+    }
+    #[test]
+    fn parse_bad_port_still_classifies_host() {
+        // Round-5: an out-of-range or garbage port must not drop the host (that
+        // would fail open on the range check); classify it with port None.
+        let h = ph("http://127.0.0.1:99999/", HostForm::SchemeRequired).unwrap();
+        assert_eq!(h.name, b"127.0.0.1");
+        assert_eq!(h.port, None);
+        let h = ph("127.0.0.1:8080abc", HostForm::BareHostOk).unwrap();
+        assert_eq!(h.name, b"127.0.0.1");
+        assert_eq!(h.port, None);
+        // A leading-zero port (libcurl accepts it) still parses.
+        assert_eq!(ph("http://127.0.0.1:000080/", HostForm::SchemeRequired).unwrap().port, Some(80));
+        // A valid port still parses.
+        assert_eq!(ph("http://127.0.0.1:8080/", HostForm::SchemeRequired).unwrap().port, Some(8080));
+    }
+    #[test]
     fn parse_strips_zone_and_trailing_dot() {
         let h = ph("http://[fe80::1%eth0]:80/", HostForm::SchemeRequired).unwrap();
         assert_eq!(h.name, b"fe80::1");
@@ -587,6 +845,19 @@ mod tests {
     #[test]
     fn parse_skips_unix_scheme() {
         assert!(ph("unix:///var/run/x.sock", HostForm::BareHostOk).is_none());
+        assert!(ph("file:///etc/passwd", HostForm::SchemeRequired).is_none());
+    }
+    #[test]
+    fn parse_peels_unknown_and_nesting_schemes() {
+        // F4: a curl scheme classifies the bare host after it.
+        let h = ph("dict://127.0.0.1:6379/x", HostForm::BareHostOk).unwrap();
+        assert_eq!(h.name, b"127.0.0.1");
+        assert_eq!(h.port, Some(6379));
+        // A nesting wrapper classifies the inner URL's host.
+        let h = ph("compress.zlib://http://169.254.169.254/latest", HostForm::SchemeRequired).unwrap();
+        assert_eq!(h.name, b"169.254.169.254");
+        assert_eq!(h.scheme, Some(Scheme::Http));
+        // A non-network wrapper still yields no host.
         assert!(ph("file:///etc/passwd", HostForm::SchemeRequired).is_none());
     }
     #[test]
@@ -626,6 +897,18 @@ mod tests {
             None,
             &al(&["1.2.3.4/30"])
         ));
+    }
+    #[test]
+    fn allow_requires_every_resolved_ip() {
+        // F6: a name resolving to [allowed, internal] is NOT allowed by an
+        // IP/CIDR allowlist (PHP could connect to the internal address).
+        let good = IpRepr::V4([8, 8, 8, 8]);
+        let meta = IpRepr::V4([169, 254, 169, 254]);
+        assert!(host_allowed(b"x", &[good], None, &al(&["8.8.8.8"])));
+        assert!(!host_allowed(b"x", &[good, meta], None, &al(&["8.8.8.8"])));
+        assert!(!host_allowed(b"x", &[good, meta], None, &al(&["0.0.0.0/1"])));
+        // A hostname allow entry still trusts the name regardless of its IPs.
+        assert!(host_allowed(b"trusted.example", &[good, meta], None, &al(&["trusted.example"])));
     }
     #[test]
     fn cidr_rejects_bad_prefixlen() {
@@ -712,6 +995,152 @@ mod tests {
             &al(&["10/8"])
         ));
     }
+    fn ds(u: &str, c: SchemeCtx) -> Option<&'static str> {
+        denied_scheme(u.as_bytes(), c)
+    }
+
+    #[test]
+    fn curl_scheme_allows_only_http_https() {
+        use SchemeCtx::Curl;
+        for ok in [
+            "http://example.com/",
+            "HTTPS://example.com/x?y=gopher://z",
+            "  https://example.com",
+            "example.com/path",
+            "example.com:8080/path",
+            "localhost:8080",
+            "127.0.0.1:80",
+            "//cdn.example.com/x",
+            "/relative/path",
+            "ftpserver.example.com", // no dot after ftp: not the ftp. guess
+        ] {
+            assert_eq!(ds(ok, Curl), None, "{ok}");
+        }
+        for (bad, label) in [
+            ("gopher://127.0.0.1:70/_x", "gopher"),
+            ("GOPHER://127.0.0.1/", "gopher"),
+            ("dict://127.0.0.1:11211/info", "dict"),
+            ("file:///etc/passwd", "file"),
+            ("file:/etc/passwd", "file"),
+            ("ldap://127.0.0.1/", "ldap"),
+            ("tftp://127.0.0.1/x", "tftp"),
+            ("ftp://127.0.0.1/", "ftp"),
+            ("  sftp://h/x", "sftp"),
+            ("smtp://127.0.0.1:25/", "smtp"),
+            ("weird+scheme://h/", "other"),
+            ("ftp.example.com/x", "guessed-ftp"),
+            ("DICT.example.com", "guessed-dict"),
+            ("ldap.example.com:389", "guessed-ldap"),
+        ] {
+            assert_eq!(ds(bad, Curl), Some(label), "{bad}");
+        }
+    }
+
+    #[test]
+    fn stream_scheme_denies_only_remote_wrappers() {
+        use SchemeCtx::Stream;
+        for ok in [
+            "http://example.com/",
+            "https://example.com/",
+            "file:///etc/hostname",
+            "php://temp",
+            "php://input",
+            "data:text/plain,hi",
+            "data://text/plain;base64,aGk=",
+            "glob:///tmp/*",
+            "zip:///tmp/a.zip#b",
+            "compress.zlib:///tmp/a.gz",
+            "phar:///tmp/a.phar/x", // the phar sink's job
+            "expect://id",          // the include/open firewall's job
+            "/tmp/plain.txt",
+            "plain.txt",
+            "ws://host/",
+        ] {
+            assert_eq!(ds(ok, Stream), None, "{ok}");
+        }
+        for (bad, label) in [
+            ("ftp://127.0.0.1/x", "ftp"),
+            ("FTPS://h/x", "ftps"),
+            ("gopher://h/", "gopher"),
+            ("dict://h/", "dict"),
+            ("ldap://h/", "ldap"),
+            ("tftp://h/", "tftp"),
+            ("sftp://h/", "sftp"),
+            ("ssh2.sftp://u:p@h/x", "ssh2"),
+            ("ssh2.tunnel://h:22", "ssh2"),
+        ] {
+            assert_eq!(ds(bad, Stream), Some(label), "{bad}");
+        }
+        // Stream context never guesses a protocol from a scheme-less host.
+        assert_eq!(ds("ftp.example.com/x", Stream), None);
+    }
+
+    fn rec4(a: [u8; 4]) -> [u8; 17] {
+        let mut r = [0u8; 17];
+        r[0] = 4;
+        r[1..5].copy_from_slice(&a);
+        r
+    }
+    fn rec6(a: [u8; 16]) -> [u8; 17] {
+        let mut r = [0u8; 17];
+        r[0] = 6;
+        r[1..].copy_from_slice(&a);
+        r
+    }
+
+    #[test]
+    fn pin_entry_builds_host_port_ip() {
+        let mut recs = Vec::new();
+        recs.extend_from_slice(&rec4([93, 184, 216, 34]));
+        assert_eq!(
+            resolve_pin_entry(b"http://Example.COM/x?y", &recs, false).as_deref(),
+            Some("example.com:80:93.184.216.34")
+        );
+        assert_eq!(
+            resolve_pin_entry(b"https://example.com/", &recs, false).as_deref(),
+            Some("example.com:443:93.184.216.34")
+        );
+        assert_eq!(
+            resolve_pin_entry(b"example.com:8080/p", &recs, false).as_deref(),
+            Some("example.com:8080:93.184.216.34")
+        );
+        assert_eq!(
+            resolve_pin_entry(b"http://user:pw@example.com:81/", &recs, false).as_deref(),
+            Some("example.com:81:93.184.216.34")
+        );
+    }
+
+    #[test]
+    fn pin_entry_multi_and_v6_filtering() {
+        let mut recs = Vec::new();
+        recs.extend_from_slice(&rec6([0x20, 0x01, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]));
+        recs.extend_from_slice(&rec4([1, 2, 3, 4]));
+        recs.extend_from_slice(&rec4([5, 6, 7, 8]));
+        recs.extend_from_slice(&rec4([1, 2, 3, 4])); // duplicate dropped
+        let single = resolve_pin_entry(b"http://h.example/", &recs, false).unwrap();
+        assert_eq!(single, "h.example:80:1.2.3.4");
+        let multi = resolve_pin_entry(b"http://h.example/", &recs, true).unwrap();
+        assert_eq!(multi, "h.example:80:1.2.3.4,5.6.7.8");
+        // IPv6-only: nothing safe to pin.
+        let v6only = rec6([0x20, 0x01, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        assert_eq!(resolve_pin_entry(b"http://h.example/", &v6only, true), None);
+    }
+
+    #[test]
+    fn pin_entry_refuses_unpinnable_targets() {
+        let recs = rec4([1, 2, 3, 4]);
+        // Literal IPs resolve nothing, so there is nothing to rebind or pin.
+        for lit in ["http://127.0.0.1/", "http://2130706433/", "http://[::1]/", "10.0.0.1:80"] {
+            assert_eq!(resolve_pin_entry(lit.as_bytes(), &recs, true), None, "{lit}");
+        }
+        // Non-HTTP(S) schemes and odd host spellings are never pinned.
+        assert_eq!(resolve_pin_entry(b"ftp://h.example/", &recs, true), None);
+        assert_eq!(resolve_pin_entry(b"gopher://h.example/", &recs, true), None);
+        assert_eq!(resolve_pin_entry(b"http://h%2eexample/", &recs, true), None);
+        // No usable address: no pin.
+        assert_eq!(resolve_pin_entry(b"http://h.example/", &[], true), None);
+    }
+
     #[test]
     fn reservedclass_as_str_pinned() {
         let all = [

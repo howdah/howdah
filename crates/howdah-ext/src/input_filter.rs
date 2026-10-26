@@ -208,6 +208,64 @@ unsafe fn inspect_value(arg: c_int, var: VarPtr, val: *mut *mut c_char, val_len:
     }
 }
 
+/// The raw query string the SAPI reports for this request, or `None` when there
+/// is none (the CLI, a request with no `?`). `request_info.query_string` is the
+/// exact string php-cgi would receive as `QUERY_STRING`: set by the SAPI before
+/// `php_request_startup`, so it is valid in every hook, and independent of
+/// `$_SERVER` (which `auto_globals_jit` may never build).
+unsafe fn raw_query_string<'a>() -> Option<&'a [u8]> {
+    let qs = (*ptr::addr_of!(sys::sapi_globals)).request_info.query_string;
+    if qs.is_null() {
+        return None;
+    }
+    let bytes = CStr::from_ptr(qs).to_bytes();
+    if bytes.is_empty() {
+        None
+    } else {
+        Some(bytes)
+    }
+}
+
+/// True when this request has a non-empty query string; RINIT uses it to make
+/// sure the core request has begun (and so run [`inspect_query_string`]) even
+/// when the query produced no input variable.
+pub(crate) unsafe fn has_query_string() -> bool {
+    raw_query_string().is_some()
+}
+
+/// Layer 2, php-cgi argument injection (CVE-2012-1823, CVE-2024-4577): hand the
+/// raw query string to the core, once per request, right after the core request
+/// begins (`module::maybe_begin`). The query is the one input Layer 2 reads
+/// outside the per-variable filter: the filter sees the decoded variables, and
+/// the attack is precisely a query that is NOT variables (no `=`), so the raw
+/// string is what has to be judged. A core Block latches `INPUT_BLOCKED`, the
+/// same latch the per-variable checks use, so the request is refused at the
+/// end of RINIT before the script runs (clean 403, worker survives). The query
+/// is scanned in the core and never logged.
+///
+/// Fail-open: a null context or an empty query is a no-op, and the whole call
+/// runs under `catch_unwind` at the call site.
+pub(crate) unsafe fn inspect_query_string() {
+    if module::CTX.is_null() {
+        return;
+    }
+    let Some(q) = raw_query_string() else {
+        return;
+    };
+    const NAME: &[u8] = b"QUERY_STRING";
+    let action = core::howdah_inspect_value(
+        module::CTX,
+        core::HOWDAH_SRC_QUERY,
+        NAME.as_ptr() as *const c_char,
+        NAME.len(),
+        q.as_ptr() as *const c_char,
+        q.len(),
+    );
+    if action == core::HOWDAH_BLOCK {
+        INPUT_BLOCKED = true;
+    }
+}
+
 /// True when a `PARSE_SERVER` variable name is an `HTTP_*` request header (the
 /// prefix PHP uses for every client-supplied header in `$_SERVER`).
 unsafe fn is_http_header(name: *const c_char, name_len: usize) -> bool {

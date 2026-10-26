@@ -49,9 +49,9 @@ order.
 | `layer` | What it is | Rules |
 |---|---|---|
 | 1 | Request-shape limits: multipart, input shape, request headers, the self-test marker, and the out-of-memory backstop | `max_parts`, `max_files`, `max_part_headers`, `max_part_header_bytes`, `max_field_name_len`, `max_filename_len`, `parse_memory_budget`, `malformed_multipart`, `upload_progress_abuse`, `self_test`, `max_input_vars`, `max_input_nesting_depth`, `max_input_key_bytes`, `max_request_headers`, `max_request_header_bytes`, `out_of_memory`, `startup_fatal`, `post_too_large`, `nesting_budget`, `parse_memory_estimate` |
-| 2 | Input inspection (log-only by default) | `sql_injection`, `path_traversal`, `command_injection` |
-| 3 | Sink hardening (log-only by default) | `command_exec`, `include`, `eval`, `unserialize`, `phar`, `ssrf`, and the legacy-era sinks `mail_injection`, `preg_eval`, `create_function`, `assert_string`, `dangerous_callback`, `xxe`, `tls_verify` |
-| 4 | After-breach behaviour (log-only by default; inert until its lists are set) | `upload_exec`, `unexpected_binary`, `unexpected_egress`, `php_write` |
+| 2 | Input inspection (the content classes are log-only by default; `cgi_arg_injection` blocks by default) | `sql_injection`, `path_traversal`, `command_injection`, `cgi_arg_injection` |
+| 3 | Sink hardening (log-only by default; `xxe` and the include/open wrapper firewall `include_wrapper`/`file_open` block by default) | `command_exec`, `include`, `eval`, `unserialize`, `phar`, `ssrf`, `include_wrapper`, `file_open`, and the legacy-era sinks `mail_injection`, `preg_eval`, `create_function`, `assert_string`, `dangerous_callback`, `xxe`, `tls_verify` |
+| 4 | After-breach behaviour (log-only by default; inert until its lists are set; the file guards `file_delete` and the upload tier of `php_write` block by default, `secret_read` is opt-in) | `upload_exec`, `unexpected_binary`, `unexpected_egress`, `php_write`, `file_delete`, `secret_read` |
 
 The layer is computed from the rule by `rule_layer` in
 `crates/howdah-core/src/log.rs`, an exhaustive match: a new rule does not
@@ -61,6 +61,18 @@ compile until it has a layer.
 `action: "log"`, never a block. An internal error caught at the extension
 boundary is also logged as `self_test`, with the reason
 `internal panic caught at FFI boundary; failed open`.
+
+`xxe` (Layer 3) is written at the XML parse call, not for the request, and only
+when a dangerous libxml flag (`LIBXML_NOENT`, `DTDLOAD`, `DTDATTR`, `DTDVALID`) meets
+an external entity or an entity-expansion bomb in the string being parsed. By
+default Howdah neutralizes it by removing the dangerous flags and letting the
+parse continue: the line is `action: "block"` (the dangerous operation was
+denied; the request is not refused) and the `reason` ends `dangerous flags
+removed, parse continued`. Where stripping cannot help (libxml older than 2.9.0)
+the call is refused and the reason ends `call refused`. With `[sinks.xml] mode =
+"detect"` the line is `action: "log"` and nothing is changed. A bare external
+DTD that a flag really fetches is always `action: "log"`. The `reason` names the
+guarded function and the flag names, never the document or a path in it.
 
 `out_of_memory` and `startup_fatal` are written by the out-of-memory backstop
 (`oom_exit`, see `docs/config.md`) the moment before it ends the worker: PHP ran
@@ -72,6 +84,40 @@ operator's locus, since PHP never gets to write its own message). In the rare
 genuine host out-of-memory (an `mmap` failure, not `memory_limit`), the system
 allocator the log writer uses may itself fail, so the line can be lost — the
 worker still exits (fail-stop).
+
+The Layer 4 file guards (`file_delete`, `secret_read`, and the upload tier of
+`php_write`) write a `reason` that names the guarded function, a path
+*category* (`wp-config`, `dotenv`, `private-key`, `htpasswd`, `system-account`,
+`ssh`, `credentials`, `system directory`; for writes `php`, `phtml`, `phar`,
+`htaccess`, `user-ini`, `web-config`) and the calling script as `file:line`,
+for example `unlink deletes a wp-config file at
+/var/www/html/wp-content/plugins/x/x.php:42`. They never carry the target path,
+its file name or any content.
+
+The `ssrf` rule (Layer 3, off by default) has four `reason` shapes, one per part
+of the guard, and none carries a URL, path, query or userinfo:
+
+- `ssrf via <scheme>: host=H port=P ip=I class=C` is the call-time range check
+  (`[sinks.ssrf] mode`); `class` is `loopback`, `unspecified`, `rfc1918`, `cgnat`,
+  `link_local`, `metadata`, `unique_local` or `benchmarking`.
+- `ssrf rebind via <where>: host=H port=P ip=I class=C` is the resolve-at-connect
+  knob (`rebind`); `ip` is the address the connection used or was about to be
+  pinned to, and `<where>` is `curl-resolve` (the set about to be pinned),
+  `curl-connect` (curl's connected address), `tcp-connect` (the peer of a
+  `fsockopen` / `pfsockopen` / `stream_socket_client` stream) or `stream-connect`
+  (the peer of an `fopen` stream).
+- `ssrf redirect via <scheme>: host=H port=P ip=I class=C` is the curl
+  internal-redirect guard (`redirect`): the `3xx` target that was not followed.
+- `ssrf scheme via <curl|stream>: scheme=S is not http/https` is the egress-scheme
+  denial (`scheme`); `S` is a scheme name from a fixed list, `other` for an
+  unknown one, or `guessed-ftp` / `guessed-dict` / ... for libcurl's host-prefix
+  protocol guess, never the URL.
+
+An oversize host (over 256 bytes) is logged as `ssrf: oversize host (>256 bytes),
+not resolvable - treated as suspicious` (`ssrf redirect: ...` for a redirect hop).
+A `block` is `action: "block"` and the call returns false (for `rebind` on a
+stream or curl response: after the connect, see `docs/config.md`); `detect` is
+`action: "log"`.
 
 Layer 4 in observe mode (`[behavior] observe = true`) writes its proposals
 as ordinary `action: "log"` lines whose `reason` starts with `proposed: `.

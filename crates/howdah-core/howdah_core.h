@@ -26,16 +26,6 @@
 #define MAX_PATH 4096
 
 /**
- * §4.5 cost of one array-nesting level in the parse-memory estimate (bytes).
- */
-#define COST_PER_LEVEL_BYTES 384
-
-/**
- * §4.5 fallback ceiling (bytes) when `memory_limit = -1` (no limit).
- */
-#define FALLBACK_CEILING_BYTES (64 * 1024 * 1024)
-
-/**
  * Action codes returned over the ABI. Pinned: Allow=0, Log=1, Block=2.
  */
 #define HOWDAH_ALLOW 0
@@ -61,6 +51,14 @@
 #define HOWDAH_SRC_COOKIE 2
 
 #define HOWDAH_SRC_PATH 3
+
+/**
+ * The raw query string as the SAPI reports it (`request_info.query_string`),
+ * for the php-cgi argument-injection rule only. Not budgeted: the scan is one
+ * bounded pass and a flood of ordinary variables must not be able to exhaust a
+ * budget ahead of it.
+ */
+#define HOWDAH_SRC_QUERY 4
 
 #define HOWDAH_SINK_COMMAND_EXEC 0
 
@@ -88,6 +86,89 @@
 
 #define HOWDAH_SINK_TLS 12
 
+#define HOWDAH_SSRF_KIND_RANGE 0
+
+#define HOWDAH_SSRF_KIND_REBIND 1
+
+#define HOWDAH_SSRF_KIND_REDIRECT 2
+
+#define HOWDAH_SSRF_ARM_RANGE 1
+
+#define HOWDAH_SSRF_ARM_REBIND 2
+
+#define HOWDAH_SSRF_ARM_SCHEME 4
+
+#define HOWDAH_SSRF_ARM_REDIRECT 8
+
+#define HOWDAH_SSRF_ARM_PIN 16
+
+#define HOWDAH_SSRF_ARM_PROTOCOLS 32
+
+#define HOWDAH_SSRF_VIA_STREAM 0
+
+#define HOWDAH_SSRF_VIA_CURL 1
+
+/**
+ * A read-open: fopen (read mode), file_get_contents, readfile.
+ */
+#define HOWDAH_FILE_OP_READ 0
+
+/**
+ * A write-open: fopen (write/append/create mode).
+ */
+#define HOWDAH_FILE_OP_WRITE 1
+
+/**
+ * A delete: unlink / rmdir (T5 delete guard).
+ */
+#define HOWDAH_FILE_OP_DELETE 2
+
+/**
+ * The SOURCE operand of rename (T5 delete guard: moving wp-config.php away).
+ */
+#define HOWDAH_FILE_OP_MOVE_SRC 3
+
+/**
+ * A read-mode open: never a php_write finding.
+ */
+#define HOWDAH_WRITE_READ 0
+
+/**
+ * file_put_contents / write-mode fopen / rename / copy target.
+ */
+#define HOWDAH_WRITE_PLAIN 1
+
+/**
+ * move_uploaded_file target (the always-on upload tier).
+ */
+#define HOWDAH_WRITE_UPLOAD 2
+
+/**
+ * Action code from `howdah_sink_check_xml`: the dangerous call is neutralized
+ * by removing the dangerous libxml flags from its options argument (the glue
+ * then runs the original call with the rewritten flags) instead of refusing
+ * it. Logged as `block`. Never returned by any other entry point.
+ */
+#define HOWDAH_STRIP 3
+
+/**
+ * `howdah_sink_check_xml` `caps` bit: the glue can rewrite the options
+ * argument, so a block may strip the flags instead of refusing the call.
+ */
+#define HOWDAH_XML_CAN_STRIP 1
+
+/**
+ * `howdah_sink_check_xml` `caps` bit: the libxml in use is older than 2.9.0,
+ * which resolves external entities whatever the flags say.
+ */
+#define HOWDAH_XML_ENGINE_IGNORES_FLAGS 2
+
+/**
+ * The dangerous `LIBXML_*` option bits (`NOENT|DTDLOAD|DTDATTR|DTDVALID`) the
+ * glue clears on a `HOWDAH_STRIP`. Mirrored in `howdah_sink.h`.
+ */
+#define HOWDAH_XML_DANGEROUS_FLAGS 30
+
 #define HOWDAH_BEHAVIOR_EXEC_DIR 0
 
 #define HOWDAH_BEHAVIOR_BINARY 1
@@ -95,6 +176,21 @@
 #define HOWDAH_BEHAVIOR_EGRESS 2
 
 #define HOWDAH_BEHAVIOR_PHP_WRITE 3
+
+/**
+ * The enforced-by-default upload-write guard (`move_uploaded_file` only).
+ */
+#define HOWDAH_BEHAVIOR_UPLOAD_WRITE 4
+
+/**
+ * The enforced-by-default delete guard (`unlink`/`rmdir`/`rename` source).
+ */
+#define HOWDAH_BEHAVIOR_DELETE 5
+
+/**
+ * The opt-in secret-read guard (read-open sinks).
+ */
+#define HOWDAH_BEHAVIOR_SECRET_READ 6
 
 /**
  * Install nothing (nothing armed needs the hook; JIT stays on).
@@ -119,10 +215,58 @@
 
 #define HOWDAH_HOOK_WHY_DENY_EXEC_DIRS 3
 
+#define HOWDAH_HOOK_WHY_INCLUDE_FIREWALL 4
+
+/**
+ * Per-file weight for the nesting budget (gap C / §4.4): PHP builds several
+ * metadata arrays per file (`name`, `type`, `tmp_name`, `error`, `size` under
+ * `$_FILES[name]`), so a file name's levels cost more than a field name's.
+ * Provisional; calibrated against peak RSS in the lab (plan Task 8).
+ */
+#define FILE_NAME_WEIGHT 5
+
+/**
+ * §4.5 cost of one array-nesting level in the parse-memory estimate (bytes).
+ * A Zend array (HashTable + initial buckets) is on this order. Provisional;
+ * the Task-8 RSS calibration pins it.
+ */
+#define COST_PER_LEVEL_BYTES 384
+
+/**
+ * §4.5 cost multiplier per buffered non-file byte. 2, not 1: while PHP reads a
+ * field it holds the growing read buffer AND, once complete, the registered
+ * copy, so the peak is roughly twice the value's size. Conservative (blocks a
+ * touch earlier, nearer the real peak). Provisional; Task-8 RSS calibrated.
+ */
+#define COST_PER_NONFILE_BYTE 2
+
+/**
+ * §4.5 fallback ceiling (bytes) when `memory_limit = -1` (no limit). The
+ * advisory names `-1` as a partial mitigation; Howdah keeps working there with
+ * a fixed, measured ceiling. Provisional; Task-8 calibrated.
+ */
+#define FALLBACK_CEILING_BYTES ((64 * 1024) * 1024)
+
 /**
  * Version of the event line format. 1 was the unversioned 1.0 to 1.4.0 line.
  */
 #define SCHEMA_VERSION 2
+
+#define E_ERROR 1
+
+#define E_WARNING 2
+
+#define E_PARSE 4
+
+#define E_NOTICE 8
+
+#define E_CORE_ERROR 16
+
+#define E_COMPILE_ERROR 64
+
+#define E_USER_ERROR 256
+
+#define E_RECOVERABLE_ERROR 4096
 
 /**
  * Maximum number of class names reported by `unserialize_classes`.
@@ -138,9 +282,11 @@
  * Longest prefix of an XML document the external-entity scan looks at. The
  * DOCTYPE (where entity declarations live) must precede the root element, so
  * nothing past the first element start is ever read; this cap bounds a
- * document that never opens one.
+ * document that never opens one. A prolog that is still open at the cap (a
+ * DOCTYPE pushed out of the window with a megabyte of comment) is reported,
+ * not waved through: see `XxeKind::Unscannable`.
  */
-#define XML_SCAN_MAX (64 * 1024)
+#define XML_SCAN_MAX (1024 * 1024)
 
 /**
  * Longest name in `DANGEROUS_CALLBACKS` plus a leading backslash; a cheap
@@ -204,8 +350,8 @@ int32_t howdah_feed(struct howdah_ctx *ctx, const char *chunk, size_t len);
  * absent boundary leaves the scanner off. NULL ctx / panic is a no-op.
  *
  * `post_max_size` and `memory_limit` are PHP's effective INI values for this
- * request in bytes (`post_max_size <= 0` = unlimited -> gap B off;
- * `memory_limit = -1` = no limit -> §4.5 fallback ceiling).
+ * request in bytes (`post_max_size <= 0` = unlimited → gap B off;
+ * `memory_limit = -1` = no limit → §4.5 fallback ceiling).
  *
  * # Safety
  * `ctx` NULL or live; `content_type` NULL or valid for `ct_len` bytes.
@@ -218,7 +364,7 @@ void howdah_scan_post_begin(struct howdah_ctx *ctx,
 
 /**
  * §4.2: feed `len` raw body bytes (as the `read_post` wrapper reads them) to the
- * byte-stream scanner. Returns the most severe action so far (0 Allow, 1 Log,
+ * byte-stream scanner. Returns the most severe action so far (0 Allow / 1 Log /
  * 2 Block); `Block` tells the wrapper to stop reading. The bytes are scanned for
  * framing only, never logged. NULL ctx, a scanner that was never armed, or a
  * panic returns 0 (fail open).
@@ -282,7 +428,10 @@ int32_t howdah_input_var(struct howdah_ctx *ctx, const char *name, size_t name_l
  * # Safety
  * `ctx` NULL or live; `name` NULL or valid for `name_len` bytes.
  */
-int32_t howdah_note_name(struct howdah_ctx *ctx, const char *name, size_t name_len, int32_t is_file);
+int32_t howdah_note_name(struct howdah_ctx *ctx,
+                         const char *name,
+                         size_t name_len,
+                         int32_t is_file);
 
 /**
  * Inspect one request value (Layer 2). `source` is a `HOWDAH_SRC_*` code.
@@ -291,6 +440,11 @@ int32_t howdah_note_name(struct howdah_ctx *ctx, const char *name, size_t name_l
  * independent `[inspect]` mode, so a global `block` never arms blocking here.
  * Returns the action for this value (0 Allow, 1 Log, 2 Block); it never drops
  * the variable. NULL ctx, unknown source or panic returns 0.
+ *
+ * `HOWDAH_SRC_QUERY` is different: `val` is the raw query string, `name` is
+ * ignored, and the check is the php-cgi argument-injection rule, whose mode is
+ * `[inspect] cgi_arg` (default `block`, independent of the global mode and of
+ * `[inspect] mode`) and which is exempt from the per-request scan budgets.
  *
  * # Safety
  * `ctx` NULL or live; `name`/`val` NULL or valid for their lengths.
@@ -444,7 +598,9 @@ int32_t howdah_sink_check_ssrf(struct howdah_ctx *ctx,
  * SSRF parse seam: parse the target of an intercepted outbound call so the C
  * shim never parses URLs itself. `scheme_required != 0` selects
  * `HostForm::SchemeRequired` (URL-only sinks), else `BareHostOk` (fsockopen,
- * curl). Returns 2 when the host parsed but is longer than `out_host_cap`
+ * curl); `scheme_required == 2` is `SchemeRequired` for a redirect `Location`
+ * value, where a leading `//` (scheme-relative) is read as `http://` and a
+ * plain relative reference is a skip. Returns 2 when the host parsed but is longer than `out_host_cap`
  * (suspicious: nothing is written; call `howdah_sink_ssrf_oversize`). Returns 1 ("act") after writing the clean host (no userinfo/brackets/
  * port, lowercased) to `out_host`, its length to `*out_host_len` and the port
  * (0 if none) to `*out_port`. Returns 0 ("skip") for a non-network target
@@ -567,14 +723,49 @@ int32_t howdah_oom_exit(struct howdah_ctx *ctx);
 /**
  * 1 iff the config ARMS the out-of-memory backstop: `oom_exit` is on AND the
  * global mode is not `off`. A global `off` disables every layer (the backstop
- * included); `detect` keeps it armed, since it is a Critical fail-stop that
- * cannot be "detected only". 0 for NULL and on panic. The glue applies the SAPI
- * and patched-engine gates on top of this.
+ * included), matching `[rules] decide` and the sink/inspect/behavior layers;
+ * `detect` keeps it armed, since it is a Critical fail-stop that cannot be
+ * "detected only". 0 for NULL and on panic. The glue applies the SAPI and
+ * patched-engine gates on top of this.
  *
  * # Safety
  * `ctx` NULL or live.
  */
 int32_t howdah_oom_armed(struct howdah_ctx *ctx);
+
+/**
+ * 1 iff the context's config has `recycle_on_fatal = true` (the §4.7 recycle
+ * facet opt-in); 0 otherwise, for NULL and on panic. Read by the glue at MINIT
+ * for the phpinfo row. Off by default. See [`howdah_recycle_armed`].
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_recycle_on_fatal(struct howdah_ctx *ctx);
+
+/**
+ * 1 iff the config ARMS the §4.7 recycle facet: `recycle_on_fatal` is on AND
+ * the global mode is not `off` (a global `off` disables every layer, this one
+ * included; `detect` keeps it armed, like the OOM backstop). The glue applies
+ * the SAPI and patched-engine gates on top of this, and chooses observe vs
+ * enforce from [`howdah_recycle_observe`]. 0 for NULL and on panic (do not arm
+ * — the fail-open direction).
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_recycle_armed(struct howdah_ctx *ctx);
+
+/**
+ * 1 iff the config has `recycle_observe = true`: the §4.7 facet logs a
+ * "would-recycle" event but does NOT exit, so an operator can size their
+ * uncaught-fatal rate before enforcing. Only meaningful when the facet is
+ * armed. 0 (enforce) for NULL and on panic.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_recycle_observe(struct howdah_ctx *ctx);
 
 /**
  * 1 iff some exception has a `script_sha256` facet that could apply to
@@ -602,6 +793,57 @@ int32_t howdah_sink_check_at(struct howdah_ctx *ctx,
                              size_t script_len,
                              const uint8_t *sha256,
                              size_t sha256_len);
+
+/**
+ * Store the runtime `session.save_path` and `error_log` for the include/open
+ * poisonable-local-target firewall (the glue reads them from PHP's ini). An
+ * empty value (NULL / 0 len) clears the slot, so that category simply does not
+ * fire. NULL ctx or panic is a no-op. Scanned, never logged.
+ *
+ * # Safety
+ * `ctx` NULL or live; each pointer NULL or valid for its length.
+ */
+void howdah_set_runtime_paths(struct howdah_ctx *ctx,
+                              const char *session,
+                              size_t session_len,
+                              const char *error_log,
+                              size_t error_log_len);
+
+/**
+ * 1 iff the file-op hub is armed: the include/open wrapper-or-poison firewall
+ * (either mode not off), or a T5 guard that shares it (the delete guard or the
+ * secret-read guard). The glue reads this once per process to decide whether to
+ * install the file-op trampolines; NULL ctx or panic is 0.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_sink_open_armed(struct howdah_ctx *ctx);
+
+/**
+ * File-op hub check: the T4 file-open firewall for fopen / file_get_contents /
+ * readfile, plus the T5 Layer-4 guards (delete for unlink/rmdir/rename-source,
+ * secret-read for read opens). `name` is the guarded function, `target` the
+ * path/URL argument (scanned, never logged), `op` a `HOWDAH_FILE_OP_*` class,
+ * `script`/`line` the calling PHP script and line (logged on a Layer-4 hit and
+ * matched by `[[exceptions]]` `script` facets), `sha256` as the other `_at`
+ * entry points. Returns 0 Allow / 1 Log / 2 Block; NULL ctx or panic is 0
+ * (fail-open). A hit is retrievable with `howdah_take_sink_log_line`.
+ *
+ * # Safety
+ * `ctx` NULL or live; every pointer NULL or valid for its length.
+ */
+int32_t howdah_sink_check_open_at(struct howdah_ctx *ctx,
+                                  const char *name,
+                                  size_t name_len,
+                                  const char *target,
+                                  size_t target_len,
+                                  int32_t op,
+                                  const char *script,
+                                  size_t script_len,
+                                  const uint8_t *sha256,
+                                  size_t sha256_len,
+                                  uint32_t line);
 
 /**
  * `howdah_sink_check_ssrf` plus the executing script and optional SHA-256.
@@ -633,6 +875,99 @@ int32_t howdah_sink_ssrf_oversize_at(struct howdah_ctx *ctx,
                                      size_t script_len,
                                      const uint8_t *sha256,
                                      size_t sha256_len);
+
+/**
+ * `howdah_sink_ssrf_oversize_at` for an SSRF event `kind` (`HOWDAH_SSRF_KIND_*`):
+ * a redirect hop whose host is longer than the resolver buffer is judged by the
+ * `redirect` mode, not the range `mode`. 0 Allow / 1 Log / 2 Block; NULL ctx or
+ * a panic is 0. The host bytes are never logged.
+ *
+ * # Safety
+ * `ctx` NULL or live; pointers NULL or valid for their lengths.
+ */
+int32_t howdah_sink_ssrf_oversize_kind_at(struct howdah_ctx *ctx,
+                                          int32_t kind,
+                                          const char *script,
+                                          size_t script_len,
+                                          const uint8_t *sha256,
+                                          size_t sha256_len);
+
+/**
+ * Which parts of the SSRF hardening are armed, as a `HOWDAH_SSRF_ARM_*` mask
+ * (0 = nothing: the shim chains with zero overhead). RANGE is the original
+ * `[sinks.ssrf] mode`; REBIND / SCHEME / REDIRECT are the three hardening
+ * knobs; PIN and PROTOCOLS add that the rebind / scheme knob is `block` (the
+ * shim may then also set `CURLOPT_RESOLVE` / `CURLOPT_PROTOCOLS`). NULL ctx or
+ * a panic is 0. Never stashes a log line.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_ssrf_armed_mask(struct howdah_ctx *ctx);
+
+/**
+ * SSRF verdict of a given kind (`HOWDAH_SSRF_KIND_*`) plus the executing
+ * script and optional SHA-256: the connect-time (REBIND) and redirect-hop
+ * (REDIRECT) variants of `howdah_sink_check_ssrf_at`. `ips` is `ips_count` x
+ * 17-byte records. 0 Allow / 1 Log / 2 Block; NULL ctx, malformed input or a
+ * panic is 0 (fail-open).
+ *
+ * # Safety
+ * As `howdah_sink_check_ssrf_at`.
+ */
+int32_t howdah_sink_check_ssrf_kind_at(struct howdah_ctx *ctx,
+                                       int32_t kind,
+                                       const char *scheme,
+                                       size_t scheme_len,
+                                       const char *host,
+                                       size_t host_len,
+                                       uint16_t port,
+                                       const uint8_t *ips,
+                                       size_t ips_count,
+                                       const char *script,
+                                       size_t script_len,
+                                       const uint8_t *sha256,
+                                       size_t sha256_len);
+
+/**
+ * Egress-scheme verdict for a URL (`via`: `HOWDAH_SSRF_VIA_STREAM` /
+ * `HOWDAH_SSRF_VIA_CURL`) plus the executing script and optional SHA-256. 0
+ * Allow / 1 Log / 2 Block per `[sinks.ssrf] scheme`; the log line carries the
+ * scheme category only. NULL ctx or a panic is 0.
+ *
+ * # Safety
+ * `ctx` NULL or live; pointers NULL or valid for their lengths.
+ */
+int32_t howdah_sink_ssrf_scheme_at(struct howdah_ctx *ctx,
+                                   int32_t via,
+                                   const char *url,
+                                   size_t url_len,
+                                   const char *script,
+                                   size_t script_len,
+                                   const uint8_t *sha256,
+                                   size_t sha256_len);
+
+/**
+ * Build the `CURLOPT_RESOLVE` entry that pins `input`'s hostname (an HTTP(S) or
+ * scheme-less curl URL) to the validated IPv4 addresses in `recs`
+ * (`recs_count` x 17-byte records), writing `host:port:ip[,ip...]` (no NUL) to
+ * `out`. `multi != 0` allows a comma list (libcurl 7.59+), else only the first
+ * address is pinned. Returns the byte count written, or 0 when there is
+ * nothing safe to pin (literal-IP host, non-HTTP(S) URL, IPv6-only/unresolved
+ * host, odd host spelling, or `out_cap` too small). NULL arguments or a panic
+ * is 0. Pure: no ctx, no logging.
+ *
+ * # Safety
+ * `input` valid for `input_len`; `recs` NULL or valid for `recs_count * 17`
+ * bytes; `out` writable for `out_cap` bytes.
+ */
+size_t howdah_ssrf_pin_entry(const uint8_t *input,
+                             size_t input_len,
+                             const uint8_t *recs,
+                             size_t recs_count,
+                             int32_t multi,
+                             uint8_t *out,
+                             size_t out_cap);
 
 /**
  * `howdah_behavior_check_exec_dir` plus an optional SHA-256 of the file at
@@ -676,7 +1011,8 @@ int32_t howdah_behavior_check_egress_at(struct howdah_ctx *ctx,
                                         size_t sha256_len);
 
 /**
- * `howdah_behavior_check_php_write` plus an optional SHA-256 of `caller`.
+ * `howdah_behavior_check_php_write` plus an optional SHA-256 of `caller` and the
+ * `line` of the call in `caller` (0 = unknown; logged as `file:line`).
  *
  * # Safety
  * `ctx` NULL or live; pointers NULL or valid for their lengths.
@@ -688,7 +1024,8 @@ int32_t howdah_behavior_check_php_write_at(struct howdah_ctx *ctx,
                                            size_t target_len,
                                            int32_t is_write_mode,
                                            const uint8_t *sha256,
-                                           size_t sha256_len);
+                                           size_t sha256_len,
+                                           uint32_t line);
 
 /**
  * The startup plan for the include/eval hook: `mechanism | (reason << 4)`
@@ -721,6 +1058,33 @@ int32_t howdah_sink_check_mail(struct howdah_ctx *ctx,
                                size_t headers_len,
                                const char *params,
                                size_t params_len);
+
+/**
+ * XML sink check (`xxe`), flag-aware: `doc` is the XML string about to be
+ * parsed (`simplexml_load_string`, `DOMDocument::loadXML`, `new
+ * SimpleXMLElement`, `XMLReader::XML`), `flags` the libxml option mask the call
+ * passes (0 when absent), `caps` a `HOWDAH_XML_*` bit set, `script`/`sha256` the
+ * executing script for `[[exceptions]]`. Scanned, never logged. Returns 0
+ * Allow / 1 Log / 2 Block, or 3 (`HOWDAH_STRIP`) to neutralize by removing
+ * the dangerous flags from the options argument and continuing; a strip is
+ * logged as `block`. Nothing fires without a dangerous flag AND an external
+ * entity (or entity bomb) together. NULL ctx or panic is 0 (fail-open). A hit
+ * is retrievable with `howdah_take_sink_log_line`.
+ *
+ * # Safety
+ * `ctx` NULL or live; every pointer NULL or valid for its length.
+ */
+int32_t howdah_sink_check_xml(struct howdah_ctx *ctx,
+                              const char *name,
+                              size_t name_len,
+                              const char *doc,
+                              size_t doc_len,
+                              int64_t flags,
+                              int32_t caps,
+                              const char *script,
+                              size_t script_len,
+                              const uint8_t *sha256,
+                              size_t sha256_len);
 
 /**
  * 1 iff `[sinks.xml] external_entities = "deny"` is in force (set, global

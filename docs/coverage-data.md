@@ -336,6 +336,7 @@ is deliberately **not** part of `matrix-results.tsv` / `coverage.json`.
 | `sql_injection` | a quote followed by a comment marker or an `or`/`and` comparison (`' OR 1=1 --`); `UNION SELECT`; a `;` followed by a recognisable stacked statement (`DROP TABLE`, `DELETE FROM`, `INSERT INTO`, `UPDATE x SET`, `SELECT` of `*`/a number/`@@var`/columns `FROM`) |
 | `path_traversal` | `../` or `..\` sequences; sensitive targets such as `/etc/passwd`, `/proc/self/`, `php://`, `file://`, `boot.ini`; percent-encoded forms in path values |
 | `command_injection` | `$(...)`; a closed backtick pair that starts with a common binary; `;`, `\|`, `&&`, `\|\|` followed by a common binary (`cat`, `id`, `curl`, ...); a PHP exec sink name immediately followed by `(` (`system(`, `eval(`) |
+| `cgi_arg_injection` | the raw query string, not a decoded value: no literal `=` and a php-cgi option word (`-s`, `-n`, `-d`/`-c`/`-z` with an argument, `--define`, ...), a php-cgi directive name (`auto_prepend_file`, `allow_url_include`, ...), or a soft-hyphen byte (`0xAD`) standing in for the dash (CVE-2012-1823, CVE-2024-4577). Enforcing by default; see `docs/config.md` |
 
 ## Signal quality: benign-corpus tuning
 

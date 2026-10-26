@@ -6,6 +6,35 @@ All notable changes to Howdah are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- A Layer 2 signature for php-cgi argument injection (CVE-2012-1823 and
+  CVE-2024-4577), **on and enforcing by default**. When PHP runs as php-cgi
+  behind a CGI front end, a query string with no literal `=` is passed to
+  php-cgi as command-line words (`?-d+allow_url_include%3d1+-d+auto_prepend_file%3dphp://input`
+  is code execution, `?-s` is source disclosure); CVE-2024-4577 revives it on
+  Windows with a soft hyphen (`0xAD`, `%AD`) standing in for the `-`. The new
+  rule `cgi_arg_injection` (Layer 2, Standard severity) reads the SAPI's raw
+  query string, so it needs no `$_SERVER` build and runs on every PHP version
+  and SAPI, and refuses a match before the script runs (clean 403, the worker
+  survives). The match is deliberately narrow, to keep false positives at
+  zero: a literal `=` anywhere in the query is never a match, and past that it
+  takes a php-cgi option word (`-s`, `-n`, `-d`/`-c`/`-z`/`-f` with their
+  argument, `--define`, ...; the dash may be `-`, `%2d`, `%AD` or `%C2%AD`), a
+  php-cgi directive name (`auto_prepend_file`, `allow_url_include`, ...), or a
+  stray `0xAD` byte that is not a UTF-8 continuation byte (a plain `0xAD`
+  test would block the accented `i` and many CJK characters). Ordinary
+  queries -- search words, ids, dates, negative numbers, base64/JWT tokens,
+  framework route paths, UTF-8 text -- stay clean. Unlike the other Layer 2
+  classes it blocks by default under every global mode but `off` (a shipped
+  `howdah.mode = detect` install still refuses it); new key `[inspect]
+  cgi_arg = "block" | "detect" | "off"` (default `"block"`) observes or
+  disables it, `[inspect.rule_modes] cgi_arg_injection` overrides the key, and
+  `inspect.enabled = false` and `howdah.mode = off` silence it. The query
+  string is scanned, never logged, and the rule is exempt from the Layer 2
+  per-request value and byte budgets. New `HOWDAH_SRC_QUERY` source in the core
+  ABI (`howdah_core.h` regenerated), no new php.ini directives. Lab:
+  `lab/integration/cgi_arg.sh` runs a 20-request malicious corpus and a
+  57-request benign corpus (the on-by-default false-positive gate) through
+  nginx in front of php-fpm.
 - An opt-in Layer 1 facet that recycles the PHP worker after a poisoning-class
   bailout fatal during the script — an uncaught `Error`, a parse/compile error,
   a failed `require`, `max_execution_time` — the last CVE-2026-109619 producer

@@ -51,7 +51,9 @@ impl Layer {
             | RuleId::PostTooLarge
             | RuleId::NestingBudget
             | RuleId::ParseMemoryEstimate => Layer::Limits,
-            RuleId::SqlInjection | RuleId::PathTraversal | RuleId::CommandInjection => Layer::Inspect,
+            RuleId::SqlInjection | RuleId::PathTraversal | RuleId::CommandInjection | RuleId::CgiArgInjection => {
+                Layer::Inspect
+            }
             RuleId::CommandExec
             | RuleId::Include
             | RuleId::Eval

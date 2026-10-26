@@ -194,11 +194,13 @@ Rules carry a **severity**:
 
 ## `[inspect]` — Layer 2 input inspection (log-only by default)
 
-**These rules only LOG; they do not block any request.** Layer 2 looks at
-decoded request values for SQL-injection, path-traversal and
+**The three content classes only LOG; they do not block any request.** Layer 2
+looks at decoded request values for SQL-injection, path-traversal and
 command-injection shapes and writes an event when it sees one. A global
 `howdah.mode = block` does **not** arm them. To block, set `inspect.mode` (or
-one class via `[inspect.rule_modes]`) to `block` explicitly.
+one class via `[inspect.rule_modes]`) to `block` explicitly. The one
+exception is `cgi_arg_injection` (php-cgi argument injection, below), which is
+enforced by default.
 
 Signature inspection is best-effort and can be bypassed by a determined
 attacker. That is why it logs by default: use the log to see what is
@@ -216,6 +218,7 @@ mode = "detect"         # detect = log only (default); block; off. INDEPENDENT o
 sqli = true             # per-class toggles
 traversal = true
 cmdi = true
+cgi_arg = "block"       # php-cgi argument injection (CVE-2012-1823, CVE-2024-4577): block (default), detect = log only, off
 
 [inspect.limits]
 max_value_bytes = 16384   # scan at most this many bytes of one value
@@ -224,10 +227,13 @@ max_values = 2000         # per-request value count budget
 
 [inspect.rule_modes]      # optional per-class mode override; keys are the rule names
 # sql_injection = "block" # example only: opt ONE class into blocking (default is log-only). Also: path_traversal, command_injection
+# cgi_arg_injection = "detect" # overrides inspect.cgi_arg for that rule
 ```
 
-The rule names are `sql_injection`, `path_traversal` and `command_injection`.
-A `[inspect.rule_modes]` entry overrides `inspect.mode` for that class only.
+The rule names are `sql_injection`, `path_traversal`, `command_injection` and
+`cgi_arg_injection`.
+A `[inspect.rule_modes]` entry overrides `inspect.mode` for that class only (for
+`cgi_arg_injection`, it overrides `inspect.cgi_arg`).
 The `[inspect.limits]` budgets bound the scanning work per value and per
 request; values past a budget are not scanned.
 
@@ -242,6 +248,54 @@ that the Layer 1 header count and size limits move in front of the script.
 That `$_SERVER` build is the one cost of arming Layer 2 on an application that
 never reads it; log-only mode does not pay it. Details and
 what stays post-hoc: "Enforcement timing" below.
+
+### `cgi_arg_injection` — php-cgi argument injection (blocks by default)
+
+When PHP runs as php-cgi behind a CGI front end (Apache `mod_cgi`, IIS), a
+query string that contains **no literal `=`** is handed to php-cgi as
+command-line words (RFC 3875 section 4.4: split on `+`, percent-decoded). A
+client can then drive php-cgi's own options: `?-d+allow_url_include%3d1+-d+auto_prepend_file%3dphp://input`
+is code execution and `?-s` is source disclosure (CVE-2012-1823).
+CVE-2024-4577 revives the same shape on Windows, where a soft hyphen (byte
+`0xAD`, written `%AD`) stands in for the `-` that the 2012 fix filters. Howdah
+refuses such a request **before the script runs** (clean 403, the worker
+survives), on every supported PHP version and SAPI, because the check reads
+only the request's query string.
+
+The match is deliberately narrow. The raw query string must contain no literal
+`=` (every working exploit writes it `%3d`), and then one of these:
+
+- a `+`/space-separated word that is a php-cgi option: a flag used on its own
+  (`-s`, `-w`, `-i`, `-m`, `-v`, `-h`, `-n`, `--info`, ...), or an option that
+  takes an argument (`-d`, `-c`, `-z`, `-f`, `-b`, `-T`, `-r`, `--define`, ...) followed by its
+  argument word or carrying an attached `name=value` or `scheme://` argument.
+  The dash may be a literal `-`, `%2d`, or a soft hyphen (`%AD`, `%C2%AD`);
+- a word that names a php-cgi directive (`auto_prepend_file`,
+  `auto_append_file`, `allow_url_include`, `cgi.force_redirect`,
+  `cgi.redirect_status_env`, `cgi.fix_pathinfo`);
+- a stray soft-hyphen byte (`0xAD`) in the decoded query that is not the
+  continuation byte of a well-formed UTF-8 character. (A bare `0xAD` test
+  would block every query containing an accented `i`, `C3 AD`, or many CJK
+  characters, `E4 B8 AD`; the UTF-8 walk avoids that.)
+
+Ordinary `=`-less queries stay clean: search words, ids, dates, slugs,
+negative numbers (`?-1`), dash-leading words (`?-sale`, `?-created`), base64 and
+base64url tokens, front-controller paths (`?/users/12/edit`) and UTF-8 text.
+Any query with a literal `=`, which is every ordinary form or API request, is
+never a match.
+
+Unlike the three classes above this rule is **on and enforcing by default**,
+under every global mode except `off`: `inspect.cgi_arg` is `"block"`, and
+neither `inspect.mode` nor the global `howdah.mode` changes it (a shipped
+`howdah.mode = detect` install still blocks it, as it does a Critical limit).
+The rule is Standard severity and Layer 2. Set `inspect.cgi_arg = "detect"` to
+log without refusing, or `"off"` to disable it. `inspect.enabled = false` (the
+Layer 2 master switch) and `howdah.mode = off` also silence it. The query
+string is scanned, never logged: the event carries the rule and a fixed reason
+only. It does not use the per-request value and byte budgets, so a flood of
+ordinary variables cannot spend a budget ahead of it. An `[[exceptions]]`
+entry for `inspect.cgi_arg_injection` with a `client_cidr` or `uri_prefix`
+facet exempts a scanner or a path.
 
 ## `[sinks]` — Layer 3 sink hardening (log-only by default)
 
@@ -1042,6 +1096,9 @@ application's first line:
   of the script. The cost is one `$_SERVER` build per request on applications
   that never read it (the same work every framework triggers on its first
   line). The default, log-only install does not pay it;
+- the Layer 2 `cgi_arg_injection` rule (on by default): it reads the SAPI's raw
+  query string, not `$_SERVER`, so it needs no forced `$_SERVER` build and is
+  refused before the script on every install, armed Layer 2 or not;
 - the Layer 4 `deny_exec_dirs` check on the requested script.
 
 For cron and other command-line users: a CLI main script refused by

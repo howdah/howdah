@@ -194,6 +194,12 @@ pub(crate) unsafe fn maybe_begin() {
     core::howdah_request_begin(CTX, ptr::null(), 0, &meta);
     // ip/method/uri outlive this call's request_begin, which copies them.
     // (BEGUN was latched at the top, before the re-entrant sapi_getenv.)
+
+    // Layer 2, php-cgi argument injection: judge the raw query string once, as
+    // soon as the core request exists, so the verdict is in the request's worst
+    // action before ANY other hook (the multipart END path included) ends it.
+    // Fail-open; the string is read by the core and never logged.
+    let _ = catch_unwind(AssertUnwindSafe(|| input_filter::inspect_query_string()));
 }
 
 /// Request shutdown (RSHUTDOWN): the unified end-of-request. Runs after every
@@ -343,6 +349,17 @@ unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
     if *ptr::addr_of!(XML_DENY) {
         let _ = catch_unwind(AssertUnwindSafe(|| sys::howdah_xml_deny_external_entities()));
     }
+    // Layer 2, php-cgi argument injection (CVE-2012-1823, CVE-2024-4577): the
+    // query string is judged when the core request begins (`maybe_begin`). A
+    // query that produced no input variable (`?-s`, `?%ADd+...` all do, but a
+    // lone `?` or `?&` does not) would never have begun it, so begin here when
+    // there is a query to judge. Idempotent; on by default (`[inspect] cgi_arg`),
+    // so the cost is one bounded scan of a short string per request that has one.
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if !CTX.is_null() && input_filter::has_query_string() {
+            maybe_begin();
+        }
+    }));
     // Layer-4 main-script exec-dir check: the primary, opcache-independent
     // control. Runs every request, BEFORE the script executes, and records a
     // 403 if the main script resolves under a denied exec dir.

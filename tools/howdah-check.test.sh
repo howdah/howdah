@@ -64,6 +64,8 @@ printf '%s\n' "$l2" | grep -q 'blocks nothing unless'
 check "Layer-2 line states it blocks nothing unless opted in" $?
 printf '%s\n' "$l2" | grep -qi 'default: block\|blocks by default'
 [ $? -ne 0 ]; check "Layer-2 line never claims blocking by default" $?
+printf '%s\n' "$l2" | grep -q 'cgi_arg_injection.*enforced by default'
+check "Layer-2 line names the one enforced-by-default rule, cgi_arg_injection" $?
 
 # --- ini: risky php.ini settings report ---------------------------------------
 # fake php whose `-i` prints $T/ini/<name>.txt; its php.ini is $T/ini/php.ini

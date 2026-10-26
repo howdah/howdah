@@ -52,6 +52,14 @@
 
 #define HOWDAH_SRC_PATH 3
 
+/**
+ * The raw query string as the SAPI reports it (`request_info.query_string`),
+ * for the php-cgi argument-injection rule only. Not budgeted: the scan is one
+ * bounded pass and a flood of ordinary variables must not be able to exhaust a
+ * budget ahead of it.
+ */
+#define HOWDAH_SRC_QUERY 4
+
 #define HOWDAH_SINK_COMMAND_EXEC 0
 
 #define HOWDAH_SINK_INCLUDE 1
@@ -330,6 +338,11 @@ int32_t howdah_note_name(struct howdah_ctx *ctx,
  * independent `[inspect]` mode, so a global `block` never arms blocking here.
  * Returns the action for this value (0 Allow, 1 Log, 2 Block); it never drops
  * the variable. NULL ctx, unknown source or panic returns 0.
+ *
+ * `HOWDAH_SRC_QUERY` is different: `val` is the raw query string, `name` is
+ * ignored, and the check is the php-cgi argument-injection rule, whose mode is
+ * `[inspect] cgi_arg` (default `block`, independent of the global mode and of
+ * `[inspect] mode`) and which is exempt from the per-request scan budgets.
  *
  * # Safety
  * `ctx` NULL or live; `name`/`val` NULL or valid for their lengths.

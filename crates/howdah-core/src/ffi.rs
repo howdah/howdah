@@ -69,6 +69,11 @@ pub const HOWDAH_SRC_GET: i32 = 0;
 pub const HOWDAH_SRC_POST: i32 = 1;
 pub const HOWDAH_SRC_COOKIE: i32 = 2;
 pub const HOWDAH_SRC_PATH: i32 = 3;
+/// The raw query string as the SAPI reports it (`request_info.query_string`),
+/// for the php-cgi argument-injection rule only. Not budgeted: the scan is one
+/// bounded pass and a flood of ordinary variables must not be able to exhaust a
+/// budget ahead of it.
+pub const HOWDAH_SRC_QUERY: i32 = 4;
 
 // Layer-3 sink ids (howdah_sink_check).
 pub const HOWDAH_SINK_COMMAND_EXEC: i32 = 0;
@@ -218,6 +223,7 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::SqlInjection => "possible SQL injection in request input",
         RuleId::PathTraversal => "possible path traversal in request input",
         RuleId::CommandInjection => "possible command injection in request input",
+        RuleId::CgiArgInjection => "query string shaped like php-cgi command-line arguments",
         RuleId::CommandExec => "command execution sink called with a disallowed command",
         RuleId::Include => "file include sink called with a disallowed path",
         RuleId::Eval => "eval sink invoked",
@@ -466,6 +472,38 @@ impl howdah_ctx {
         let reason = format!("{class_name} pattern in {src_name} variable '{}'", String::from_utf8_lossy(n));
         let hit = LimitHit { rule, severity: Severity::Standard, detail: reason.clone() };
         self.apply_with_mode(&hit, mode, &overrides, &reason)
+    }
+
+    /// Layer-2 php-cgi argument-injection check on the raw query string
+    /// (CVE-2012-1823, CVE-2024-4577). The query is scanned, never logged: the
+    /// reason is a fixed string. Not subject to the per-request value/byte
+    /// budgets of `inspect_value`, so a flood of ordinary variables cannot
+    /// exhaust a budget before it runs. Its mode is `[inspect] cgi_arg` (default
+    /// `block`, whatever the global `detect`/`block`), see
+    /// `InspectConfig::cgi_arg_mode`.
+    fn inspect_query(&mut self, query: &[u8]) -> Action {
+        #[cfg(test)]
+        if tests::FORCE_PANIC.with(|f| f.get()) {
+            panic!("injected test panic");
+        }
+        let ins = &self.config.inspect;
+        let mode = ins.cgi_arg_mode(self.config.mode);
+        if mode == crate::config::Mode::Off {
+            return Action::Allow;
+        }
+        if !crate::inspect::cgi_arg_injection(query, ins.limits.max_total_bytes) {
+            return Action::Allow;
+        }
+        let rule = RuleId::CgiArgInjection;
+        // Scoped exception: URI or client facets (the "parameter" is the query
+        // string itself; a `param` facet is matched against that pseudo-name).
+        if let Some(m) = self.excepted(rule, None, None, Some(&b"QUERY_STRING"[..])) {
+            self.note_excepted_request(rule, &m);
+            return Action::Allow;
+        }
+        let reason = "php-cgi argument-injection pattern in query string".to_string();
+        let hit = LimitHit { rule, severity: Severity::Standard, detail: reason.clone() };
+        self.apply_with_mode(&hit, mode, &std::collections::BTreeMap::new(), &reason)
     }
 
     /// Layer-3 sink check. `arg` is scanned, never logged. Independent of
@@ -1298,6 +1336,11 @@ pub unsafe extern "C" fn howdah_note_name(
 /// Returns the action for this value (0 Allow, 1 Log, 2 Block); it never drops
 /// the variable. NULL ctx, unknown source or panic returns 0.
 ///
+/// `HOWDAH_SRC_QUERY` is different: `val` is the raw query string, `name` is
+/// ignored, and the check is the php-cgi argument-injection rule, whose mode is
+/// `[inspect] cgi_arg` (default `block`, independent of the global mode and of
+/// `[inspect] mode`) and which is exempt from the per-request scan budgets.
+///
 /// # Safety
 /// `ctx` NULL or live; `name`/`val` NULL or valid for their lengths.
 #[no_mangle]
@@ -1312,11 +1355,14 @@ pub unsafe extern "C" fn howdah_inspect_value(
     if ctx.is_null() {
         return HOWDAH_ALLOW;
     }
+    // `None` is the raw query string (the php-cgi argument-injection rule); the
+    // rest are the budgeted per-variable scans.
     let src = match source {
-        HOWDAH_SRC_GET => Source::Get,
-        HOWDAH_SRC_POST => Source::Post,
-        HOWDAH_SRC_COOKIE => Source::Cookie,
-        HOWDAH_SRC_PATH => Source::Path,
+        HOWDAH_SRC_GET => Some(Source::Get),
+        HOWDAH_SRC_POST => Some(Source::Post),
+        HOWDAH_SRC_COOKIE => Some(Source::Cookie),
+        HOWDAH_SRC_PATH => Some(Source::Path),
+        HOWDAH_SRC_QUERY => None,
         _ => return HOWDAH_ALLOW,
     };
     let r = catch_unwind(AssertUnwindSafe(|| {
@@ -1330,7 +1376,10 @@ pub unsafe extern "C" fn howdah_inspect_value(
         } else {
             std::slice::from_raw_parts(val as *const u8, val_len)
         };
-        code((*ctx).inspect_value(src, n, v))
+        code(match src {
+            Some(s) => (*ctx).inspect_value(s, n, v),
+            None => (*ctx).inspect_query(v),
+        })
     }));
     r.unwrap_or_else(|_| {
         report_panic(ctx);
@@ -2679,6 +2728,122 @@ mod tests {
         begin(c);
         assert_eq!(inspect(c, HOWDAH_SRC_GET, "q", b"' OR 1=1 --"), HOWDAH_ALLOW);
         assert!(take(c).is_none());
+        unsafe { howdah_free(c) };
+    }
+
+    const CGI_POC: &[u8] = b"%ADd+allow_url_include%3d1+%ADd+auto_prepend_file%3dphp://input";
+
+    fn query(c: *mut howdah_ctx, q: &[u8]) -> i32 {
+        unsafe { howdah_inspect_value(c, HOWDAH_SRC_QUERY, std::ptr::null(), 0, q.as_ptr() as _, q.len()) }
+    }
+
+    #[test]
+    fn cgi_arg_blocks_by_default_in_every_global_mode() {
+        // Default global mode is block; the shipped ini default is detect. The
+        // other Layer 2 rules only log in both.
+        for cfg in ["", "mode = \"block\"", "mode = \"detect\""] {
+            let c = init(cfg);
+            begin(c);
+            assert_eq!(inspect(c, HOWDAH_SRC_GET, "q", b"' OR 1=1 --"), HOWDAH_LOG, "{cfg}");
+            unsafe { howdah_request_end(c) };
+            take(c);
+            begin(c);
+            assert_eq!(query(c, CGI_POC), HOWDAH_BLOCK, "{cfg}");
+            assert_eq!(query(c, b"-d+allow_url_include%3d1+-d+auto_prepend_file%3dphp://input"), HOWDAH_BLOCK);
+            unsafe { howdah_free(c) };
+        }
+    }
+
+    #[test]
+    fn cgi_arg_benign_query_is_allowed_and_logs_nothing() {
+        let c = init("");
+        begin(c);
+        for q in [&b""[..], b"q=search&page=2", b"hello+world", b"-1", b"garc%C3%ADa", b"dGVzdA%3D%3D"] {
+            assert_eq!(query(c, q), HOWDAH_ALLOW, "{}", String::from_utf8_lossy(q));
+        }
+        assert!(take(c).is_none());
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn cgi_arg_log_omits_the_query() {
+        let c = init("");
+        begin(c);
+        assert_eq!(query(c, CGI_POC), HOWDAH_BLOCK);
+        let line = take(c).expect("log line");
+        assert!(line.contains("\"rule\":\"cgi_arg_injection\""), "{line}");
+        assert!(line.contains("\"action\":\"block\"") && line.contains("\"layer\":2"), "{line}");
+        for leak in ["allow_url_include", "auto_prepend_file", "php://input", "%AD", "%3d"] {
+            assert!(!line.contains(leak), "{leak} leaked: {line}");
+        }
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn cgi_arg_observe_disable_and_master_switches() {
+        let detect = init("[inspect]\ncgi_arg = \"detect\"");
+        begin(detect);
+        assert_eq!(query(detect, CGI_POC), HOWDAH_LOG);
+        assert!(take(detect).unwrap().contains("\"action\":\"log\""));
+        unsafe { howdah_free(detect) };
+        for cfg in [
+            "[inspect]\ncgi_arg = \"off\"",
+            "[inspect]\nenabled = false",
+            "mode = \"off\"",
+            "mode = \"off\"\n[inspect.rule_modes]\ncgi_arg_injection = \"block\"",
+        ] {
+            let c = init(cfg);
+            begin(c);
+            assert_eq!(query(c, CGI_POC), HOWDAH_ALLOW, "{cfg}");
+            assert!(take(c).is_none(), "{cfg}");
+            unsafe { howdah_free(c) };
+        }
+        // The per-class table can also raise an observe-only key back to block.
+        let c = init("[inspect]\ncgi_arg = \"detect\"\n[inspect.rule_modes]\ncgi_arg_injection = \"block\"");
+        begin(c);
+        assert_eq!(query(c, CGI_POC), HOWDAH_BLOCK);
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn cgi_arg_is_not_starved_by_the_value_budget() {
+        // 2000-variable budget spent on ordinary values, then the attack query.
+        let c = init("[inspect.limits]\nmax_values = 3");
+        begin(c);
+        for _ in 0..5 {
+            inspect(c, HOWDAH_SRC_GET, "a", b"hello");
+        }
+        assert_eq!(inspect(c, HOWDAH_SRC_GET, "q", b"' OR 1=1 --"), HOWDAH_ALLOW, "budget is spent");
+        assert_eq!(query(c, CGI_POC), HOWDAH_BLOCK, "the query check is not budgeted");
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn cgi_arg_null_ctx_and_panic_are_allow() {
+        assert_eq!(unsafe { howdah_inspect_value(std::ptr::null_mut(), HOWDAH_SRC_QUERY, std::ptr::null(), 0, CGI_POC.as_ptr() as _, CGI_POC.len()) }, 0);
+        let c = init("");
+        begin(c);
+        assert_eq!(unsafe { howdah_inspect_value(c, HOWDAH_SRC_QUERY, std::ptr::null(), 0, std::ptr::null(), 0) }, HOWDAH_ALLOW);
+        // A panic inside the check is caught and fails open; the ctx stays usable.
+        FORCE_PANIC.with(|f| f.set(true));
+        assert_eq!(query(c, CGI_POC), HOWDAH_ALLOW);
+        FORCE_PANIC.with(|f| f.set(false));
+        assert!(take(c).expect("panic noted").contains("panic caught"));
+        begin(c);
+        assert_eq!(query(c, CGI_POC), HOWDAH_BLOCK, "ctx usable after a caught panic");
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn cgi_arg_scoped_exception_by_client_and_uri() {
+        // begin() sets client 1.2.3.4 and uri /up.
+        let c = init("[[exceptions]]\nrule = \"inspect.cgi_arg_injection\"\nclient_cidr = \"1.2.3.0/24\"\nreason = \"scanner\"\n");
+        begin(c);
+        assert_eq!(query(c, CGI_POC), HOWDAH_ALLOW);
+        unsafe { howdah_free(c) };
+        let c = init("[[exceptions]]\nrule = \"inspect.cgi_arg_injection\"\nclient_cidr = \"9.9.9.0/24\"\nreason = \"other\"\n");
+        begin(c);
+        assert_eq!(query(c, CGI_POC), HOWDAH_BLOCK);
         unsafe { howdah_free(c) };
     }
 

@@ -27,6 +27,8 @@ test('every schema default equals the core default', () => {
   assert.equal(state['inspect.sqli'], core.inspect.sqli);
   assert.equal(state['inspect.traversal'], core.inspect.traversal);
   assert.equal(state['inspect.cmdi'], core.inspect.cmdi);
+  assert.equal(state['inspect.cgi_arg'], core.inspect.cgi_arg);
+  assert.equal(state['inspect.cgi_arg'], 'block');
   for (const k of ['max_value_bytes', 'max_total_bytes', 'max_values']) {
     assert.equal(state['inspect.limits.' + k], core.inspect.limits[k], k);
   }
@@ -81,7 +83,7 @@ test('Layer 2/3 rule names under [rules] are marked as having no effect', () => 
   // and never reads [rules] for sinks; the core merely accepts these keys.
   // The out-of-memory backstop rules are Layer 1 but governed by oom_exit, not
   // by a per-rule [rules] mode, so they are noop too.
-  const backstop = (k) => k.key === 'out_of_memory' || k.key === 'startup_fatal';
+  const backstop = (k) => k.key === 'out_of_memory' || k.key === 'startup_fatal' || k.key === 'fatal_recycle';
   for (const k of sectionKeys('rules')) {
     const noop = k.layer === 'inspect' || k.layer === 'sinks' || k.layer === 'behavior' || backstop(k);
     assert.equal(!!k.noop, noop, k.key);

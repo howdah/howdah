@@ -309,6 +309,211 @@ fn traversal(s: &[u8]) -> bool {
         .any(|n| contains(s, n))
 }
 
+// ---- php-cgi argument injection (CVE-2012-1823, CVE-2024-4577) -------------
+//
+// When PHP runs as php-cgi behind a CGI front end (Apache mod_cgi, IIS), RFC
+// 3875 4.4 lets the server hand a query string that contains no unencoded `=`
+// to the program as command-line words, split on `+` and percent-decoded. A
+// client can then drive php-cgi's own options: `?-d+allow_url_include%3d1
+// +-d+auto_prepend_file%3dphp://input` is code execution, `?-s` is source
+// disclosure (CVE-2012-1823). CVE-2024-4577 revives the same shape on Windows,
+// where the `-` that the 2012 fix filters is spelled as a soft hyphen (0xAD)
+// that the console code page's best-fit mapping turns into `-` (the request is
+// `?%ADd+allow_url_include%3d1+%ADd+auto_prepend_file%3dphp://input`).
+//
+// The `=` is percent-encoded (`%3d`) in every working exploit, because a
+// literal `=` makes the CGI front end treat the query as ordinary form data.
+// That is the signature's first gate: a raw query string with a literal `=`
+// is never a match. Past it the match is deliberately narrow, so ordinary
+// `=`-less queries (search words, ids, base64 tokens, `?-1`, `?-sale`,
+// `?/route/path`, UTF-8 text) stay clean:
+//   * a `+`/space-separated word that is a php-cgi option: a known flag
+//     exactly (`-s`, `-n`, `--info`), or an argument option (`-d`, `-c`, `-z`,
+//     `-f`, `-b`, `-T`, `-r`, `--define`, ...) followed by its argument word, or
+//     carrying an attached `name=value` / `scheme://` argument. The leading `-`
+//     may be a literal dash, `%2d`, or a soft hyphen (`%AD`, `%C2%AD`);
+//   * a word that names a php-cgi directive (`auto_prepend_file`,
+//     `allow_url_include`, ...), bare or `name=value`;
+//   * a stray soft-hyphen byte (0xAD) anywhere in the decoded query that is not
+//     the continuation byte of a well-formed UTF-8 sequence. A plain 0xAD
+//     match would block every query containing `i` with an acute accent (C3 AD)
+//     or many CJK characters (E4 B8 AD), which is why the UTF-8 walk exists.
+//
+// One linear pass to decode and split, one pass per word over a bounded
+// prefix. No regex, no backtracking. The query itself is never logged.
+
+/// php-cgi single-letter options with no argument that expose source or
+/// configuration: `-s`/`-w` (highlighted source), `-i` (phpinfo), `-m`, `-v`,
+/// `-h`, `-n` (no php.ini). Matched only as the whole word.
+const CGI_FLAG_OPTS: &[u8] = b"swimvhn";
+/// Options that take an argument: php-cgi `-d` (ini entry), `-c` (php.ini
+/// path), `-z` (Zend extension), `-f` (script file), `-b` (bind path), `-T`
+/// (timing), and the CLI's `-r` (code).
+const CGI_ARG_OPTS: &[u8] = b"dczfbTr";
+/// Long options with no argument.
+const CGI_LONG_FLAGS: [&[u8]; 9] = [
+    b"info", b"version", b"help", b"modules", b"usage", b"no-php-ini", b"syntax-highlight",
+    b"syntax-highlighting", b"strip",
+];
+/// Long options that take an argument.
+const CGI_LONG_ARGS: [&[u8]; 6] =
+    [b"define", b"php-ini", b"file", b"zend-extension", b"bindpath", b"timing"];
+/// php.ini directives a php-cgi exploit sets (or CGI-mode gates it clears).
+const CGI_DIRECTIVES: [&[u8]; 6] = [
+    b"auto_prepend_file",
+    b"auto_append_file",
+    b"allow_url_include",
+    b"cgi.force_redirect",
+    b"cgi.redirect_status_env",
+    b"cgi.fix_pathinfo",
+];
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Percent-decode `q` into one buffer and record the `(start, end)` of each
+/// word. Words split on `+`, space and tab, whether written raw or as `%20`/
+/// `%09` (an encoded `+`, `%2b`, is data, not a separator). Empty words are
+/// dropped.
+fn cgi_words(q: &[u8]) -> (Vec<u8>, Vec<(usize, usize)>) {
+    let mut dec = Vec::with_capacity(q.len());
+    let mut words = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i < q.len() {
+        let mut b = q[i];
+        let mut step = 1;
+        if b == b'%' && i + 2 < q.len() {
+            if let (Some(h), Some(l)) = (hex_val(q[i + 1]), hex_val(q[i + 2])) {
+                b = h * 16 + l;
+                step = 3;
+            }
+        }
+        let sep = (step == 1 && b == b'+') || b == b' ' || b == b'\t';
+        if sep {
+            if dec.len() > start {
+                words.push((start, dec.len()));
+            }
+            start = dec.len();
+        } else {
+            dec.push(b);
+        }
+        i += step;
+    }
+    if dec.len() > start {
+        words.push((start, dec.len()));
+    }
+    (dec, words)
+}
+
+/// A 0xAD byte that is not the continuation byte of a well-formed UTF-8
+/// sequence. A multibyte lead consumes the continuation bytes that follow it
+/// (so `C3 AD`, the accented i, and `E4 B8 AD`, a common CJK character, are
+/// text); an AD anywhere else can only be a soft hyphen written as a raw byte.
+fn stray_soft_hyphen(d: &[u8]) -> bool {
+    let mut i = 0;
+    while i < d.len() {
+        let need = match d[i] {
+            0xC2..=0xDF => 1,
+            0xE0..=0xEF => 2,
+            0xF0..=0xF4 => 3,
+            _ => 0,
+        };
+        if need == 0 {
+            if d[i] == 0xAD {
+                return true;
+            }
+            i += 1;
+            continue;
+        }
+        let mut k = 0;
+        while k < need && i + 1 + k < d.len() && (0x80..=0xBF).contains(&d[i + 1 + k]) {
+            k += 1;
+        }
+        i += 1 + k;
+    }
+    false
+}
+
+/// `w` names a php-cgi directive: the directive (ASCII case-insensitive) is the
+/// whole word, or is followed by `=`.
+fn cgi_directive(w: &[u8]) -> bool {
+    CGI_DIRECTIVES.iter().any(|d| {
+        w.len() >= d.len()
+            && w[..d.len()].eq_ignore_ascii_case(d)
+            && (w.len() == d.len() || w[d.len()] == b'=')
+    })
+}
+
+/// An attached argument that really is a setting or a stream URL, not a word:
+/// `name=value` with a non-empty value that is not just base64 `=` padding, or
+/// a `scheme://` URL. (`-dGVzdA==` from a base64url token is padding, not an
+/// ini assignment.)
+fn cgi_attached_arg(tail: &[u8]) -> bool {
+    if contains(tail, b"://") {
+        return true;
+    }
+    match tail.iter().position(|&b| b == b'=') {
+        Some(eq) => eq > 0 && tail[eq + 1..].iter().any(|&b| b != b'='),
+        None => false,
+    }
+}
+
+/// `w` is a php-cgi option. `has_next` says another word follows (an argument
+/// option's separate argument).
+fn cgi_option(w: &[u8], has_next: bool) -> bool {
+    // Leading dash: `-`, or a soft hyphen as a raw byte (AD) or UTF-8 (C2 AD).
+    let rest = match w {
+        [b'-', r @ ..] | [0xAD, r @ ..] | [0xC2, 0xAD, r @ ..] => r,
+        _ => return false,
+    };
+    if rest.is_empty() {
+        return false;
+    }
+    // A second dash makes it a long option.
+    if let [b'-', body @ ..] | [0xAD, body @ ..] | [0xC2, 0xAD, body @ ..] = rest {
+        let eq = body.iter().position(|&b| b == b'=');
+        let name = body[..eq.unwrap_or(body.len())].to_ascii_lowercase();
+        if CGI_LONG_FLAGS.iter().any(|f| name == *f) {
+            return eq.is_none();
+        }
+        return CGI_LONG_ARGS.iter().any(|f| name == *f) && (eq.is_some() || has_next);
+    }
+    let (c, tail) = (rest[0], &rest[1..]);
+    if CGI_FLAG_OPTS.contains(&c) {
+        return tail.is_empty();
+    }
+    if CGI_ARG_OPTS.contains(&c) {
+        return if tail.is_empty() { has_next } else { cgi_attached_arg(tail) };
+    }
+    false
+}
+
+/// Does the raw (undecoded) query string have the shape of php-cgi
+/// command-line arguments? `query` is what the SAPI reports as the query
+/// string, without the leading `?`. At most `max_bytes` of it are scanned (the
+/// literal-`=` gate looks at all of it).
+pub fn cgi_arg_injection(query: &[u8], max_bytes: usize) -> bool {
+    if query.is_empty() || query.contains(&b'=') {
+        return false;
+    }
+    let q = &query[..query.len().min(max_bytes)];
+    let (dec, words) = cgi_words(q);
+    if stray_soft_hyphen(&dec) {
+        return true;
+    }
+    words.iter().enumerate().any(|(i, &(s, e))| {
+        let w = &dec[s..e];
+        cgi_directive(w) || cgi_option(w, i + 1 < words.len())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,5 +609,154 @@ mod tests {
     fn path_source_also_scans_decoded() {
         assert_eq!(scan(b"..%2f..%2f", Source::Path, &d()), Some(PathTraversal));
         assert_eq!(scan(b"..%2f..%2f", Source::Get, &d()), None);
+    }
+
+    const CGI_MAX: usize = 2 * 1024 * 1024;
+    fn cgi(q: &[u8]) -> bool {
+        cgi_arg_injection(q, CGI_MAX)
+    }
+
+    #[test]
+    fn cgi_arg_cve_2012_1823_shapes_match() {
+        for q in [
+            // The Metasploit / public PoC shape: ini overrides on the command line.
+            &b"-d+allow_url_include%3d1+-d+auto_prepend_file%3dphp://input"[..],
+            b"-d+allow_url_include%3dtrue+-d+auto_prepend_file%3dphp://input",
+            // Encoded dash (the classic filter bypass), upper and lower hex.
+            b"%2dd+allow_url_include%3d1+%2dd+auto_prepend_file%3dphp://input",
+            b"%2Dd+allow_url_include%3D1+%2Dd+auto_prepend_file%3Dphp://input",
+            // Space as %20 instead of +.
+            b"-d%20allow_url_include%3d1%20-d%20auto_prepend_file%3dphp://input",
+            // Argument attached to the option.
+            b"-dauto_prepend_file%3dphp://input",
+            b"-dallow_url_include%3d1+-dauto_prepend_file%3dphp://input",
+            // Source disclosure and other flag options.
+            b"-s", b"-w", b"-i", b"-m", b"-v", b"-h", b"-n", b"-n+-s", b"%2ds",
+            // Long options.
+            b"--info", b"--version", b"--define+auto_prepend_file%3dphp://input",
+            b"--define%3dauto_prepend_file%3dphp://input",
+            // Other argument options with their argument word.
+            b"-c+/proc/self/fd/0", b"-z+/tmp/x.so", b"-f+/etc/passwd", b"-r+phpinfo();",
+            b"-b+127.0.0.1:9000",
+        ] {
+            assert!(cgi(q), "should match: {}", String::from_utf8_lossy(q));
+        }
+    }
+
+    #[test]
+    fn cgi_arg_cve_2024_4577_soft_hyphen_shapes_match() {
+        for q in [
+            // DEVCORE's PoC: the soft hyphen (0xAD) stands in for the dash.
+            &b"%ADd+allow_url_include%3d1+%ADd+auto_prepend_file%3dphp://input"[..],
+            b"%adn+%ADd+allow_url_include%3d1+%ADd+auto_prepend_file%3dphp://input",
+            b"%ADs",
+            b"%ADdauto_prepend_file%3dphp://input",
+            // UTF-8 soft hyphen (C2 AD) as the dash.
+            b"%C2%ADd+auto_prepend_file%3dphp://input",
+            b"%C2%ADs",
+            // Soft hyphen as the second dash of a long option.
+            b"-%ADinfo",
+            // A raw 0xAD byte on the wire, not percent-encoded.
+            b"\xADd+allow_url_include%3d1+\xADd+auto_prepend_file%3dphp://input",
+        ] {
+            assert!(cgi(q), "should match: {:?}", String::from_utf8_lossy(q));
+        }
+    }
+
+    #[test]
+    fn cgi_arg_directive_tokens_and_stray_soft_hyphen_match() {
+        for q in [
+            &b"auto_prepend_file%3dphp://input"[..],
+            b"allow_url_include",
+            b"AUTO_APPEND_FILE%3d/tmp/x",
+            b"cgi.force_redirect%3d0",
+            b"cgi.redirect_status_env%3dfoo",
+            b"x+allow_url_include%3d1",
+            // A lone soft hyphen byte that is not part of a UTF-8 sequence.
+            b"foo%ADbar",
+            b"%AD",
+            b"abc+def%ADghi",
+        ] {
+            assert!(cgi(q), "should match: {}", String::from_utf8_lossy(q));
+        }
+    }
+
+    #[test]
+    fn cgi_arg_literal_equals_is_never_a_match() {
+        // A literal `=` makes the CGI front end parse the query as form data, so
+        // php-cgi never sees these as arguments. Exploits always write `%3d`.
+        for q in [
+            &b"-d+allow_url_include=1+-d+auto_prepend_file=php://input"[..],
+            b"%ADd+allow_url_include=1+%ADd+auto_prepend_file=php://input",
+            b"q=search&page=2",
+            b"-=",
+            b"-s=1",
+            b"auto_prepend_file=php://input",
+            b"id=5&-d+allow_url_include%3d1",
+        ] {
+            assert!(!cgi(q), "must not match: {}", String::from_utf8_lossy(q));
+        }
+    }
+
+    #[test]
+    fn cgi_arg_benign_corpus_is_clean() {
+        for q in [
+            // Empty and trivial.
+            &b""[..], b"q", b"x", b"a+b", b"+", b"++", b"%", b"%2", b"%zz",
+            // Search words and phrases.
+            b"hello+world", b"how+to+reset+password", b"php+tutorial+for+beginners",
+            b"tom+%26+jerry", b"100%25+cotton", b"caf%C3%A9",
+            // Dash-leading words that are not php-cgi options.
+            b"-", b"--", b"---", b"-1", b"-5+10", b"-foo", b"-dog", b"-cat", b"-cat+-dog",
+            b"-sale", b"-iphone", b"-water", b"-name", b"-date", b"-id", b"-created",
+            b"-views", b"-final.pdf", b"-version", b"--no-such-flag", b"-n1", b"-sx",
+            // An argument option with nothing after it is not a command line.
+            b"-d", b"-c", b"-z", b"%2dd",
+            // Dates, slugs, ids, version strings.
+            b"2024-10-25", b"2024-01-01..2024-12-31", b"my-post-title", b"a-b-c",
+            b"v1.2.3-rc1", b"item-1234-red",
+            // Framework / front-controller style `=`-less queries.
+            b"/users/12/edit", b"/blog/my-post", b"index.php/admin/dashboard",
+            b"route/site/index", b"controller:action", b"page/2",
+            // Base64 and base64url tokens (including padding) without a `=` key.
+            b"dGVzdA", b"SGVsbG8gV29ybGQ", b"aGVsbG8%2Bd29ybGQ%2F", b"dGVzdA%3D%3D",
+            b"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc-_def",
+            b"-dGVzdA%3D%3D", b"-fGVzdA%3D", b"-cGVzdA%3D%3D",
+            // A whole URL or JSON blob passed as the query.
+            b"http%3A%2F%2Fexample.com%2F%3Fa%3Db", b"%7B%22a%22%3A1%7D",
+            b"q%3Dfoo", b"redirect%3D%2Fhome",
+            // UTF-8 text: the accented i (C3 AD), CJK (E4 B8 AD), emoji, a valid
+            // UTF-8 soft hyphen inside a word.
+            b"garc%C3%ADa", b"%C3%ADndice", b"%E4%B8%AD%E6%96%87", b"%E6%97%A5%E6%9C%AC%E8%AA%9E",
+            b"%F0%9F%98%80", b"%E2%80%90", b"co%C2%ADoperate", b"na%C3%AFve+car%C3%A9",
+            // Words that merely contain directive-like substrings or flag letters.
+            b"auto_prepend", b"allow_url", b"prepend_file", b"include+allow", b"file_get_contents",
+            b"phpinfo", b"display_errors", b"cgi", b"force_redirect",
+        ] {
+            assert!(!cgi(q), "must not match: {}", String::from_utf8_lossy(q));
+        }
+    }
+
+    #[test]
+    fn cgi_arg_is_bounded_and_linear() {
+        let t = std::time::Instant::now();
+        // 4 MiB of benign words, a million separators, and a long run of '%'.
+        let mut q = Vec::new();
+        while q.len() < 4 * 1024 * 1024 {
+            q.extend_from_slice(b"word+-x+");
+        }
+        assert!(!cgi_arg_injection(&q, CGI_MAX));
+        assert!(!cgi_arg_injection(&vec![b'%'; 4 * 1024 * 1024], CGI_MAX));
+        // The prefix cap: an attack past max_bytes is not scanned, one inside it is.
+        let mut late = vec![b'a'; 1000];
+        late.extend_from_slice(b"+-d+auto_prepend_file%3dphp://input");
+        assert!(!cgi_arg_injection(&late, 500));
+        assert!(cgi_arg_injection(&late, 2000));
+        // The literal-`=` gate sees the whole query, not just the scanned prefix.
+        let mut tail_eq = b"-s".to_vec();
+        tail_eq.extend_from_slice(&[b'a'; 100]);
+        tail_eq.extend_from_slice(b"&k=v");
+        assert!(!cgi_arg_injection(&tail_eq, 10));
+        assert!(t.elapsed().as_secs() < 5, "{:?}", t.elapsed());
     }
 }

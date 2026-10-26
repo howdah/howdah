@@ -16,7 +16,7 @@ $layer = array(
     'malformed_multipart' => 1, 'upload_progress_abuse' => 1, 'self_test' => 1,
     'max_input_vars' => 1, 'max_input_nesting_depth' => 1, 'max_input_key_bytes' => 1,
     'max_request_headers' => 1, 'max_request_header_bytes' => 1,
-    'sql_injection' => 2, 'path_traversal' => 2, 'command_injection' => 2,
+    'sql_injection' => 2, 'path_traversal' => 2, 'command_injection' => 2, 'cgi_arg_injection' => 2,
     'command_exec' => 3, 'include' => 3, 'eval' => 3, 'unserialize' => 3, 'phar' => 3, 'ssrf' => 3,
 );
 $sev = array('block' => 4, 'log' => 5, 'allow' => 6);

@@ -411,6 +411,11 @@ pub enum RuleId {
     SqlInjection,
     PathTraversal,
     CommandInjection,
+    /// The query string has the shape of php-cgi command-line arguments (CVE-2012-1823,
+    /// CVE-2024-4577). Standard, Layer 2; unlike the other Layer 2 classes it blocks by
+    /// default (`[inspect] cgi_arg`), because an `=`-less option-shaped query is not
+    /// something an application sends. See `crate::inspect::cgi_arg_injection`.
+    CgiArgInjection,
     CommandExec,
     Include,
     Eval,
@@ -472,6 +477,7 @@ impl RuleId {
             | RuleId::SqlInjection
             | RuleId::PathTraversal
             | RuleId::CommandInjection
+            | RuleId::CgiArgInjection
             | RuleId::CommandExec
             | RuleId::Include
             | RuleId::Eval
@@ -500,7 +506,7 @@ impl RuleId {
 /// or miss one it accepts. `rule_catalog_covers_every_variant` fails to
 /// compile when a variant is added here but not to the list.
 pub fn rule_catalog() -> &'static [RuleId] {
-    const ALL: [RuleId; 41] = [
+    const ALL: [RuleId; 42] = [
         RuleId::MaxParts,
         RuleId::MaxFiles,
         RuleId::MaxPartHeaders,
@@ -519,6 +525,7 @@ pub fn rule_catalog() -> &'static [RuleId] {
         RuleId::SqlInjection,
         RuleId::PathTraversal,
         RuleId::CommandInjection,
+        RuleId::CgiArgInjection,
         RuleId::CommandExec,
         RuleId::Include,
         RuleId::Eval,
@@ -781,6 +788,7 @@ mod tests {
                 | RuleId::SqlInjection
                 | RuleId::PathTraversal
                 | RuleId::CommandInjection
+                | RuleId::CgiArgInjection
                 | RuleId::CommandExec
                 | RuleId::Include
                 | RuleId::Eval
@@ -806,7 +814,7 @@ mod tests {
                 | RuleId::FatalRecycle => {}
             }
         }
-        assert_eq!(rule_catalog().len(), 41);
+        assert_eq!(rule_catalog().len(), 42);
         let mut sorted = all.to_vec();
         sorted.sort();
         sorted.dedup();
@@ -822,6 +830,8 @@ mod tests {
         assert_eq!(RuleId::SqlInjection.severity(), Severity::Standard);
         assert_eq!(RuleId::PathTraversal.severity(), Severity::Standard);
         assert_eq!(RuleId::CommandInjection.severity(), Severity::Standard);
+        assert_eq!(RuleId::CgiArgInjection.severity(), Severity::Standard);
+        assert_eq!(serde_json::to_string(&RuleId::CgiArgInjection).unwrap(), "\"cgi_arg_injection\"");
         assert_eq!(RuleId::CommandExec.severity(), Severity::Standard);
         assert_eq!(RuleId::Include.severity(), Severity::Standard);
         assert_eq!(RuleId::Eval.severity(), Severity::Standard);

@@ -210,6 +210,13 @@ pub struct InspectConfig {
     pub sqli: bool,
     pub traversal: bool,
     pub cmdi: bool,
+    /// The php-cgi argument-injection rule (CVE-2012-1823, CVE-2024-4577), which
+    /// unlike the three classes above is ENFORCED by default: `block` refuses the
+    /// request before the script runs, `detect` only logs it, `off` disables it.
+    /// Independent of `mode` and of the global mode (a global `detect` still
+    /// blocks it), like a Critical rule; a `[inspect.rule_modes] cgi_arg_injection`
+    /// entry overrides it. `enabled = false` and a global `off` still silence it.
+    pub cgi_arg: Mode,
     pub limits: InspectLimits,
     /// Per-class mode overrides.
     pub rule_modes: BTreeMap<RuleId, Mode>,
@@ -223,6 +230,7 @@ impl Default for InspectConfig {
             sqli: true,
             traversal: true,
             cmdi: true,
+            cgi_arg: Mode::Block,
             limits: InspectLimits::defaults(),
             rule_modes: BTreeMap::new(),
         }
@@ -245,6 +253,18 @@ impl InspectConfig {
             InspectClass::SqlInjection => self.sqli,
             InspectClass::PathTraversal => self.traversal,
             InspectClass::CommandInjection => self.cmdi,
+        }
+    }
+
+    /// Effective mode of the php-cgi argument-injection rule. Off if the global
+    /// mode is off or Layer 2 is disabled; otherwise a `[inspect.rule_modes]
+    /// cgi_arg_injection` entry, else `cgi_arg` (default `block`). The global
+    /// `detect`/`block` is deliberately ignored, as for the other Layer 2 rules.
+    pub fn cgi_arg_mode(&self, global: Mode) -> Mode {
+        if global == Mode::Off || !self.enabled {
+            Mode::Off
+        } else {
+            self.rule_modes.get(&RuleId::CgiArgInjection).copied().unwrap_or(self.cgi_arg)
         }
     }
 }
@@ -1033,6 +1053,41 @@ self_test = "off"
         let c = Config::from_toml("[inspect]\nmode = \"block\"\ncmdi = false").unwrap();
         assert_eq!(c.inspect.effective_mode(Mode::Block), Mode::Block);
         assert!(!c.inspect.class_enabled(crate::inspect::InspectClass::CommandInjection));
+    }
+
+    #[test]
+    fn cgi_arg_blocks_by_default_under_every_global_mode_but_off() {
+        // The other Layer 2 rules are log-only by default; this one is enforced.
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.inspect.cgi_arg, Mode::Block);
+        assert_eq!(c.inspect.effective_mode(Mode::Block), Mode::Detect);
+        for g in [Mode::Block, Mode::Detect] {
+            assert_eq!(c.inspect.cgi_arg_mode(g), Mode::Block, "{g:?}");
+        }
+        assert_eq!(c.inspect.cgi_arg_mode(Mode::Off), Mode::Off);
+        // The shipped file default (howdah.ini: howdah.mode = detect) is the same.
+        let d = Config::from_toml("mode = \"detect\"").unwrap();
+        assert_eq!(d.inspect.cgi_arg_mode(d.mode), Mode::Block);
+    }
+
+    #[test]
+    fn cgi_arg_key_observe_disable_and_override() {
+        let c = Config::from_toml("[inspect]\ncgi_arg = \"detect\"").unwrap();
+        assert_eq!(c.inspect.cgi_arg_mode(Mode::Block), Mode::Detect);
+        // Observe-only does not touch the other classes.
+        assert_eq!(c.inspect.mode, Mode::Detect);
+        let c = Config::from_toml("[inspect]\ncgi_arg = \"off\"").unwrap();
+        assert_eq!(c.inspect.cgi_arg_mode(Mode::Block), Mode::Off);
+        // Layer 2's master switch silences it.
+        let c = Config::from_toml("[inspect]\nenabled = false").unwrap();
+        assert_eq!(c.inspect.cgi_arg_mode(Mode::Block), Mode::Off);
+        // The per-class override table wins over the key.
+        let c = Config::from_toml("[inspect]\ncgi_arg = \"block\"\n[inspect.rule_modes]\ncgi_arg_injection = \"detect\"").unwrap();
+        assert_eq!(c.inspect.cgi_arg_mode(Mode::Block), Mode::Detect);
+        // Turning the other classes to block does not change this rule's key.
+        let c = Config::from_toml("[inspect]\nmode = \"block\"\ncgi_arg = \"off\"").unwrap();
+        assert_eq!(c.inspect.cgi_arg_mode(Mode::Block), Mode::Off);
+        assert!(Config::from_toml("[inspect]\ncgi_arg = \"yes\"").is_err());
     }
 
     #[test]

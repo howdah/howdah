@@ -69,7 +69,7 @@
     // §4.1-4.5 request limits (Layer 1): gap A reuses max_part_headers above;
     // gap B is a body (multipart) rule, gap C and the §4.5 estimate are input.
     post_too_large: 'multipart', nesting_budget: 'input', parse_memory_estimate: 'input',
-    sql_injection: 'inspect', path_traversal: 'inspect', command_injection: 'inspect',
+    sql_injection: 'inspect', path_traversal: 'inspect', command_injection: 'inspect', cgi_arg_injection: 'inspect',
     command_exec: 'sinks', include: 'sinks', eval: 'sinks', unserialize: 'sinks',
     phar: 'sinks', ssrf: 'sinks',
     upload_exec: 'behavior', unexpected_binary: 'behavior', unexpected_egress: 'behavior', php_write: 'behavior',
@@ -79,12 +79,14 @@
     // The out-of-memory backstop's rules (Layer 1): grouped under "Other", and
     // marked noop below — they are governed by the top-level oom_exit key, not
     // by a per-rule [rules] mode.
-    out_of_memory: 'other', startup_fatal: 'other'
+    out_of_memory: 'other', startup_fatal: 'other',
+    // The §4.7 recycle facet's rule (Layer 1): governed by recycle_on_fatal.
+    fatal_recycle: 'other'
   };
 
   // Rules shown in the [rules] section for completeness but not controllable
   // there: the out-of-memory backstop is turned on and off by oom_exit.
-  var BACKSTOP_RULES = { out_of_memory: 1, startup_fatal: 1 };
+  var BACKSTOP_RULES = { out_of_memory: 1, startup_fatal: 1, fatal_recycle: 1 };
   var OOM_NOOP_NOTE = 'Accepted by the core but has no effect here: the out-of-memory backstop is turned on and off by the top-level oom_exit key, not by a per-rule mode.';
 
   var RULE_NOTES = {
@@ -94,6 +96,8 @@
   // The core accepts every rule name under [rules], but the extension reads
   // Layer 2 overrides only from [inspect.rule_modes] and sink modes only from
   // [sinks.<sink>] mode; a [rules] entry for those names has no effect.
+  var RECYCLE_NOOP_NOTE = 'Accepted by the core but has no effect here: the recycle-after-fatal facet is turned on and off by the top-level recycle_on_fatal key, not by a per-rule mode.';
+  var CGI_ARG_NOOP_NOTE = 'Accepted by the core but has no effect: the extension does not read [rules] for this name. Set [inspect] cgi_arg (block by default, detect to log only, off to disable) instead.';
   var NOOP_NOTE = 'Accepted by the core but has no effect: the extension does not read [rules] for this name. Use the Layer 2 per-class override ([inspect.rule_modes]), the sink’s own mode ([sinks.<sink>] mode), or the Layer 4 [behavior] mode instead.';
 
   // The [rules] keys are built from the core's catalog at runtime so the form
@@ -106,7 +110,7 @@
       return {
         key: r.name, type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
         severity: r.severity, layer: layer, noop: noop,
-        note: backstop ? OOM_NOOP_NOTE : (noop ? NOOP_NOTE : (RULE_NOTES[r.severity] || ''))
+        note: r.name === 'fatal_recycle' ? RECYCLE_NOOP_NOTE : backstop ? OOM_NOOP_NOTE : (r.name === 'cgi_arg_injection' ? CGI_ARG_NOOP_NOTE : (noop ? NOOP_NOTE : (RULE_NOTES[r.severity] || '')))
       };
     });
   }
@@ -118,6 +122,8 @@
     { key: 'sqli', type: 'bool', default: true, note: 'Look for SQL-injection shapes.' },
     { key: 'traversal', type: 'bool', default: true, note: 'Look for path-traversal shapes.' },
     { key: 'cmdi', type: 'bool', default: true, note: 'Look for command-injection shapes.' },
+    { key: 'cgi_arg', type: 'enum', values: MODES, default: 'block',
+      note: 'php-cgi argument injection (CVE-2012-1823, CVE-2024-4577): a query string with no literal = that parses as php-cgi options, such as ?-d+allow_url_include%3d1+-d+auto_prepend_file%3dphp://input or the soft-hyphen form ?%ADd+... Unlike the three classes above this one is enforced by default: block refuses the request before the script runs, whatever the global mode and inspect.mode. detect logs only; off disables it. The query string is never logged.' },
     { key: 'limits.max_value_bytes', type: 'int', min: 1, default: 16384, note: 'Scan at most this many bytes of one value.' },
     { key: 'limits.max_total_bytes', type: 'int', min: 1, default: 2097152, note: 'Per-request aggregate scan budget; values past it are not scanned.' },
     { key: 'limits.max_values', type: 'int', min: 1, default: 2000, note: 'Per-request value count budget; values past it are not scanned.' },

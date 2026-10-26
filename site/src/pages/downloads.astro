@@ -11,7 +11,7 @@ const DL = `${REPO}/releases/download/${TAG}`;
 
 // Zend module API number per PHP minor — part of every tarball's file name, so a
 // user can match the download to `php -i | grep 'Zend Extension Build'` (or
-// `howdah-check detect`). These are the numbers on the v1.6.1 release assets.
+// `howdah-check detect`). These are the numbers on the v1.7.0 release assets.
 const API: Record<string, string> = {
   '5.4': '20100525', '5.5': '20121212', '5.6': '20131226', '7.0': '20151012',
   '7.1': '20160303', '7.2': '20170718', '7.3': '20180731', '7.4': '20190902',
@@ -35,7 +35,7 @@ const extras = [
   { name: 'SHA256SUMS.asc', what: 'Detached GPG signature over SHA256SUMS.' },
   { name: 'howdah-release-signing.asc', what: 'The public signing key (also at howdah.org/key.asc).' },
   { name: 'howdah-check', what: 'Standalone install/verify helper — detect, web, ini.' },
-  { name: 'howdah-1.6.1.provenance.sigstore.json', what: 'SLSA build provenance (Sigstore bundle).' },
+  { name: `howdah-${VERSION}.provenance.sigstore.json`, what: 'SLSA build provenance (Sigstore bundle).' },
 ];
 ---
 <Layout

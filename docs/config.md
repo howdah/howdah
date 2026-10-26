@@ -76,6 +76,28 @@ worker surviving) — on an unpatched engine that reopens the PHP2Shell window.
 Howdah does not fix the underlying PHP bug; patching remains the fix. It is a
 TOML key, not a php.ini directive.
 
+### `recycle_on_fatal`
+
+```toml
+recycle_on_fatal = false   # false (default) | true
+recycle_observe  = false   # true -> log a "would-recycle" event, do not recycle
+```
+
+Off by default, opt-in. A companion to `oom_exit` for the other half of the
+PHP2Shell window: a poisoning-class bailout fatal (an uncaught `Error`, a parse
+or compile error, a failed `require`, `max_execution_time`) during the script
+can leave request state half-built for the **next** request to read, on an
+engine without upstream's fix (CVE-2026-109619). With `recycle_on_fatal = true`,
+Howdah ends the worker after such a fatal, so it never serves another request on
+that state; the worker is replaced and the event is logged with rule
+`fatal_recycle`. Like `oom_exit`, it runs only on web SAPIs and turns itself off
+on engines that ship the upstream fix. On every supported web SAPI the worker
+takes the immediate exit (the 500 is not flushed before teardown there anyway),
+so the producing request's response is dropped and the next-request window is
+closed either way. Set `recycle_observe = true` to log a would-recycle event
+without ending the worker, to size your fatal rate before enforcing. Both are
+TOML keys, not php.ini directives.
+
 ## Build a config in the browser
 
 [howdah.org/config/](https://howdah.org/config/) builds `howdah.ini` and
@@ -259,8 +281,17 @@ is code execution and `?-s` is source disclosure (CVE-2012-1823).
 CVE-2024-4577 revives the same shape on Windows, where a soft hyphen (byte
 `0xAD`, written `%AD`) stands in for the `-` that the 2012 fix filters. Howdah
 refuses such a request **before the script runs** (clean 403, the worker
-survives), on every supported PHP version and SAPI, because the check reads
-only the request's query string.
+survives) because the check reads only the request's query string. One caveat
+for the php-cgi SAPI itself: php-cgi parses the options during its own startup,
+before RINIT, so the refusal is in time only for what takes effect *after*
+RINIT — the code-execution shape (`-d auto_prepend_file`, `allow_url_include`),
+where the injected prepend compiles with the script. The `-s`/`-i`
+source/info-disclosure forms php-cgi emits during that same startup, before
+RINIT, so the check does not stop them under php-cgi (instrumentation: RINIT
+fired for `?x=1` but not `?-s`); under php-fpm, Apache and the CLI server, which
+never interpret the query string as argv, a `?-s` request is harmless anyway.
+Keep a web-server or front-proxy rule, or a patched php-cgi, for the `-s` form
+and for CVE-2019-11043.
 
 The match is deliberately narrow. The raw query string must contain no literal
 `=` (every working exploit writes it `%3d`), and then one of these:

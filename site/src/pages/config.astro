@@ -6,16 +6,23 @@
 // at the bottom makes it live.
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
 import Layout from '../layouts/Layout.astro';
 import { CFG, REPO, VERSION } from '../lib/site';
 
+// The wasm core, its JS glue and the schema/emitter are generated files that
+// live at the site root (built by `npm run wasm`, placed by copy-demo.mjs).
+// Resolve them from the build's working directory — the site/ package root —
+// rather than a path relative to this module: Astro's build relocates this
+// page into dist/.prerender/chunks/, so `../../…` off import.meta.url no longer
+// reaches the source tree.
 const require = createRequire(import.meta.url);
-const H = require('../../demo/howdah-wasm.js');
-const { SCHEMA, defaultState, withCatalog } = require('../../config-editor/schema.js');
-const E = require('../../config-editor/editor.js');
+const fromRoot = (p) => resolve(process.cwd(), p);
+const H = require(fromRoot('demo/howdah-wasm.js'));
+const { SCHEMA, defaultState, withCatalog } = require(fromRoot('config-editor/schema.js'));
+const E = require(fromRoot('config-editor/editor.js'));
 
-const wasm = readFileSync(fileURLToPath(new URL('../../demo/howdah_wasm.wasm', import.meta.url)));
+const wasm = readFileSync(fromRoot('demo/howdah_wasm.wasm'));
 const x = await H.loadFrom(wasm);
 const catalog = H.ruleCatalogWith(x);
 const coreVersion = H.versionWith(x);

@@ -2,6 +2,7 @@
 import Layout from '../../layouts/Layout.astro';
 
 const posts = [
+  { href: '/blog/howdah-1-7/', title: 'Howdah 1.7: new detections across every layer', date: '2026-10-26', summary: 'Six new detection facets from a survey of the PHP threat landscape: a php-cgi argument-injection signature, an include/open wrapper-scheme firewall, XXE flag-awareness and Layer 4 file guards (all blocking by default), plus opt-in SSRF hardening and a worker recycle after a poisoning-class fatal.' },
   { href: '/blog/howdah-1-6/', title: 'Howdah 1.6: stopping PHP2Shell', date: '2026-10-25', summary: 'The two protections the PHP2Shell out-of-memory flaw needs: request-parsing limits that stop the amplifying shapes before PHP runs out of memory, and an out-of-memory backstop that exits the worker cleanly if it ever does. Run against a vulnerable PHP build with Howdah active, the exploit does not land. 1.6.1 fixes how a refusal is delivered under php-fpm.' },
   { href: '/blog/howdah-1-5/', title: 'Howdah 1.5: exceptions, log integration, and Docker', date: '2026-10-24', summary: 'Scoped exceptions, a versioned event log with syslog and a per-event hook, seven legacy-era sinks, OPcache JIT on by default, and Docker images. Layers 2 to 4 still log first.' },
   { href: '/blog/howdah-1-4/', title: 'Howdah 1.4: Layer 4, watching what happens after a breach', date: '2026-10-24', summary: 'Layer 4 logs PHP run from upload directories, unexpected programs and hosts, and PHP files written to denied directories. It blocks nothing by default, and the post lists what it cannot see.' },

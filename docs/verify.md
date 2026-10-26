@@ -39,7 +39,7 @@ curl -fsSL https://howdah.org/key.asc | gpg --show-keys --with-fingerprint
 Then verify (set `V` and `T` to the release and tarball you want):
 
 ```sh
-V=1.6.1
+V=1.7.0
 B=https://github.com/howdah/howdah/releases/download/v$V
 T=howdah-$V-php7.4-20190902-linux-x86_64.tar.gz
 curl -fLO $B/$T -O $B/SHA256SUMS -O $B/SHA256SUMS.asc -O $B/howdah-release-signing.asc
@@ -69,15 +69,15 @@ outside that workflow run.
 ### With the GitHub CLI
 
 ```sh
-gh attestation verify howdah-1.6.1-php7.4-20190902-linux-x86_64.tar.gz -R howdah/howdah
+gh attestation verify howdah-1.7.0-php7.4-20190902-linux-x86_64.tar.gz -R howdah/howdah
 ```
 
 Stricter: require the release workflow, the tag, and a GitHub-hosted runner:
 
 ```sh
-gh attestation verify howdah-1.6.1-php7.4-20190902-linux-x86_64.tar.gz -R howdah/howdah \
+gh attestation verify howdah-1.7.0-php7.4-20190902-linux-x86_64.tar.gz -R howdah/howdah \
   --signer-workflow howdah/howdah/.github/workflows/release.yml \
-  --source-ref refs/tags/v1.6.1 \
+  --source-ref refs/tags/v1.7.0 \
   --deny-self-hosted-runners
 ```
 
@@ -161,8 +161,8 @@ and compare it with the signed checksum.
 
 ```sh
 git clone https://github.com/howdah/howdah && cd howdah
-packaging/verify-reproducible.sh v1.6.1 7.4                 # x86_64
-packaging/verify-reproducible.sh v1.6.1 8.3 x86_64-musl     # or aarch64
+packaging/verify-reproducible.sh v1.7.0 7.4                 # x86_64
+packaging/verify-reproducible.sh v1.7.0 8.3 x86_64-musl     # or aarch64
 ```
 
 The script downloads `SHA256SUMS` and its signature, checks the signature
@@ -240,7 +240,7 @@ Download one and check it:
 
 ```sh
 apt-get download php7.4-howdah          # or: dnf download php74-howdah
-gh attestation verify php7.4-howdah_1.6.1-1_amd64.deb -R howdah/howdah \
+gh attestation verify php7.4-howdah_1.7.0-1_amd64.deb -R howdah/howdah \
   --signer-workflow howdah/howdah/.github/workflows/publish-repos.yml
 ```
 
@@ -250,8 +250,8 @@ byte-identical to the one in the signed tarball, which ties the package to
 checks 1 to 4:
 
 ```sh
-dpkg-deb --fsys-tarfile php7.4-howdah_1.6.1-1_amd64.deb | tar -xO ./usr/lib/php/20190902/howdah.so | sha256sum
-rpm2cpio php74-howdah-1.6.1-1.x86_64.rpm | cpio -i --quiet --to-stdout ./opt/remi/php74/root/usr/lib64/php/modules/howdah.so | sha256sum
+dpkg-deb --fsys-tarfile php7.4-howdah_1.7.0-1_amd64.deb | tar -xO ./usr/lib/php/20190902/howdah.so | sha256sum
+rpm2cpio php74-howdah-1.7.0-1.x86_64.rpm | cpio -i --quiet --to-stdout ./opt/remi/php74/root/usr/lib64/php/modules/howdah.so | sha256sum
 tar -xzOf "$T" --wildcards '*/howdah.so' | sha256sum
 ```
 

@@ -1,0 +1,79 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { REPO } from '../../lib/site';
+---
+<Layout
+  title="Howdah 1.7: new detections across every layer"
+  description="Howdah 1.7 adds six new detection facets drawn from a survey of the PHP threat landscape: a php-cgi argument-injection signature, an include/open wrapper-scheme firewall, XXE flag-awareness, Layer 4 file guards, SSRF hardening, and a worker recycle after a poisoning-class fatal. Some enforce by default; the rest log first."
+  path="/blog/howdah-1-7/"
+>
+  <article class="post">
+    <div class="pagehead">
+      <div class="wrap">
+        <p class="crumbs"><a href="/">Home</a> / <a href="/blog/">Blog</a> / <span aria-current="page">Howdah 1.7</span></p>
+        <h1>Howdah 1.7: new detections across every layer</h1>
+        <p class="lede"><time datetime="2026-10-26">26 October 2026</time></p>
+      </div>
+    </div>
+
+    <div class="wrap prose">
+      <p>Where 1.6 closed a single flaw, 1.7 broadens the net. It adds six detection facets drawn from a survey of the PHP threat landscape: classic argument injection, local- and remote-file-inclusion tricks, XML external entities, file tampering after a breach, server-side request forgery, and one more memory-corruption class from the PHP2Shell family. Each ships with the same two commitments as the rest of Howdah. It works on every PHP from 5.4 to 8.5, and it never logs the value that tripped it, only the rule, the category and the origin. There is no new <code>php.ini</code> directive; Howdah still reads exactly three.</p>
+
+      <p>The defaults are deliberately split. The facets with little room for a false positive block as soon as you install; the ones where only your application can say what is malicious are opt-in, off until you turn them on.</p>
+
+      <div class="tablewrap" tabindex="0" role="region" aria-label="Howdah 1.7 new detection facets (scrolls sideways on narrow screens)">
+        <table>
+          <caption class="sr-only">The six facets Howdah 1.7 adds, by layer and default posture</caption>
+          <thead><tr><th scope="col">Facet</th><th scope="col">Layer</th><th scope="col">Default</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">php-cgi argument injection</th><td>2</td><td>Blocks</td></tr>
+            <tr><th scope="row">Include/open wrapper firewall</th><td>3</td><td>Blocks</td></tr>
+            <tr><th scope="row">XXE flag-awareness</th><td>3</td><td>Blocks</td></tr>
+            <tr><th scope="row">Layer 4 file guards</th><td>4</td><td>Delete &amp; write block; secret-read opt-in</td></tr>
+            <tr><th scope="row">SSRF hardening</th><td>3</td><td>Opt-in</td></tr>
+            <tr><th scope="row">Poisoning-fatal worker recycle</th><td>1</td><td>Opt-in</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2>php-cgi argument injection</h2>
+      <p>CVE-2012-1823 and its 2024 Windows-encoding revival CVE-2024-4577 both rely on the same trick: a request whose query string is handed to the php-cgi binary as <em>command-line arguments</em>. A query string of <code>-d+auto_prepend_file=php://input</code> turns an innocent URL into arbitrary code execution. Layer 2 now carries a signature for that shape and refuses it before the target script runs. It is on and blocks by default, on the php-cgi SAPI where the attack applies. The scope is narrow. It stops the <em>argument-injection</em> form that leads to code execution. It does not address the <code>-s</code> source-disclosure variant (handled earlier, before Howdah's request phase) or the separate php-fpm path-info underflow, CVE-2019-11043.</p>
+
+      <h2>The wrapper-scheme firewall</h2>
+      <p>PHP's stream wrappers are where a file-inclusion bug becomes a shell. <code>php://filter</code> chains let an attacker read and transform local files into executable payloads; <code>data://</code> and <code>expect://</code> smuggle code; <code>phar://</code> triggers deserialization; a remote <code>http(s)://</code> include is straight RFI; and <code>include</code> of an attacker-influenced log, session or <code>/proc</code> path is a classic LFI-to-RCE trick. Layer 3 now classifies the scheme and target of every <code>include</code>/<code>require</code> and file open, and refuses the poisoning shapes. It is on and blocks by default, and leaves ordinary local file paths alone.</p>
+
+      <h2>XXE flag-awareness</h2>
+      <p>XML external-entity attacks use a crafted document to read local files or reach internal services, but only when the parser is told to resolve external entities. Blocking all external entities would break legitimate XML; ignoring them leaves the hole open. So Howdah watches the libxml load flags and refuses external-entity expansion only when a dangerous flag (such as <code>LIBXML_NOENT</code>) is set for the parse. It is on and blocks by default, under the <code>xxe</code> rule it already reported.</p>
+
+      <h2>Layer 4 file guards</h2>
+      <p>Layer 4 watches what PHP does after a breach. 1.7 extends it with a <strong>delete guard</strong> and a widened <strong>dangerous-write</strong> facet, and both now block by default. A webshell cannot quietly remove your files or drop a new <code>.php</code> through an upload sink without tripping them. A separate <strong>secret-read guard</strong>, for reads of files like <code>.env</code>, keys and credentials, is opt-in, because what counts as a secret is specific to your app.</p>
+
+      <h2>SSRF hardening</h2>
+      <p>Howdah has guarded SSRF egress since 1.3. Version 1.7 hardens it against the ways a determined attacker gets around a naive check. Three opt-in <code>[sinks.ssrf]</code> controls, each off by default: <strong>resolve-at-connect</strong> pins the address that was validated so a name cannot answer "public" at check time and "internal" at connect time (DNS rebinding); <strong>scheme denial</strong> restricts curl to <code>http</code>/<code>https</code> and blocks <code>gopher://</code>, <code>dict://</code>, <code>file://</code> and the rest that turn a fetch into a protocol-smuggling primitive; and a <strong>redirect guard</strong> re-checks every hop when <code>CURLOPT_FOLLOWLOCATION</code> is on. The post that introduced the SSRF guard still applies to what it cannot catch: a proxy or a script's own <code>CURLOPT_RESOLVE</code> disables the address pin, and a couple of call shapes are judged only after the request leaves.</p>
+
+      <h2>A companion to the out-of-memory backstop</h2>
+      <p>1.6 added a backstop that exits the worker cleanly on PHP's out-of-memory fatal (CVE-2026-109618). Its sibling, CVE-2026-109619, is a poisoning-class fatal that can leave the same corrupt state behind. 1.7 adds an opt-in Layer 1 facet that recycles the worker after such a fatal, so a poisoned process is never handed the next request. It is off by default and has an observe mode that only proposes. The logging path that records it is allocation-free and async-signal-safe, so it is safe to run from the fatal handler itself.</p>
+
+      <h2>What we verified</h2>
+      <p>The integration labs for all six facets pass on PHP 5.4, 5.6, 7.0, 7.4, 8.0, 8.1, 8.3 and 8.5. On the real php-cgi SAPI, the argument-injection shape is refused before the target script runs. The SSRF parser and the wrapper firewall went through five rounds of adversarial security review. The two highest-severity findings predate this release, in the 1.3 range check, and are fixed here too. The core test suite (411 tests), Clippy and the WebAssembly build all pass, and every release artifact is signed with build provenance and an SBOM.</p>
+
+      <h2>What is still limited</h2>
+      <ul class="facts">
+        <li><strong>Allowlist guards can be evaded.</strong> Scheme and host checks narrow the attack surface; they do not make SSRF or command execution impossible against a determined attacker with another primitive.</li>
+        <li><strong>The php-cgi signature is scoped.</strong> It stops the code-execution shape, not the source-disclosure variant or CVE-2019-11043.</li>
+        <li><strong>XXE detection keys on the parser flags Howdah can see.</strong> A path that reaches libxml without going through a hooked entry point is not covered.</li>
+        <li><strong>Howdah does not patch PHP.</strong> Upgrade where you can; use Howdah where you cannot, or until you can.</li>
+      </ul>
+
+      <h2>Get it</h2>
+      <p>Debian and Ubuntu: <code>apt-get update &amp;&amp; apt-get upgrade</code>. RHEL family: the yum equivalent. Signed tarballs cover every PHP minor from 5.4 to 8.5, for x86_64, aarch64 and x86_64 musl, with build provenance and SBOM attestations; see <a href="/docs/verify/">verifying a release</a>. The 1.7.0 Docker images are on GHCR as <code>ghcr.io/howdah/howdah:1.7.0-php&lt;minor&gt;</code> (and <code>-alpine</code> for PHP 7.2 to 8.5).</p>
+      <p>Start at the <a href="/install/">install picker</a>, grab a build from the <a href="/downloads/">downloads page</a>, and check the <a href="/coverage/">coverage page</a> for what has been tested on your PHP version. The source and this site are on <a href={REPO}>GitHub</a>.</p>
+    </div>
+  </article>
+</Layout>
+
+<style>
+  .prose { max-width: 46rem; padding-bottom: 1rem; }
+  .prose h2 { margin-top: 2rem; }
+  .prose h3 { margin-top: 1.5rem; }
+</style>

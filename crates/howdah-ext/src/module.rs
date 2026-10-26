@@ -1003,6 +1003,11 @@ unsafe fn install_oom_backstop() {
 
     oom_filter::set_arm(oom_exit_armed, recycle_mode, recycle_immediate);
     if oom_exit_armed || recycle_mode != oom_filter::RECYCLE_OFF {
+        // Capture the log fd now (MINIT, safe context): the backstop's event
+        // line is then one write(2) with no open/allocation on the OOM or
+        // signal-handler path. -1 (syslog/stderr, or open failed) -> stderr.
+        let fd = (*ptr::addr_of!(LOG)).as_ref().and_then(|s| s.oom_fd()).unwrap_or(-1);
+        oom_filter::set_log_fd(fd);
         sys::howdah_install_oom_hook(crate::oom_filter::decide);
     }
     DISP_OOM = Some(cstring(&oom_backstop_label(ctx_null, exit_on, oom_armed_cfg, &sapi, web, patched)));

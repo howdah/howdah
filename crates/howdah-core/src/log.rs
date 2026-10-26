@@ -171,6 +171,97 @@ pub fn log_line(rec: &EventRecord) -> String {
     serde_json::to_string(&v).unwrap_or_else(|_| "{}".to_string())
 }
 
+/// A fixed-capacity, allocation-free line writer, for building one event line on
+/// the stack where the allocator must not be called: the out-of-memory backstop
+/// (a genuine system OOM cannot allocate) and the recycle facet (a
+/// `max_execution_time` fatal on PHP <= 7.0 reaches `zend_error_cb` from the
+/// SIGPROF handler, where `malloc` is not async-signal-safe). Silently refuses
+/// to overflow; the caller checks `ok`.
+struct LineBuf<'a> {
+    out: &'a mut [u8],
+    pos: usize,
+    ok: bool,
+}
+
+impl<'a> LineBuf<'a> {
+    fn new(out: &'a mut [u8]) -> Self {
+        LineBuf { out, pos: 0, ok: true }
+    }
+    fn raw(&mut self, b: &[u8]) {
+        if self.ok && self.pos + b.len() <= self.out.len() {
+            self.out[self.pos..self.pos + b.len()].copy_from_slice(b);
+            self.pos += b.len();
+        } else {
+            self.ok = false;
+        }
+    }
+    /// A JSON string value's bytes: `"` and `\` are backslash-escaped and
+    /// control bytes (< 0x20) are dropped, so the result is always valid JSON.
+    fn json(&mut self, s: &str) {
+        for &b in s.as_bytes() {
+            match b {
+                b'"' => self.raw(b"\\\""),
+                b'\\' => self.raw(b"\\\\"),
+                0..=0x1f => {}
+                _ => self.raw(&[b]),
+            }
+        }
+    }
+    fn uint(&mut self, mut n: u64) {
+        if n == 0 {
+            self.raw(b"0");
+            return;
+        }
+        let mut tmp = [0u8; 20];
+        let mut i = tmp.len();
+        while n > 0 {
+            i -= 1;
+            tmp[i] = b'0' + (n % 10) as u8;
+            n /= 10;
+        }
+        self.raw(&tmp[i..]);
+    }
+}
+
+/// Write one schema-2 event line — byte-for-byte what [`log_line`] produces —
+/// into `out` with NO allocation, for the OOM / signal-context paths. Returns
+/// the byte length, or 0 if it does not fit (the caller then writes nothing).
+/// `ts`, `request_id` and `reason` are the only dynamic values and are
+/// JSON-escaped here; `client_ip`/`method`/`uri` are always empty on these
+/// paths. Keys are emitted in the sorted order `serde_json` uses.
+pub fn write_event_line(
+    out: &mut [u8],
+    rule: RuleId,
+    action: Action,
+    ts: &str,
+    request_id: &str,
+    reason: &str,
+) -> usize {
+    let mut b = LineBuf::new(out);
+    b.raw(b"{\"action\":\"");
+    b.json(action_name(action));
+    b.raw(b"\",\"client_ip\":\"\",\"layer\":");
+    b.uint(rule_layer(rule) as u64);
+    b.raw(b",\"method\":\"\",\"reason\":\"");
+    b.json(reason);
+    b.raw(b"\",\"request_id\":\"");
+    b.json(request_id);
+    b.raw(b"\",\"rule\":\"");
+    b.json(rule_name(rule));
+    b.raw(b"\",\"schema\":");
+    b.uint(SCHEMA_VERSION as u64);
+    b.raw(b",\"ts\":\"");
+    b.json(ts);
+    b.raw(b"\",\"uri\":\"\",\"version\":\"");
+    b.json(env!("CARGO_PKG_VERSION"));
+    b.raw(b"\"}");
+    if b.ok {
+        b.pos
+    } else {
+        0
+    }
+}
+
 /// Generate a request id: a process-wide monotonic counter (unique within the
 /// process) followed by 16 hex chars of a keyed hash (makes ids unguessable
 /// across restarts). Alphanumeric only, so it is safe in URLs and headers.
@@ -217,6 +308,40 @@ mod tests {
             uri: "/upload.php?a=1\n\"x\"".into(),
             reason: "too many\nparts".into(),
         }
+    }
+
+    #[test]
+    fn write_event_line_matches_log_line() {
+        // The no-alloc builder must be byte-for-byte what serde produces, for a
+        // clean (control-free) OOM/recycle reason — the realistic shape.
+        for (rule, action, reason) in [
+            (RuleId::OutOfMemory, Action::Block, "worker ended on PHP out-of-memory at /var/www/x.php:42"),
+            (RuleId::FatalRecycle, Action::Block, "worker recycled after a poisoning-class fatal (CVE-2026-109619)"),
+            (RuleId::StartupFatal, Action::Log, "would recycle the worker"),
+        ] {
+            let r = EventRecord {
+                ts: "1792864974141".to_string(),
+                request_id: "o42".to_string(),
+                rule,
+                action,
+                client_ip: String::new(),
+                method: String::new(),
+                uri: String::new(),
+                reason: reason.to_string(),
+            };
+            let want = log_line(&r);
+            let mut buf = [0u8; 1024];
+            let n = write_event_line(&mut buf, rule, action, &r.ts, &r.request_id, reason);
+            assert_eq!(std::str::from_utf8(&buf[..n]).unwrap(), want, "{rule:?}");
+        }
+        // Escaping: a quote and backslash survive as valid JSON; control dropped.
+        let mut buf = [0u8; 256];
+        let n = write_event_line(&mut buf, RuleId::OutOfMemory, Action::Block, "1", "id", "a\"b\\c\x01d");
+        let v: serde_json::Value = serde_json::from_str(std::str::from_utf8(&buf[..n]).unwrap()).unwrap();
+        assert_eq!(v["reason"], "a\"b\\cd");
+        // Overflow: a buffer too small writes nothing (0), never a partial line.
+        let mut small = [0u8; 8];
+        assert_eq!(write_event_line(&mut small, RuleId::OutOfMemory, Action::Block, "1", "i", "r"), 0);
     }
 
     #[test]

@@ -98,15 +98,13 @@ closed either way. Set `recycle_observe = true` to log a would-recycle event
 without ending the worker, to size your fatal rate before enforcing. Both are
 TOML keys, not php.ini directives.
 
-Known limitation: on **PHP 7.0 and earlier**, a `max_execution_time` timeout
-raises its fatal from the `SIGPROF` signal handler, so with `recycle_on_fatal`
-enforcing, Howdah's event-logging on that path can run in signal context; if the
-signal interrupts libc `malloc`, the log write can stall. The timeout still ends
-the worker. The window is narrow (opt-in facet, PHP &le; 7.0, a timeout mid-`malloc`);
-a future release will move that log to an async-signal-safe write. Likewise, a
-genuine *system* out-of-memory (not a `memory_limit` hit, which leaves the system
-allocator working) can abort the worker with `SIGABRT` rather than the clean
-`_exit`; the worker still dies and is replaced.
+The backstop writes its one event line with an **async-signal-safe, allocation-free**
+path: the line is built on the stack and written with a single `write(2)` to a
+log-file descriptor captured at startup (or stderr for a syslog/stderr
+destination). So a `max_execution_time` timeout on PHP &le; 7.0 — which raises
+its fatal from the `SIGPROF` handler — and a genuine *system* out-of-memory
+(where the allocator itself fails) both log and `_exit` cleanly, without
+touching `malloc` on that path.
 
 ## Build a config in the browser
 
@@ -615,16 +613,14 @@ is checked, and a hit on a reserved or internal range is a match.
   or a long userinfo cannot steer the cut to drop the handle out of the guard. Literal-IP decoding mirrors glibc `inet_aton`; libcurl and musl
   parse some encoded forms differently, so the resolved addresses are the
   authority. The host parse matches PHP and libcurl on the tricky shapes: a
-  `\` before `@` stays in the userinfo (the host is taken after the last `@`), a
-  host is cut at the first NUL byte, an unknown or nesting scheme (`dict://`,
-  `compress.zlib://http://…`) is peeled so the inner host is still classified,
-  and an out-of-range or garbage port classifies the host with no port rather
-  than dropping it. One residual: a NUL placed *before* an `@`
-  (`127.0.0.1\0@public`) is read as the host after the `@` (`public`, the
-  URL-parser view); a bare-host socket call that instead stops at the NUL would
-  see `127.0.0.1`. Such NUL-in-host values are malformed and the mirror case
-  (`public\0@127.0.0.1`) is caught; closing this one needs classifying both
-  interpretations.
+  `\` before `@` stays in the userinfo (the host is taken after the last `@`),
+  an unknown or nesting scheme (`dict://`, `compress.zlib://http://…`) is peeled
+  so the inner host is still classified, and an out-of-range or garbage port
+  classifies the host with no port rather than dropping it. A **NUL anywhere in
+  the authority** is treated as suspicious (blocked when armed): no legitimate
+  host has one, and PHP's URL parser (keeps the userinfo) and libc (stops at the
+  NUL) would otherwise resolve to different hosts, so both `public\0@127.0.0.1`
+  and its mirror `127.0.0.1\0@public` are caught.
 - **`allow_hosts` requires every resolved address.** A name is allowed by an IP
   or CIDR entry only when *all* of its resolved addresses match it; a name that
   answers `[an allowed address, 169.254.169.254]` is **not** allowed (PHP could

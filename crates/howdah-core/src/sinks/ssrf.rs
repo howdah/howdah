@@ -37,6 +37,11 @@ pub struct Host {
     pub scheme: Option<Scheme>,
     pub name: Vec<u8>,
     pub port: Option<u16>,
+    /// The authority contained a NUL byte. No legitimate host does; the two
+    /// consumers (PHP's `php_url_parse`, which keeps userinfo, and libc, which
+    /// stops at the NUL) can then resolve to different hosts, so the caller must
+    /// treat it as suspicious rather than trust a single parse.
+    pub suspicious: bool,
 }
 
 fn scheme_from(s: &[u8]) -> Option<Scheme> {
@@ -130,6 +135,12 @@ pub fn parse_host(input: &[u8], form: HostForm) -> Option<Host> {
         .iter()
         .position(|b| matches!(b, b'/' | b'?' | b'#'))
         .unwrap_or(rest.len());
+    // A NUL anywhere in the authority (userinfo, host or port) makes the host
+    // ambiguous between the URL-parser view (keeps userinfo) and the libc view
+    // (stops at the NUL): e.g. `127.0.0.1\0@public` is `public` to one and
+    // `127.0.0.1` to the other. No legitimate host has a NUL, so flag the whole
+    // request suspicious rather than trust either single view.
+    let suspicious = rest[..end].contains(&0);
     let mut auth = &rest[..end];
     if let Some(at) = auth.iter().rposition(|&b| b == b'@') {
         auth = &auth[at + 1..];
@@ -179,7 +190,7 @@ pub fn parse_host(input: &[u8], form: HostForm) -> Option<Host> {
     if name.is_empty() {
         return None;
     }
-    Some(Host { scheme, name, port })
+    Some(Host { scheme, name, port, suspicious })
 }
 
 /// Where a URL is about to be used, for the egress-scheme policy.
@@ -757,32 +768,30 @@ mod tests {
         assert_eq!(h.name, b"169.254.169.254");
     }
     #[test]
-    fn parse_truncates_host_at_nul() {
-        // F3: a NUL terminates the authority (host AND port) for libc / PHP < 7,
-        // so classify only the bytes before the first NUL.
-        let h = ph("http://127.0.0.1\0.example.com/", HostForm::SchemeRequired).unwrap();
-        assert_eq!(h.name, b"127.0.0.1");
-        let h = ph("127.0.0.1\0.evil.com", HostForm::BareHostOk).unwrap();
-        assert_eq!(h.name, b"127.0.0.1");
-        // Re-review: a NUL in the PORT field also terminates the authority.
-        let h = ph("http://127.0.0.1:80\0x/", HostForm::SchemeRequired).unwrap();
-        assert_eq!(h.name, b"127.0.0.1");
-        assert_eq!(h.port, Some(80));
-        // A NUL in the userinfo: the host after `@` is still classified.
-        let h = ph("http://public\0@127.0.0.1/", HostForm::SchemeRequired).unwrap();
-        assert_eq!(h.name, b"127.0.0.1");
-        // Re-review: a NUL inside a bracketed IPv6 must not break the bracket
-        // match (the `]` search tolerates a missing `]`).
-        let h = ph("http://[::1\0]/", HostForm::SchemeRequired).unwrap();
-        assert_eq!(h.name, b"::1");
-        // Re-review (round 4): a NUL in the host followed by a bad/garbage port
-        // must still classify the host, not fail open on port validation.
-        let h = ph("http://127.0.0.1\0:99999/", HostForm::SchemeRequired).unwrap();
-        assert_eq!(h.name, b"127.0.0.1");
-        assert_eq!(h.port, None);
-        // A NUL after the closing bracket likewise still classifies the address.
-        let h = ph("http://[::1]\0:80/", HostForm::SchemeRequired).unwrap();
-        assert_eq!(h.name, b"::1");
+    fn parse_flags_nul_in_authority_suspicious() {
+        // A NUL anywhere in the authority is suspicious: libc stops at it while
+        // PHP's URL parser keeps the userinfo, so the two can resolve to
+        // different hosts. Both `public\0@127.0.0.1` (URL-view internal) and its
+        // mirror `127.0.0.1\0@public` (libc-view internal) are caught, along
+        // with host-, port- and bracket-embedded NULs.
+        for s in [
+            "http://127.0.0.1\0.example.com/",
+            "127.0.0.1\0.evil.com",
+            "http://127.0.0.1:80\0x/",
+            "http://public\0@127.0.0.1/",
+            "http://127.0.0.1\0@public/",
+            "http://[::1\0]/",
+            "http://127.0.0.1\0:99999/",
+            "http://[::1]\0:80/",
+        ] {
+            let form = if s.starts_with("http") { HostForm::SchemeRequired } else { HostForm::BareHostOk };
+            assert!(ph(s, form).is_some_and(|h| h.suspicious), "not suspicious: {s:?}");
+        }
+        // The host is still cut for non-range consumers (scheme/guess-prefix).
+        assert_eq!(ph("127.0.0.1\0.evil.com", HostForm::BareHostOk).unwrap().name, b"127.0.0.1");
+        // A NUL-free authority is NOT suspicious.
+        assert!(!ph("http://127.0.0.1/", HostForm::SchemeRequired).unwrap().suspicious);
+        assert!(!ph("http://example.com:8080/", HostForm::SchemeRequired).unwrap().suspicious);
     }
     #[test]
     fn parse_bare_host_with_invalid_scheme() {

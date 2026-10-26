@@ -2159,6 +2159,9 @@ pub unsafe extern "C" fn howdah_ssrf_prepare(
         let Some(h) = parse_host(raw, form) else {
             return 0;
         };
+        if h.suspicious {
+            return 2; // NUL in the authority: ambiguous host, treat as suspicious
+        }
         if h.name.len() > out_host_cap {
             return 2; // oversize: suspicious, see howdah_sink_ssrf_oversize
         }

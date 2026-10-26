@@ -134,9 +134,20 @@ pub fn parse_host(input: &[u8], form: HostForm) -> Option<Host> {
     if let Some(at) = auth.iter().rposition(|&b| b == b'@') {
         auth = &auth[at + 1..];
     }
+    // A NUL terminates the authority for libc / PHP < 7, so classify only the
+    // bytes before the first NUL. One cut on the whole authority (after the
+    // userinfo strip), BEFORE the split, so garbage AFTER the NUL — a bad port,
+    // or a stray `]` — cannot make the parse fail open (libc ignores everything
+    // past the NUL): `127.0.0.1\0:99999` -> 127.0.0.1, `127.0.0.1:80\0x` -> :80,
+    // `[::1\0]` and `[::1]\0:80` -> ::1 (F3).
+    if let Some(z) = auth.iter().position(|&b| b == 0) {
+        auth = &auth[..z];
+    }
     let (name, port_s): (&[u8], &[u8]) = if auth.first() == Some(&b'[') {
-        let close = auth.iter().position(|&b| b == b']')?;
-        let after = &auth[close + 1..];
+        // Tolerate a missing `]` (a NUL cut may have removed it): take the rest
+        // as the address so `[::1\0]` yields `::1` rather than failing open.
+        let close = auth.iter().position(|&b| b == b']').unwrap_or(auth.len());
+        let after = if close < auth.len() { &auth[close + 1..] } else { &[][..] };
         let port = match after.split_first() {
             None => &[][..],
             Some((b':', p)) => p,
@@ -148,19 +159,6 @@ pub fn parse_host(input: &[u8], form: HostForm) -> Option<Host> {
         (&auth[..c], &auth[c + 1..])
     } else {
         (auth, &[][..])
-    };
-    // A NUL terminates the host and the port for libc / PHP < 7, so classify
-    // only the bytes before the first NUL in each. Done per-component, AFTER the
-    // bracket/host:port split, so a NUL inside `[::1\0]` does not break the
-    // bracket match (F3; `127.0.0.1\0.evil` -> 127.0.0.1, `127.0.0.1:80\0x` ->
-    // :80, `[::1\0]` -> ::1).
-    let name = match name.iter().position(|&b| b == 0) {
-        Some(z) => &name[..z],
-        None => name,
-    };
-    let port_s = match port_s.iter().position(|&b| b == 0) {
-        Some(z) => &port_s[..z],
-        None => port_s,
     };
     let port = if port_s.is_empty() {
         None
@@ -776,8 +774,16 @@ mod tests {
         let h = ph("http://public\0@127.0.0.1/", HostForm::SchemeRequired).unwrap();
         assert_eq!(h.name, b"127.0.0.1");
         // Re-review: a NUL inside a bracketed IPv6 must not break the bracket
-        // match (the cut is per-component, after the split).
+        // match (the `]` search tolerates a missing `]`).
         let h = ph("http://[::1\0]/", HostForm::SchemeRequired).unwrap();
+        assert_eq!(h.name, b"::1");
+        // Re-review (round 4): a NUL in the host followed by a bad/garbage port
+        // must still classify the host, not fail open on port validation.
+        let h = ph("http://127.0.0.1\0:99999/", HostForm::SchemeRequired).unwrap();
+        assert_eq!(h.name, b"127.0.0.1");
+        assert_eq!(h.port, None);
+        // A NUL after the closing bracket likewise still classifies the address.
+        let h = ph("http://[::1]\0:80/", HostForm::SchemeRequired).unwrap();
         assert_eq!(h.name, b"::1");
     }
     #[test]

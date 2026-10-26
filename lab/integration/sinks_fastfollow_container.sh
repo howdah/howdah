@@ -335,8 +335,10 @@ echo "  ok   - F1 re-review: a userinfo-padded >8192 curl URL is treated as susp
 run_php '[behavior]\nmode="block"\nallow_egress_hosts=["allowed.example"]\n' '$u="http://127.0.0.1:'"$PORT"'/?x=".str_repeat("a",9000); $c=curl_init($u); curl_setopt($c,CURLOPT_RETURNTRANSFER,1); $r=@curl_exec($c); echo "RET[".var_export($r,true)."]\nCONT\n";'
 grep -q 'RET\[false\]' "$WORK/out.txt" || fail "B10c(F1): an over-long URL bypassed the egress allow-list"
 if grep -q SERVED "$WORK/out.txt"; then fail "B10c(F1): the over-long URL reached an unlisted egress host"; fi
+grep -q '"rule":"unexpected_egress"' "$LOG" || fail "B10c(F1): the block was not from the egress guard"
+grep -q '"action":"block"' "$LOG" || fail "B10c(F1): no egress block event"
 grep -q CONT "$WORK/out.txt" || fail "B10c(F1): script did not continue"
-echo "  ok   - F1 re-review: the egress allow-list still applies to an over-long URL"
+echo "  ok   - F1 re-review: the egress allow-list still applies to an over-long URL (blocked by unexpected_egress)"
 
 # B11 (F2): a backslash before '@' stays in the userinfo for PHP and libcurl,
 # which connect to the host after the last '@'. The parser must read that host.

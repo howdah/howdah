@@ -810,6 +810,7 @@ static void map_unset_url(long key) {
         free(e->url);
         e->url = NULL;
         e->len = 0;
+        e->overlong = 0; /* a non-string URL clears the over-long flag too */
     }
 }
 
@@ -1286,7 +1287,9 @@ static void howdah_hook_curl_exec(INTERNAL_FUNCTION_PARAMETERS) {
              * truncation so the stored text parses to an empty or wrong host, so
              * never infer the host from it. The scheme is at the front (the
              * stored prefix is still valid for the scheme check); the range
-             * verdict is the oversize/suspicious one (F1 re-review). */
+             * verdict is the oversize/suspicious one (F1 re-review). Everything
+             * else the normal path does still runs, just without a trusted host. */
+            flags = e->flags; /* so curl_postcheck sees HCF_PROXY etc. (re-review) */
             if (e->url && ssrf_scheme_blocked(e->url, e->len, HOWDAH_SSRF_VIA_CURL)) {
                 RETVAL_FALSE;
                 return;
@@ -1296,11 +1299,25 @@ static void howdah_hook_curl_exec(INTERNAL_FUNCTION_PARAMETERS) {
                 RETVAL_FALSE;
                 return;
             }
+            /* Layer-4 egress: with no trusted host, judge an empty host — never
+             * on allow_egress_hosts, so it fails closed rather than skipping the
+             * allow-list for an over-long URL (F1 re-review). */
+            if (howdah_g_behavior_egress && howdah_g_behavior_armed
+                && howdah_g_behavior_armed(g_ctx, HOWDAH_BEHAVIOR_EGRESS)
+                && howdah_g_behavior_egress(g_ctx, org, orglen, "", 0) == HOWDAH_ACTION_BLOCK) {
+                RETVAL_FALSE;
+                return;
+            }
             /* scheme=block: have libcurl itself refuse non-http(s) (host-independent). */
             if (mask & HOWDAH_SSRF_ARM_PROTOCOLS)
                 howdah_curl_setopt(h, HOWDAH_CURLOPT_PROTOCOLS, 0, HOWDAH_CURLPROTO_HTTP_HTTPS, NULL, 0);
-            /* No trusted host to pin; the after-the-fact rebind post-check still
-             * judges the address libcurl actually connects to. */
+            /* redirect/scheme: install the Location guard so a 3xx to an internal
+             * target is still caught (F3 re-review). Can't pin without a trusted
+             * host; the rebind post-check is the backstop. */
+            if ((mask & (HOWDAH_SSRF_ARM_REDIRECT | HOWDAH_SSRF_ARM_SCHEME)) && (flags & HCF_FOLLOW)
+                && !(flags & HCF_USER_HDR))
+                howdah_curl_setopt(h, HOWDAH_CURLOPT_HEADERFUNCTION, 1, 0, HOWDAH_HDR_FN,
+                                   sizeof(HOWDAH_HDR_FN) - 1);
             post = (mask & HOWDAH_SSRF_ARM_REBIND) != 0;
         } else {
             if (ssrf_scheme_blocked(e->url, e->len, HOWDAH_SSRF_VIA_CURL)

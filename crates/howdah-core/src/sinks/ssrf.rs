@@ -134,13 +134,6 @@ pub fn parse_host(input: &[u8], form: HostForm) -> Option<Host> {
     if let Some(at) = auth.iter().rposition(|&b| b == b'@') {
         auth = &auth[at + 1..];
     }
-    // A NUL terminates the authority for libc and PHP < 7, covering both the
-    // host (`127.0.0.1\0.evil`) and the port (`127.0.0.1:80\0x` connects to
-    // 127.0.0.1:80). Cut it before the host:port split so both are classified
-    // as the engine connects (F3).
-    if let Some(z) = auth.iter().position(|&b| b == 0) {
-        auth = &auth[..z];
-    }
     let (name, port_s): (&[u8], &[u8]) = if auth.first() == Some(&b'[') {
         let close = auth.iter().position(|&b| b == b']')?;
         let after = &auth[close + 1..];
@@ -155,6 +148,19 @@ pub fn parse_host(input: &[u8], form: HostForm) -> Option<Host> {
         (&auth[..c], &auth[c + 1..])
     } else {
         (auth, &[][..])
+    };
+    // A NUL terminates the host and the port for libc / PHP < 7, so classify
+    // only the bytes before the first NUL in each. Done per-component, AFTER the
+    // bracket/host:port split, so a NUL inside `[::1\0]` does not break the
+    // bracket match (F3; `127.0.0.1\0.evil` -> 127.0.0.1, `127.0.0.1:80\0x` ->
+    // :80, `[::1\0]` -> ::1).
+    let name = match name.iter().position(|&b| b == 0) {
+        Some(z) => &name[..z],
+        None => name,
+    };
+    let port_s = match port_s.iter().position(|&b| b == 0) {
+        Some(z) => &port_s[..z],
+        None => port_s,
     };
     let port = if port_s.is_empty() {
         None
@@ -769,6 +775,10 @@ mod tests {
         // A NUL in the userinfo: the host after `@` is still classified.
         let h = ph("http://public\0@127.0.0.1/", HostForm::SchemeRequired).unwrap();
         assert_eq!(h.name, b"127.0.0.1");
+        // Re-review: a NUL inside a bracketed IPv6 must not break the bracket
+        // match (the cut is per-component, after the split).
+        let h = ph("http://[::1\0]/", HostForm::SchemeRequired).unwrap();
+        assert_eq!(h.name, b"::1");
     }
     #[test]
     fn parse_bare_host_with_invalid_scheme() {

@@ -5,6 +5,8 @@ All notable changes to Howdah are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-26
+
 ### Added
 - **SSRF hardening: resolve-at-connect, egress-scheme denial and a curl
   internal-redirect guard (all opt-in, off by default).** Three new

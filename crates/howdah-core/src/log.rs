@@ -65,7 +65,8 @@ pub fn rule_layer(r: RuleId) -> u8 {
         | RuleId::AssertString
         | RuleId::DangerousCallback
         | RuleId::Xxe
-        | RuleId::TlsVerify => 3,
+        | RuleId::TlsVerify
+        | RuleId::TlsSchemeCase => 3,
         RuleId::UploadExec | RuleId::UnexpectedBinary | RuleId::UnexpectedEgress
         | RuleId::PhpWrite
         | RuleId::FileDelete
@@ -133,6 +134,7 @@ fn rule_name(r: RuleId) -> &'static str {
         RuleId::DangerousCallback => "dangerous_callback",
         RuleId::Xxe => "xxe",
         RuleId::TlsVerify => "tls_verify",
+        RuleId::TlsSchemeCase => "tls_scheme_case",
         RuleId::OutOfMemory => "out_of_memory",
         RuleId::StartupFatal => "startup_fatal",
         RuleId::FatalRecycle => "fatal_recycle",
@@ -445,6 +447,7 @@ mod tests {
             (RuleId::DangerousCallback, 3),
             (RuleId::Xxe, 3),
             (RuleId::TlsVerify, 3),
+            (RuleId::TlsSchemeCase, 3),
             (RuleId::OutOfMemory, 1),
             (RuleId::StartupFatal, 1),
             (RuleId::FatalRecycle, 1),
@@ -452,7 +455,7 @@ mod tests {
             (RuleId::NestingBudget, 1),
             (RuleId::ParseMemoryEstimate, 1),
         ];
-        assert_eq!(rule_catalog().len(), 47);
+        assert_eq!(rule_catalog().len(), 48);
         assert_eq!(want.len(), rule_catalog().len(), "layer table and rule_catalog differ");
         for r in rule_catalog() {
             let w = want.iter().find(|(x, _)| x == r).unwrap_or_else(|| panic!("{r:?} has no layer in this table")).1;

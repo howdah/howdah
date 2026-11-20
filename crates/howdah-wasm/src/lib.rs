@@ -299,7 +299,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&rule_catalog_json()).unwrap();
         let rules = v.as_array().unwrap();
         let names: Vec<&str> = rules.iter().map(|r| r["name"].as_str().unwrap()).collect();
-        assert_eq!(names.len(), 47, "{names:?}");
+        assert_eq!(names.len(), 48, "{names:?}");
         assert!(names.contains(&"max_parts") && names.contains(&"unserialize") && names.contains(&"ssrf"));
         // The T4 include/open wrapper-scheme firewall rules.
         assert!(names.contains(&"include_wrapper") && names.contains(&"file_open"));

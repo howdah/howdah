@@ -88,6 +88,17 @@ extern "C" {
     /// missing-file sentinel without calling phar.
     pub fn howdah_install_phar_hook(cb: HowdahSinkDecide) -> ::std::ffi::c_int;
 
+    /// Proxy the http/https and ftp/ftps stream wrappers (see `scheme_hook.c`) so a
+    /// mixed-case `HTTPS://`/`FTPS://` URL is reported (and, `mode` 2, lowercased
+    /// so TLS is used; `mode` 1 only reports). `lenfn` is the core's scheme
+    /// classifier. Only registrations still holding PHP's own wrapper are touched.
+    /// Returns how many scheme names were proxied.
+    pub fn howdah_install_scheme_hook(
+        cb: HowdahSinkDecide,
+        lenfn: unsafe extern "C" fn(*const ::std::ffi::c_char, usize) -> usize,
+        mode: ::std::ffi::c_int,
+    ) -> ::std::ffi::c_int;
+
     /// Install the SSRF egress trampolines (see `ssrf_hook.c`): URL sinks,
     /// socket openers and the curl handle->URL map. `armed` gates all DNS work;
     /// `decide` is the Rust verdict. Call once at MINIT.

@@ -278,6 +278,16 @@ unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
             if core::howdah_sink_armed(CTX, core::HOWDAH_SINK_PHAR) != 0 {
                 sys::howdah_install_phar_hook(crate::sink_filter::decide);
             }
+            // CVE-2026-128064: proxy http/https + ftp/ftps so a mixed-case TLS
+            // scheme is lowercased (fix) or reported (detect). Default fix.
+            let scheme_mode = core::howdah_scheme_case_mode(CTX);
+            if scheme_mode != 0 {
+                sys::howdah_install_scheme_hook(
+                    crate::sink_filter::decide,
+                    core::howdah_scheme_case_len,
+                    scheme_mode,
+                );
+            }
             // SSRF trampolines: install when the L3 SSRF sink is armed OR the L4
             // behavior egress / php-write facet is armed. Egress-only operation
             // (SSRF off) needs these trampolines, and `ssrf_filter::armed` is

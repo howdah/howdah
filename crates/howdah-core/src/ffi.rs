@@ -93,6 +93,8 @@ pub const HOWDAH_SINK_ASSERT: i32 = 9;
 pub const HOWDAH_SINK_CALLBACK: i32 = 10;
 pub const HOWDAH_SINK_XML: i32 = 11;
 pub const HOWDAH_SINK_TLS: i32 = 12;
+/// Mixed-case `HTTPS://`/`FTPS://` scheme normalization (CVE-2026-128064).
+pub const HOWDAH_SINK_SCHEME_CASE: i32 = 13;
 
 // SSRF event kinds (`howdah_sink_check_ssrf_kind_at`). RANGE is the original
 // check-time reserved-range verdict; REBIND judges the address a connection
@@ -323,6 +325,7 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::DangerousCallback => "string callback naming a command or code execution function",
         RuleId::Xxe => "XML external entity or entity bomb parsed with a dangerous libxml flag",
         RuleId::TlsVerify => "curl TLS certificate verification disabled",
+        RuleId::TlsSchemeCase => "mixed-case https/ftps URL scheme that PHP would send in plaintext",
         RuleId::OutOfMemory => "worker ended on out-of-memory",
         RuleId::StartupFatal => "fatal error during request startup",
         RuleId::FatalRecycle => "worker recycled after a poisoning-class fatal",
@@ -840,6 +843,18 @@ impl howdah_ctx {
             // `arg` is the option token the shim passes ("verifypeer" /
             // "verifyhost"), not user data.
             SinkId::Tls => (RuleId::TlsVerify, legacy::tls_reason(arg).map(|r| format!("{r} via {n}"))),
+            // `arg` is the full URL (scanned, never logged); `n` is the lowercased
+            // scheme name. Fixed reason: no URL, host or credential.
+            SinkId::SchemeCase => (
+                RuleId::TlsSchemeCase,
+                (crate::sinks::scheme::mixed_case_tls_scheme_len(arg) > 0).then(|| {
+                    if sinks.scheme_case_mode(self.config.mode) == crate::config::SchemeCaseMode::Fix {
+                        format!("mixed-case {n} URL scheme lowercased so TLS is used via fopen wrapper")
+                    } else {
+                        format!("mixed-case {n} URL scheme sent in plaintext (detect only, not fixed) via fopen wrapper")
+                    }
+                }),
+            ),
             SinkId::Unserialize => {
                 let scan = unserialize_classes(arg);
                 let allow = &sinks.unserialize.allow_classes;
@@ -1889,6 +1904,7 @@ pub unsafe extern "C" fn howdah_sink_check(
         HOWDAH_SINK_CALLBACK => SinkId::Callback,
         HOWDAH_SINK_XML => SinkId::Xml,
         HOWDAH_SINK_TLS => SinkId::Tls,
+        HOWDAH_SINK_SCHEME_CASE => SinkId::SchemeCase,
         _ => return HOWDAH_ALLOW,
     };
     let r = catch_unwind(AssertUnwindSafe(|| {
@@ -2072,6 +2088,45 @@ pub unsafe extern "C" fn howdah_sink_ssrf_armed(ctx: *mut howdah_ctx) -> i32 {
     .unwrap_or(0)
 }
 
+/// `[sinks.scheme_case]` mode for the stream-wrapper proxy: 0 off, 1 detect
+/// (log only, PHP still goes plaintext), 2 fix (lowercase the scheme). NULL ctx
+/// or panic is 0.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_scheme_case_mode(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = &*ctx;
+        match c.config.sinks.scheme_case_mode(c.config.mode) {
+            crate::config::SchemeCaseMode::Off => 0,
+            crate::config::SchemeCaseMode::Detect => 1,
+            crate::config::SchemeCaseMode::Fix => 2,
+        }
+    }))
+    .unwrap_or(0)
+}
+
+/// Length of the scheme token if `url` is a mixed-case `https://`/`ftps://`
+/// URL (so the caller lowercases that many leading bytes of a COPY), else 0.
+/// Pure; NULL url is 0.
+///
+/// # Safety
+/// `url` NULL or valid for `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_scheme_case_len(url: *const c_char, len: usize) -> usize {
+    if url.is_null() || len == 0 {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        crate::sinks::scheme::mixed_case_tls_scheme_len(std::slice::from_raw_parts(url as *const u8, len))
+    }))
+    .unwrap_or(0)
+}
+
 /// 1 iff the given sink (`HOWDAH_SINK_*`) is armed (effective mode != off);
 /// NULL ctx, unknown sink or panic is 0. Never stashes a log line. Used by the
 /// glue to decide, once per process, whether to install the phar/ssrf hooks.
@@ -2097,6 +2152,7 @@ pub unsafe extern "C" fn howdah_sink_armed(ctx: *mut howdah_ctx, sink: i32) -> i
         HOWDAH_SINK_CALLBACK => SinkId::Callback,
         HOWDAH_SINK_XML => SinkId::Xml,
         HOWDAH_SINK_TLS => SinkId::Tls,
+        HOWDAH_SINK_SCHEME_CASE => SinkId::SchemeCase,
         _ => return 0,
     };
     catch_unwind(AssertUnwindSafe(|| {
@@ -2570,6 +2626,7 @@ pub unsafe extern "C" fn howdah_sink_check_at(
         HOWDAH_SINK_CALLBACK => SinkId::Callback,
         HOWDAH_SINK_XML => SinkId::Xml,
         HOWDAH_SINK_TLS => SinkId::Tls,
+        HOWDAH_SINK_SCHEME_CASE => SinkId::SchemeCase,
         _ => return HOWDAH_ALLOW,
     };
     let r = catch_unwind(AssertUnwindSafe(|| {
@@ -4593,6 +4650,34 @@ mod tests {
         begin(c);
         assert_eq!(sink(c, HOWDAH_SINK_PHAR, "f", b"phar:///tmp/x.phar"), HOWDAH_ALLOW);
         assert!(take_sink(c).is_none());
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn scheme_case_sink_fix_and_detect() {
+        let url = b"HTTPS://h.example/secret?token=abc";
+        let c = init("");
+        assert_eq!(unsafe { howdah_scheme_case_mode(c) }, 2);
+        assert_eq!(unsafe { howdah_sink_armed(c, HOWDAH_SINK_SCHEME_CASE) }, 1);
+        assert_eq!(sink(c, HOWDAH_SINK_SCHEME_CASE, "https", url), HOWDAH_LOG);
+        let line = take_sink(c).unwrap();
+        assert!(line.contains("\"rule\":\"tls_scheme_case\""), "{line}");
+        assert!(line.contains("lowercased"), "{line}");
+        assert!(!line.contains("secret") && !line.contains("token") && !line.contains("h.example"), "{line}");
+        // lowercase: nothing.
+        assert_eq!(sink(c, HOWDAH_SINK_SCHEME_CASE, "https", b"https://h/"), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        assert_eq!(unsafe { howdah_scheme_case_len(url.as_ptr() as _, url.len()) }, 5);
+        unsafe { howdah_free(c) };
+        let c = init("[sinks.scheme_case]\nmode=\"detect\"");
+        assert_eq!(unsafe { howdah_scheme_case_mode(c) }, 1);
+        assert_eq!(sink(c, HOWDAH_SINK_SCHEME_CASE, "https", url), HOWDAH_LOG);
+        assert!(take_sink(c).unwrap().contains("not fixed"));
+        unsafe { howdah_free(c) };
+        let c = init("[sinks.scheme_case]\nmode=\"off\"");
+        assert_eq!(unsafe { howdah_scheme_case_mode(c) }, 0);
+        assert_eq!(unsafe { howdah_sink_armed(c, HOWDAH_SINK_SCHEME_CASE) }, 0);
+        assert_eq!(sink(c, HOWDAH_SINK_SCHEME_CASE, "https", url), HOWDAH_ALLOW);
         unsafe { howdah_free(c) };
     }
 

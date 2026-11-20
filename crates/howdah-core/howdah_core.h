@@ -86,6 +86,11 @@
 
 #define HOWDAH_SINK_TLS 12
 
+/**
+ * Mixed-case `HTTPS://`/`FTPS://` scheme normalization (CVE-2026-128064).
+ */
+#define HOWDAH_SINK_SCHEME_CASE 13
+
 #define HOWDAH_SSRF_KIND_RANGE 0
 
 #define HOWDAH_SSRF_KIND_REBIND 1
@@ -563,6 +568,26 @@ int32_t howdah_behavior_check_php_write(struct howdah_ctx *ctx,
  * `ctx` NULL or live.
  */
 int32_t howdah_sink_ssrf_armed(struct howdah_ctx *ctx);
+
+/**
+ * `[sinks.scheme_case]` mode for the stream-wrapper proxy: 0 off, 1 detect
+ * (log only, PHP still goes plaintext), 2 fix (lowercase the scheme). NULL ctx
+ * or panic is 0.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_scheme_case_mode(struct howdah_ctx *ctx);
+
+/**
+ * Length of the scheme token if `url` is a mixed-case `https://`/`ftps://`
+ * URL (so the caller lowercases that many leading bytes of a COPY), else 0.
+ * Pure; NULL url is 0.
+ *
+ * # Safety
+ * `url` NULL or valid for `len` bytes.
+ */
+size_t howdah_scheme_case_len(const char *url, size_t len);
 
 /**
  * 1 iff the given sink (`HOWDAH_SINK_*`) is armed (effective mode != off);

@@ -69,7 +69,8 @@ impl Layer {
             | RuleId::AssertString
             | RuleId::DangerousCallback
             | RuleId::Xxe
-            | RuleId::TlsVerify => Layer::Sinks,
+            | RuleId::TlsVerify
+            | RuleId::TlsSchemeCase => Layer::Sinks,
             RuleId::UploadExec
             | RuleId::UnexpectedBinary
             | RuleId::UnexpectedEgress

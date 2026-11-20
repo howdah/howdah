@@ -498,6 +498,9 @@ pub enum RuleId {
     DangerousCallback,
     Xxe,
     TlsVerify,
+    /// A mixed-case `HTTPS://` / `FTPS://` URL that PHP would send in plaintext
+    /// (CVE-2026-128064). Standard, Layer 3; normalized to lowercase by default.
+    TlsSchemeCase,
     /// PHP ran out of memory while the engine was parsing/handling the request
     /// (the PHP2Shell out-of-memory backstop; see `crate::oom`). Critical,
     /// Layer 1. Not produced by any limit check: the glue's `zend_error_cb`
@@ -564,7 +567,8 @@ impl RuleId {
             | RuleId::AssertString
             | RuleId::DangerousCallback
             | RuleId::Xxe
-            | RuleId::TlsVerify => Severity::Standard,
+            | RuleId::TlsVerify
+            | RuleId::TlsSchemeCase => Severity::Standard,
             _ => Severity::Critical,
         }
     }
@@ -576,7 +580,7 @@ impl RuleId {
 /// or miss one it accepts. `rule_catalog_covers_every_variant` fails to
 /// compile when a variant is added here but not to the list.
 pub fn rule_catalog() -> &'static [RuleId] {
-    const ALL: [RuleId; 47] = [
+    const ALL: [RuleId; 48] = [
         RuleId::MaxParts,
         RuleId::MaxFiles,
         RuleId::MaxPartHeaders,
@@ -618,6 +622,7 @@ pub fn rule_catalog() -> &'static [RuleId] {
         RuleId::DangerousCallback,
         RuleId::Xxe,
         RuleId::TlsVerify,
+        RuleId::TlsSchemeCase,
         RuleId::OutOfMemory,
         RuleId::StartupFatal,
         RuleId::PostTooLarge,
@@ -886,6 +891,7 @@ mod tests {
                 | RuleId::DangerousCallback
                 | RuleId::Xxe
                 | RuleId::TlsVerify
+                | RuleId::TlsSchemeCase
                 | RuleId::OutOfMemory
                 | RuleId::StartupFatal
                 | RuleId::PostTooLarge
@@ -894,7 +900,7 @@ mod tests {
                 | RuleId::FatalRecycle => {}
             }
         }
-        assert_eq!(rule_catalog().len(), 47);
+        assert_eq!(rule_catalog().len(), 48);
         let mut sorted = all.to_vec();
         sorted.sort();
         sorted.dedup();
@@ -936,6 +942,7 @@ mod tests {
             RuleId::DangerousCallback,
             RuleId::Xxe,
             RuleId::TlsVerify,
+            RuleId::TlsSchemeCase,
         ] {
             assert_eq!(r.severity(), Severity::Standard, "{r:?}");
         }

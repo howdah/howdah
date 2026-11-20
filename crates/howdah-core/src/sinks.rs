@@ -5,6 +5,7 @@
 //! allowlisted?"; the caller resolves the outcome against the configured mode.
 
 pub mod legacy;
+pub mod scheme;
 pub mod ssrf;
 pub mod wrapper;
 
@@ -28,6 +29,8 @@ pub enum SinkId {
     Callback,
     Xml,
     Tls,
+    /// Mixed-case `HTTPS://`/`FTPS://` scheme normalization (CVE-2026-128064).
+    SchemeCase,
 }
 
 /// Policy outcome before mode resolution. `Allow` = allowlisted / benign;

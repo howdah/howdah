@@ -466,6 +466,8 @@ pub struct SinkConfig {
     /// Detect-only in this release: a `block` here or inherited is logged,
     /// not enforced.
     pub tls: LegacySinkConfig,
+    /// Mixed-case TLS URL scheme normalization (default `fix`).
+    pub scheme_case: SchemeCaseConfig,
 }
 
 /// Settings of one legacy-era sink: a mode that inherits `sinks.mode`.
@@ -521,6 +523,31 @@ impl XmlConfig {
     }
 }
 
+/// What to do with a mixed-case `HTTPS://` / `FTPS://` URL (CVE-2026-128064).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SchemeCaseMode {
+    /// Lowercase the scheme before PHP opens the URL so TLS is used, and log.
+    Fix,
+    /// Log only. PHP still sends the request in plaintext: detect does NOT protect.
+    Detect,
+    Off,
+}
+
+/// `[sinks.scheme_case]`. Independent of `sinks.mode` (default `fix`); a global
+/// `off` or `[sinks] enabled = false` still silences it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SchemeCaseConfig {
+    pub mode: SchemeCaseMode,
+}
+
+impl Default for SchemeCaseConfig {
+    fn default() -> Self {
+        SchemeCaseConfig { mode: SchemeCaseMode::Fix }
+    }
+}
+
 impl Default for SinkConfig {
     fn default() -> Self {
         SinkConfig {
@@ -540,6 +567,7 @@ impl Default for SinkConfig {
             callback: LegacySinkConfig::default(),
             xml: XmlConfig::default(),
             tls: LegacySinkConfig::default(),
+            scheme_case: SchemeCaseConfig::default(),
         }
     }
 }
@@ -678,8 +706,24 @@ impl SinkConfig {
             // Enforced by default and independent of `sinks.mode` (see `XmlConfig`).
             SinkId::Xml => Some(self.xml.mode),
             SinkId::Tls => self.tls.mode,
+            // Own mode enum, independent of sinks.mode: any non-off value is
+            // "armed" (reported as Detect; the fix/detect split is `scheme_case_mode`).
+            SinkId::SchemeCase => Some(match self.scheme_case.mode {
+                SchemeCaseMode::Off => Mode::Off,
+                _ => Mode::Detect,
+            }),
         };
         sub.unwrap_or(self.mode)
+    }
+
+    /// Resolved `[sinks.scheme_case]` mode: off if the global mode is off or
+    /// sinks are disabled.
+    pub fn scheme_case_mode(&self, global: Mode) -> SchemeCaseMode {
+        if global == Mode::Off || !self.enabled {
+            SchemeCaseMode::Off
+        } else {
+            self.scheme_case.mode
+        }
     }
 
     /// True iff the `[sinks.xml] external_entities = "deny"` toggle is in
@@ -1708,6 +1752,24 @@ self_test = "off"
         // A global or [sinks] block never arms them past what the others get.
         let c = Config::from_toml("mode=\"block\"").unwrap();
         assert_eq!(c.sinks.effective_mode(SinkId::Callback, Mode::Block), Mode::Detect);
+    }
+
+    #[test]
+    fn scheme_case_modes() {
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.sinks.scheme_case.mode, SchemeCaseMode::Fix);
+        assert_eq!(c.sinks.scheme_case_mode(Mode::Detect), SchemeCaseMode::Fix);
+        assert_eq!(c.sinks.scheme_case_mode(Mode::Off), SchemeCaseMode::Off);
+        assert_eq!(c.sinks.effective_mode(SinkId::SchemeCase, Mode::Detect), Mode::Detect);
+        let c = Config::from_toml("[sinks.scheme_case]\nmode=\"detect\"").unwrap();
+        assert_eq!(c.sinks.scheme_case_mode(Mode::Block), SchemeCaseMode::Detect);
+        let c = Config::from_toml("[sinks.scheme_case]\nmode=\"off\"").unwrap();
+        assert_eq!(c.sinks.effective_mode(SinkId::SchemeCase, Mode::Detect), Mode::Off);
+        // Independent of sinks.mode.
+        let c = Config::from_toml("[sinks]\nmode=\"off\"").unwrap();
+        assert_eq!(c.sinks.scheme_case_mode(Mode::Detect), SchemeCaseMode::Fix);
+        assert!(Config::from_toml("[sinks.scheme_case]\nmode=\"block\"").is_err());
+        assert!(Config::from_toml("[sinks.scheme_case]\nnope=1").is_err());
     }
 
     #[test]

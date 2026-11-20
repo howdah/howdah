@@ -6,6 +6,7 @@
 
 pub mod legacy;
 pub mod scheme;
+pub mod soap;
 pub mod ssrf;
 pub mod wrapper;
 

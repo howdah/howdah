@@ -37,6 +37,7 @@ fn main() {
     println!("cargo:rerun-if-changed=file_hook.c");
     println!("cargo:rerun-if-changed=refuse_hook.c");
     println!("cargo:rerun-if-changed=legacy_hook.c");
+    println!("cargo:rerun-if-changed=soap_hook.c");
     println!("cargo:rerun-if-changed=oom_hook.c");
     println!("cargo:rerun-if-changed=read_post_hook.c");
     println!("cargo:rerun-if-changed=howdah_sink.h");
@@ -49,6 +50,7 @@ fn main() {
         .file("file_hook.c")
         .file("refuse_hook.c")
         .file("legacy_hook.c")
+        .file("soap_hook.c")
         .file("oom_hook.c")
         .file("read_post_hook.c")
         .warnings(false);

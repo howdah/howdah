@@ -70,7 +70,8 @@ impl Layer {
             | RuleId::DangerousCallback
             | RuleId::Xxe
             | RuleId::TlsVerify
-            | RuleId::TlsSchemeCase => Layer::Sinks,
+            | RuleId::TlsSchemeCase
+            | RuleId::SoapRequest => Layer::Sinks,
             RuleId::UploadExec
             | RuleId::UnexpectedBinary
             | RuleId::UnexpectedEgress

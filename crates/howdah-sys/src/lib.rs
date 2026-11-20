@@ -228,6 +228,15 @@ extern "C" {
     /// startup (`output_handler = ob_gzhandler`) cannot add headers later and
     /// warn "headers already sent".
     pub fn howdah_sys_output_discard_all();
+
+    /// Swap `SoapServer::handle` (see `soap_hook.c`): the trampoline acquires
+    /// the request XML (explicit `$request` arg, else `SG(request_info)
+    /// .request_body`, inflating gzip/deflate on PHP 7+), caps it, and asks the
+    /// SOAP guard callback. On BLOCK the glue delivers a clean 403 and SOAP is
+    /// never called. Call once at first RINIT when the guard is armed (soap is a
+    /// shared ext often loaded after howdah). Returns 1 if swapped (or already
+    /// ours), 0 if the soapserver class is absent (honest no-op). NTS only.
+    pub fn howdah_install_soap_hook(cb: HowdahSoapDecide) -> ::std::ffi::c_int;
 }
 
 extern "C" {
@@ -264,6 +273,16 @@ pub type HowdahMailDecide = unsafe extern "C" fn(
     headers_len: usize,
     params: *const ::std::ffi::c_char,
     params_len: usize,
+) -> ::std::ffi::c_int;
+
+/// The SOAP request guard decide callback (see `soap_hook.c`): the raw request
+/// XML (`xml`/`xml_len`, scanned never logged) and whether an oversized body was
+/// capped to its prefix (`truncated`). Returns 0 ALLOW / 1 LOG / 2 BLOCK; on
+/// BLOCK the glue has already delivered a clean 403 and SOAP must not be called.
+pub type HowdahSoapDecide = unsafe extern "C" fn(
+    xml: *const ::std::ffi::c_char,
+    xml_len: usize,
+    truncated: ::std::ffi::c_int,
 ) -> ::std::ffi::c_int;
 
 /// The XML-string decide callback: the guarded function name, the document, the

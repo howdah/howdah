@@ -404,6 +404,13 @@ unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
             };
             DISP_LEGACY = Some(cstring(&crate::legacy_filter::describe(armed, installed)));
             XML_DENY = core::howdah_sink_xml_deny_external_entities(CTX) != 0;
+            // SOAP request guard (CVE-2026-129506, CVE-2026-15353): swap
+            // SoapServer::handle so a prolog DTD / malformed arraySize is refused
+            // before ext/soap parses it. On by default; a no-op when ext/soap is
+            // not loaded. First RINIT, like the other shared-ext hooks.
+            if core::howdah_soap_armed(CTX) != 0 {
+                sys::howdah_install_soap_hook(crate::soap_filter::decide);
+            }
         }));
     }
     // Layer 2 armed: build `$_SERVER` now (a no-op unless auto_globals_jit

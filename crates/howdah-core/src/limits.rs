@@ -501,6 +501,12 @@ pub enum RuleId {
     /// A mixed-case `HTTPS://` / `FTPS://` URL that PHP would send in plaintext
     /// (CVE-2026-128064). Standard, Layer 3; normalized to lowercase by default.
     TlsSchemeCase,
+    /// A SOAP request whose body opens with a DTD/DOCTYPE in the prolog
+    /// (CVE-2026-129506, SoapServer DTD use-after-free) or carries a malformed
+    /// SOAP-ENC `arraySize` (CVE-2026-15353, heap over-read). Standard, Layer 3;
+    /// refused before `ext/soap` parses it, enforced by default
+    /// (`[sinks.soap] mode`). See `crate::sinks::soap`.
+    SoapRequest,
     /// PHP ran out of memory while the engine was parsing/handling the request
     /// (the PHP2Shell out-of-memory backstop; see `crate::oom`). Critical,
     /// Layer 1. Not produced by any limit check: the glue's `zend_error_cb`
@@ -568,7 +574,8 @@ impl RuleId {
             | RuleId::DangerousCallback
             | RuleId::Xxe
             | RuleId::TlsVerify
-            | RuleId::TlsSchemeCase => Severity::Standard,
+            | RuleId::TlsSchemeCase
+            | RuleId::SoapRequest => Severity::Standard,
             _ => Severity::Critical,
         }
     }
@@ -580,7 +587,7 @@ impl RuleId {
 /// or miss one it accepts. `rule_catalog_covers_every_variant` fails to
 /// compile when a variant is added here but not to the list.
 pub fn rule_catalog() -> &'static [RuleId] {
-    const ALL: [RuleId; 48] = [
+    const ALL: [RuleId; 49] = [
         RuleId::MaxParts,
         RuleId::MaxFiles,
         RuleId::MaxPartHeaders,
@@ -623,6 +630,7 @@ pub fn rule_catalog() -> &'static [RuleId] {
         RuleId::Xxe,
         RuleId::TlsVerify,
         RuleId::TlsSchemeCase,
+        RuleId::SoapRequest,
         RuleId::OutOfMemory,
         RuleId::StartupFatal,
         RuleId::PostTooLarge,
@@ -892,6 +900,7 @@ mod tests {
                 | RuleId::Xxe
                 | RuleId::TlsVerify
                 | RuleId::TlsSchemeCase
+                | RuleId::SoapRequest
                 | RuleId::OutOfMemory
                 | RuleId::StartupFatal
                 | RuleId::PostTooLarge
@@ -900,7 +909,7 @@ mod tests {
                 | RuleId::FatalRecycle => {}
             }
         }
-        assert_eq!(rule_catalog().len(), 48);
+        assert_eq!(rule_catalog().len(), 49);
         let mut sorted = all.to_vec();
         sorted.sort();
         sorted.dedup();
@@ -943,6 +952,7 @@ mod tests {
             RuleId::Xxe,
             RuleId::TlsVerify,
             RuleId::TlsSchemeCase,
+            RuleId::SoapRequest,
         ] {
             assert_eq!(r.severity(), Severity::Standard, "{r:?}");
         }

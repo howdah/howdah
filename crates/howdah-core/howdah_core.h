@@ -1144,4 +1144,31 @@ int32_t howdah_sink_check_xml(struct howdah_ctx *ctx,
  */
 int32_t howdah_sink_xml_deny_external_entities(struct howdah_ctx *ctx);
 
+/**
+ * 1 iff the SOAP request guard (`[sinks.soap]`) is armed (effective mode !=
+ * off); NULL ctx or panic is 0. Used by the glue to decide, once per process,
+ * whether to swap `SoapServer::handle`.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_soap_armed(struct howdah_ctx *ctx);
+
+/**
+ * SOAP request guard (CVE-2026-129506, CVE-2026-15353). `xml` is the raw
+ * request body about to reach `ext/soap`; `truncated != 0` says the caller
+ * capped an oversized body and `xml` is only its prefix. The body is scanned,
+ * never logged (only a FIXED reason string is). Returns 0 Allow / 1 Log / 2
+ * Block; on Block the glue delivers a clean 403 and does NOT call SOAP. NULL
+ * ctx or a panic is 0 (fail-open). A hit is retrievable with
+ * `howdah_take_sink_log_line`.
+ *
+ * # Safety
+ * `ctx` NULL or live; `xml` NULL or valid for `xml_len` readable bytes.
+ */
+int32_t howdah_soap_check(struct howdah_ctx *ctx,
+                          const char *xml,
+                          size_t xml_len,
+                          int32_t truncated);
+
 #endif  /* HOWDAH_CORE_H */

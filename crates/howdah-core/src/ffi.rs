@@ -326,6 +326,7 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::Xxe => "XML external entity or entity bomb parsed with a dangerous libxml flag",
         RuleId::TlsVerify => "curl TLS certificate verification disabled",
         RuleId::TlsSchemeCase => "mixed-case https/ftps URL scheme that PHP would send in plaintext",
+        RuleId::SoapRequest => "soap request with a prolog DTD or a malformed array dimension",
         RuleId::OutOfMemory => "worker ended on out-of-memory",
         RuleId::StartupFatal => "fatal error during request startup",
         RuleId::FatalRecycle => "worker recycled after a poisoning-class fatal",
@@ -968,6 +969,49 @@ impl howdah_ctx {
             reason: reason.to_string(),
         };
         self.sink_log = Some(log_line(&rec));
+        action
+    }
+
+    /// Layer-3 SOAP request guard (CVE-2026-129506, CVE-2026-15353). `xml` is
+    /// the raw request body about to reach `ext/soap`; it is scanned, never
+    /// logged (only the FIXED reason string is). `truncated` says the caller
+    /// capped an oversized body and scanned only the prefix. On a dangerous
+    /// shape the verdict is resolved against `[sinks.soap] mode` (default
+    /// `block`); a block records the hit and returns Block so the glue delivers
+    /// a clean 403 instead of calling SOAP. Reuses the per-call `sink_log` slot.
+    fn soap_check(&mut self, xml: &[u8], truncated: bool) -> Action {
+        #[cfg(test)]
+        if tests::FORCE_PANIC.with(|f| f.get()) {
+            panic!("injected test panic");
+        }
+        let mode = self.config.sinks.soap_mode(self.config.mode);
+        if mode == Mode::Off {
+            return Action::Allow;
+        }
+        let Some(kind) = crate::sinks::soap::soap_request_verdict(xml) else {
+            return Action::Allow;
+        };
+        let rule = RuleId::SoapRequest;
+        // Scoped exception: URI or client facets only (no script/param at the
+        // SOAP entry point).
+        if let Some(m) = self.excepted(rule, None, None, None) {
+            self.note_excepted_sink(rule, &m);
+            return Action::Allow;
+        }
+        let action = match mode {
+            Mode::Block => Action::Block,
+            _ => Action::Log,
+        };
+        let what = match kind {
+            crate::sinks::soap::REASON_DTD => {
+                "soap request (dtd): DTD/DOCTYPE in the prolog refused before ext/soap (CVE-2026-129506)"
+            }
+            _ => {
+                "soap request (array dimensions): malformed SOAP-ENC arraySize refused before ext/soap (CVE-2026-15353)"
+            }
+        };
+        let reason = if truncated { format!("{what}; scanned a capped prefix") } else { what.to_string() };
+        self.sink_log = Some(self.record(rule, action, reason));
         action
     }
 
@@ -3340,6 +3384,58 @@ pub unsafe extern "C" fn howdah_sink_xml_deny_external_entities(ctx: *mut howdah
     .unwrap_or(0)
 }
 
+/// 1 iff the SOAP request guard (`[sinks.soap]`) is armed (effective mode !=
+/// off); NULL ctx or panic is 0. Used by the glue to decide, once per process,
+/// whether to swap `SoapServer::handle`.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_soap_armed(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = &*ctx;
+        i32::from(c.config.sinks.soap_mode(c.config.mode) != Mode::Off)
+    }))
+    .unwrap_or(0)
+}
+
+/// SOAP request guard (CVE-2026-129506, CVE-2026-15353). `xml` is the raw
+/// request body about to reach `ext/soap`; `truncated != 0` says the caller
+/// capped an oversized body and `xml` is only its prefix. The body is scanned,
+/// never logged (only a FIXED reason string is). Returns 0 Allow / 1 Log / 2
+/// Block; on Block the glue delivers a clean 403 and does NOT call SOAP. NULL
+/// ctx or a panic is 0 (fail-open). A hit is retrievable with
+/// `howdah_take_sink_log_line`.
+///
+/// # Safety
+/// `ctx` NULL or live; `xml` NULL or valid for `xml_len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_soap_check(
+    ctx: *mut howdah_ctx,
+    xml: *const c_char,
+    xml_len: usize,
+    truncated: i32,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let bytes: &[u8] = if xml.is_null() || xml_len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(xml as *const u8, xml_len)
+        };
+        code((*ctx).soap_check(bytes, truncated != 0))
+    }));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3802,6 +3898,57 @@ mod tests {
             howdah_free_str(p);
             Some(s)
         }
+    }
+
+    fn soap(c: *mut howdah_ctx, xml: &[u8], truncated: i32) -> i32 {
+        unsafe { howdah_soap_check(c, xml.as_ptr() as _, xml.len(), truncated) }
+    }
+
+    #[test]
+    fn soap_guard_blocks_dtd_and_bad_array_passes_benign() {
+        let c = init("");
+        begin(c);
+        // Armed and blocking by default.
+        assert_eq!(unsafe { howdah_soap_armed(c) }, 1);
+        // Prolog DOCTYPE -> block, reason carries dtd + CVE, never the body bytes.
+        let dtd = b"<!DOCTYPE r [<!ENTITY x SYSTEM \"file:///etc/passwd\">]><r/>";
+        assert_eq!(soap(c, dtd, 0), HOWDAH_BLOCK);
+        let line = take_sink(c).unwrap();
+        assert!(line.contains("\"rule\":\"soap_request\""), "{line}");
+        assert!(line.contains("\"action\":\"block\"") && line.contains("dtd"), "{line}");
+        assert!(!line.contains("passwd"), "body leaked: {line}");
+        assert!(line.contains("\"layer\":3"), "{line}");
+        // Malformed arraySize -> block.
+        let bad = b"<e:A xmlns:e=\"http://www.w3.org/2003/05/soap-encoding\" e:arraySize=\"abc\"/>";
+        assert_eq!(soap(c, bad, 0), HOWDAH_BLOCK);
+        assert!(take_sink(c).unwrap().contains("array dimensions"));
+        // Benign SOAP envelope and a valid array -> allow, nothing logged.
+        let ok = b"<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body><m:Ping xmlns:m=\"urn:x\"/></s:Body></s:Envelope>";
+        assert_eq!(soap(c, ok, 0), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        let okarr = b"<e:A xmlns:e=\"http://www.w3.org/2003/05/soap-encoding\" e:arraySize=\"* 3\"/>";
+        assert_eq!(soap(c, okarr, 0), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+    }
+
+    #[test]
+    fn soap_guard_detect_and_off_modes() {
+        let c = init("[sinks.soap]\nmode=\"detect\"");
+        begin(c);
+        let dtd = b"<!DOCTYPE r><r/>";
+        assert_eq!(soap(c, dtd, 1), HOWDAH_LOG);
+        let line = take_sink(c).unwrap();
+        assert!(line.contains("\"action\":\"log\"") && line.contains("capped prefix"), "{line}");
+        let c = init("[sinks.soap]\nmode=\"off\"");
+        begin(c);
+        assert_eq!(unsafe { howdah_soap_armed(c) }, 0);
+        assert_eq!(soap(c, dtd, 0), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        // Global off silences it too.
+        let c = init("mode=\"off\"");
+        begin(c);
+        assert_eq!(unsafe { howdah_soap_armed(c) }, 0);
+        assert_eq!(soap(c, dtd, 0), HOWDAH_ALLOW);
     }
 
     #[test]

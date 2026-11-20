@@ -468,6 +468,9 @@ pub struct SinkConfig {
     pub tls: LegacySinkConfig,
     /// Mixed-case TLS URL scheme normalization (default `fix`).
     pub scheme_case: SchemeCaseConfig,
+    /// SOAP request guard (default `block`): refuse a prolog DTD/DOCTYPE or a
+    /// malformed SOAP-ENC `arraySize` before `ext/soap` parses it.
+    pub soap: SoapConfig,
 }
 
 /// Settings of one legacy-era sink: a mode that inherits `sinks.mode`.
@@ -548,6 +551,24 @@ impl Default for SchemeCaseConfig {
     }
 }
 
+/// `[sinks.soap]`: the SOAP request guard (CVE-2026-129506 DTD use-after-free,
+/// CVE-2026-15353 malformed `arraySize` heap over-read). Enforced by default
+/// (`mode` defaults to `block`) and independent of `sinks.mode` (like
+/// `[sinks.xml]`): a request whose body opens with a prolog DTD/DOCTYPE or
+/// carries a malformed SOAP-ENC `arraySize` is refused before `ext/soap`
+/// parses it. A global `off` or `[sinks] enabled = false` still silences it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SoapConfig {
+    pub mode: Mode,
+}
+
+impl Default for SoapConfig {
+    fn default() -> Self {
+        SoapConfig { mode: Mode::Block }
+    }
+}
+
 impl Default for SinkConfig {
     fn default() -> Self {
         SinkConfig {
@@ -568,6 +589,7 @@ impl Default for SinkConfig {
             xml: XmlConfig::default(),
             tls: LegacySinkConfig::default(),
             scheme_case: SchemeCaseConfig::default(),
+            soap: SoapConfig::default(),
         }
     }
 }
@@ -723,6 +745,17 @@ impl SinkConfig {
             SchemeCaseMode::Off
         } else {
             self.scheme_case.mode
+        }
+    }
+
+    /// Effective `[sinks.soap]` mode: off if the global mode is off or sinks are
+    /// disabled, else the SOAP guard's own mode (default `block`). Independent
+    /// of `sinks.mode` and the global `detect`/`block`, like the `xxe` rule.
+    pub fn soap_mode(&self, global: Mode) -> Mode {
+        if global == Mode::Off || !self.enabled {
+            Mode::Off
+        } else {
+            self.soap.mode
         }
     }
 
@@ -1770,6 +1803,28 @@ self_test = "off"
         assert_eq!(c.sinks.scheme_case_mode(Mode::Detect), SchemeCaseMode::Fix);
         assert!(Config::from_toml("[sinks.scheme_case]\nmode=\"block\"").is_err());
         assert!(Config::from_toml("[sinks.scheme_case]\nnope=1").is_err());
+    }
+
+    #[test]
+    fn soap_guard_block_by_default_and_independent_of_sinks_mode() {
+        // Default: block, under global detect or block.
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.sinks.soap.mode, Mode::Block);
+        assert_eq!(c.sinks.soap_mode(Mode::Detect), Mode::Block);
+        assert_eq!(c.sinks.soap_mode(Mode::Block), Mode::Block);
+        // Global off (or sinks disabled) silences it.
+        assert_eq!(c.sinks.soap_mode(Mode::Off), Mode::Off);
+        let c = Config::from_toml("[sinks]\nenabled=false").unwrap();
+        assert_eq!(c.sinks.soap_mode(Mode::Block), Mode::Off);
+        // Independent of sinks.mode.
+        let c = Config::from_toml("[sinks]\nmode=\"off\"").unwrap();
+        assert_eq!(c.sinks.soap_mode(Mode::Block), Mode::Block);
+        // Explicit detect / off.
+        let c = Config::from_toml("[sinks.soap]\nmode=\"detect\"").unwrap();
+        assert_eq!(c.sinks.soap_mode(Mode::Block), Mode::Detect);
+        let c = Config::from_toml("[sinks.soap]\nmode=\"off\"").unwrap();
+        assert_eq!(c.sinks.soap_mode(Mode::Block), Mode::Off);
+        assert!(Config::from_toml("[sinks.soap]\nnope=1").is_err());
     }
 
     #[test]

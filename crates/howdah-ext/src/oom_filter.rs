@@ -31,7 +31,7 @@ const EXIT_NOW: c_int = 1;
 const RECYCLE_AFTER: c_int = 2;
 
 /// Process-static arming, set once at MINIT by `module::install_oom_backstop`
-/// (the glue has already applied the web-SAPI + unpatched-engine gates). The
+/// (the glue has applied the web-SAPI gate for both, plus the unpatched-engine gate for `oom_exit` only). The
 /// `zend_error_cb` hook is a no-op until these are set, and both default to the
 /// safe/off direction so a decide call that somehow races startup never exits.
 ///

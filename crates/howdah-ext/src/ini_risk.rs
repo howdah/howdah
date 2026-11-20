@@ -30,6 +30,12 @@ impl Finding {
 pub struct Env<'a> {
     /// `sapi_module.name`, e.g. `cli`, `fpm-fcgi`, `apache2handler`, `cgi-fcgi`.
     pub sapi: &'a str,
+    /// PHP release series as `major*10000 + minor*100` (e.g. 80300 for 8.3.x);
+    /// 0 = unknown, which flags version-dependent items on their precondition
+    /// alone. The patch level is deliberately not used: the extension is built
+    /// per minor, so only the series is reliable, and the warnings name the
+    /// fixed patch releases instead.
+    pub php_series: u32,
     /// Current ini value; `None` for unset or empty.
     pub get: &'a dyn Fn(&str) -> Option<String>,
     /// Unix permission bits of a directory, `None` if it cannot be read.
@@ -153,6 +159,41 @@ pub fn evaluate(env: &Env) -> Vec<Finding> {
             "cgi.fix_pathinfo = 0 after checking the app does not rely on PATH_INFO",
         );
     }
+    // CVE-2026-129496: a startup error logged to a file with no usable
+    // date.timezone can leave a freed timezone cache. Fixed in 8.2.36 / 8.3.37 /
+    // 8.4.28 / 8.5.13; 8.6+ is not affected. Series-level check only (the
+    // patch level is unknown here), so older-series installs are flagged on the
+    // precondition. Only an empty date.timezone is detected, not an invalid one.
+    let v = get("date.timezone");
+    let file_log = get("error_log")
+        .map(|e| {
+            let e = e.trim();
+            !e.is_empty() && !e.eq_ignore_ascii_case("syslog") && !e.eq_ignore_ascii_case("stderr")
+        })
+        .unwrap_or(false);
+    if v.as_deref().map(str::trim).unwrap_or("").is_empty()
+        && is_on(&get("log_errors"))
+        && file_log
+        && (env.php_series == 0 || env.php_series < 80600)
+    {
+        push(
+            "date.timezone",
+            "(empty)".to_string(),
+            "a startup error logged to a file can leave a freed timezone cache that a later request reuses (CVE-2026-129496; fixed in PHP 8.2.36, 8.3.37, 8.4.28, 8.5.13)",
+            "set a valid date.timezone, or upgrade to the patched PHP",
+        );
+    }
+    // CVE-2026-129474: PHP 8.5.0-8.5.12 only. fatal_error_backtraces exists
+    // from 8.5, so an unset value means the directive is absent.
+    let v = get("fatal_error_backtraces");
+    if is_on(&v) && !is_on(&get("zend.exception_ignore_args")) && (env.php_series == 0 || env.php_series == 80500) {
+        push(
+            "fatal_error_backtraces",
+            v.unwrap_or_default(),
+            "fatal-error backtraces with argument capture can reference freed memory on PHP 8.5.0-8.5.12 (CVE-2026-129474)",
+            "set fatal_error_backtraces=0 or zend.exception_ignore_args=1, or upgrade to 8.5.13+",
+        );
+    }
     let disabled: Vec<String> = get("disable_functions")
         .unwrap_or_default()
         .split(',')
@@ -182,7 +223,47 @@ mod tests {
         let d: HashMap<String, u32> = modes.iter().map(|(k, v)| (k.to_string(), *v)).collect();
         let get = move |n: &str| m.get(n).filter(|v| !v.is_empty()).cloned();
         let dir_mode = move |p: &str| d.get(p).copied();
-        evaluate(&Env { sapi, get: &get, dir_mode: &dir_mode })
+        evaluate(&Env { sapi, php_series: 0, get: &get, dir_mode: &dir_mode })
+    }
+
+    fn run_series(series: u32, ini: &[(&str, &str)]) -> Vec<Finding> {
+        let m: HashMap<String, String> = ini.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let get = move |n: &str| m.get(n).filter(|v| !v.is_empty()).cloned();
+        let dir_mode = |_: &str| None;
+        evaluate(&Env { sapi: "fpm-fcgi", php_series: series, get: &get, dir_mode: &dir_mode })
+    }
+
+    #[test]
+    fn timezone_cache_uaf_precondition() {
+        let ini = [SAFE_DF, ("log_errors", "1"), ("error_log", "/var/log/php.log")];
+        let f = run_series(80300, &ini);
+        assert_eq!(names(&f), ["date.timezone"]);
+        assert!(f[0].why.contains("CVE-2026-129496"));
+        assert_eq!(names(&run_series(0, &ini)), ["date.timezone"]);
+        assert!(run_series(80600, &ini).is_empty());
+        let mut tz = ini.to_vec();
+        tz.push(("date.timezone", "UTC"));
+        assert!(run_series(80300, &tz).is_empty());
+        for e in ["syslog", "stderr"] {
+            assert!(run_series(80300, &[SAFE_DF, ("log_errors", "1"), ("error_log", e)]).is_empty());
+        }
+        assert!(run_series(80300, &[SAFE_DF, ("log_errors", "1")]).is_empty());
+        assert!(run_series(80300, &[SAFE_DF, ("log_errors", "0"), ("error_log", "/x")]).is_empty());
+    }
+
+    #[test]
+    fn fatal_backtrace_uaf_only_on_85() {
+        let ini = [SAFE_DF, ("fatal_error_backtraces", "1")];
+        let f = run_series(80500, &ini);
+        assert_eq!(names(&f), ["fatal_error_backtraces"]);
+        assert!(f[0].why.contains("CVE-2026-129474"));
+        assert_eq!(names(&run_series(0, &ini)), ["fatal_error_backtraces"]);
+        assert!(run_series(80400, &ini).is_empty());
+        assert!(run_series(80600, &ini).is_empty());
+        let mut a = ini.to_vec();
+        a.push(("zend.exception_ignore_args", "1"));
+        assert!(run_series(80500, &a).is_empty());
+        assert!(run_series(80500, &[SAFE_DF, ("fatal_error_backtraces", "0")]).is_empty());
     }
 
     // All six exec functions disabled, so the baseline has nothing flagged.

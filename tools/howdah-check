@@ -706,6 +706,31 @@ cmd_ini() {
     "historic RCE precondition under CGI/FastCGI with nginx (an upload served as image.jpg/x.php runs as PHP); safe when the web server only passes existing .php files; ignored by mod_php" \
     "cgi.fix_pathinfo = 0 after checking the app does not rely on PATH_INFO"; fi
 
+  # PHP release series as major*10000+minor*100 (0 = unknown); the patch level is
+  # not used, so version-dependent items warn on the series and name the fix.
+  _pv=$(printf '%s\n' "$_info" | sed -n 's/^PHP Version => \([0-9]*\)\.\([0-9]*\)\..*/\1 \2/p' | head -1)
+  _series=0
+  if [ -n "$_pv" ]; then set -- $_pv; _series=$(( $1 * 10000 + $2 * 100 )); fi
+
+  # CVE-2026-129496: empty date.timezone + log_errors on + error_log to a file
+  # (not syslog/stderr); fixed in 8.2.36 / 8.3.37 / 8.4.28 / 8.5.13, 8.6+ unaffected.
+  _tz=$(ini_local "$_info" date.timezone); _le=$(ini_local "$_info" log_errors); _el=$(ini_local "$_info" error_log)
+  case $(printf '%s' "$_el" | tr 'A-Z' 'a-z') in ""|syslog|stderr) _el="" ;; esac
+  if [ -z "$_tz" ] && ini_is_on "$_le" && [ -n "$_el" ] && { [ "$_series" -eq 0 ] || [ "$_series" -lt 80600 ]; }; then
+    ini_flag date.timezone "(empty)" \
+      "a startup error logged to a file can leave a freed timezone cache that a later request reuses (CVE-2026-129496; fixed in PHP 8.2.36, 8.3.37, 8.4.28, 8.5.13)" \
+      "set a valid date.timezone, or upgrade to the patched PHP"
+  fi
+
+  # CVE-2026-129474: PHP 8.5.0-8.5.12 only; fatal_error_backtraces is an 8.5 directive.
+  _fb=$(ini_local "$_info" fatal_error_backtraces)
+  if ini_is_on "$_fb" && ! ini_is_on "$(ini_local "$_info" zend.exception_ignore_args)" \
+    && { [ "$_series" -eq 0 ] || [ "$_series" -eq 80500 ]; }; then
+    ini_flag fatal_error_backtraces "$_fb" \
+      "fatal-error backtraces with argument capture can reference freed memory on PHP 8.5.0-8.5.12 (CVE-2026-129474)" \
+      "set fatal_error_backtraces=0 or zend.exception_ignore_args=1, or upgrade to 8.5.13+"
+  fi
+
   _df=$(ini_local "$_info" disable_functions | tr -d ' ')
   _open=""
   for _fn in exec system passthru shell_exec popen proc_open; do

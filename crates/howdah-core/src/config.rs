@@ -901,8 +901,9 @@ pub struct Config {
     /// `max_execution_time` — so the worker never serves a second request on the
     /// state CVE-2026-109619 leaves behind (§4.7). The producing request still
     /// delivers its own 500. **Off by default** (an operator opt-in for
-    /// unpatched, long-lived-worker deployments). Same gates as `oom_exit`: web
-    /// SAPIs only, off on patched engines (decided by the glue at startup).
+    /// unpatched, long-lived-worker deployments). Web SAPIs only (decided by the
+    /// glue at startup). Unlike `oom_exit` it is NOT disabled on patched engines:
+    /// 8.3.36 / 8.4.27 / 8.5.12 still have the session-shutdown UAF CVE-2026-129481.
     pub recycle_on_fatal: bool,
     /// When `recycle_on_fatal` is on, only LOG a "would-recycle" event instead
     /// of recycling, so an operator can size their uncaught-fatal rate before

@@ -4,9 +4,9 @@
 #
 # No attack request is needed — an ordinary script that throws an uncaught fatal
 # during EXECUTION (an uncaught Error, a parse/compile error, a failed require,
-# max_execution_time). The recycle facet (§4.7) is OFF by default and armed only
-# on UNPATCHED engines (upstream's fix registers the memory_hard_limit_percent
-# ini directive); the dev images span both, so this script probes the engine and
+# max_execution_time). The recycle facet (§4.7) is OFF by default; once enabled it
+# arms on any web SAPI, patched or not (CVE-2026-129481 survives the upstream OOM
+# fix that registers memory_hard_limit_percent). oom_exit stays unpatched-only. The dev images span both, so this script probes the engine and
 # runs the matching branch:
 #
 #   unpatched (5.x, 7.x, 8.0, 8.1, pre-fix 8.2+):
@@ -20,9 +20,9 @@
 #         on this SAPI's flush ordering (recorded below — the §4.7 finding).
 #     OOM and startup fatals keep §4.6's immediate exit even with recycle on; a
 #       warning still reaches PHP unchanged; the facet is OFF by default.
-#   patched (>= 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12):
-#     * the facet stays off: the phpinfo row reads "off (patched ...)" and an
-#       uncaught fatal gets PHP's own behavior (pid unchanged, no line).
+#   patched (>= 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12): the same recycle rows run (the
+#     phpinfo row notes the engine stays exposed to CVE-2026-129481); only OOM
+#     differs: oom_exit stays OFF, so an OOM fatal gets PHP's own behavior.
 #
 # The flush-ordering finding (design §4.7, §5.6): under ENFORCE this records,
 # per SAPI, whether the producing request's 500 reached the client BEFORE the
@@ -88,6 +88,21 @@ cat > "$APP/warn.php" <<'PHP'
 @trigger_error('a user warning', E_USER_WARNING);
 echo "OK pid=", getmypid(), "\n";
 PHP
+cat > "$APP/session_shutdown.php" <<'PHP'
+<?php @file_put_contents('/work/marker/ran', (string) getmypid());
+// Benign fault injection (NOT the CVE-2026-129481 trigger): a userland session
+// handler whose close() raises an uncaught Error. close() runs during request
+// shutdown, so this is a fatal raised from session teardown, the closest benign
+// analog of "a fatal during session stream close".
+$n = function () { return true; };
+session_set_save_handler(
+  $n,
+  function () { throw new RuntimeException('benign fatal at session close'); },
+  function () { return ''; }, $n, $n, $n);
+@session_start();
+$_SESSION['x'] = 1;
+echo "unreachable-as-clean\n";
+PHP
 cat > "$APP/info.php" <<'PHP'
 <?php ob_start(); phpinfo(INFO_MODULES); $h = ob_get_clean();
 if (preg_match('/Recycle after fatal[^<]*<\/td>\s*<td[^>]*>([^<]*)/', $h, $m)) echo "RECROW:", trim($m[1]);
@@ -144,24 +159,6 @@ reset()   { rm -f "$MARK"; : > "$LOG"; }
 has()     { grep -q "$1" "$LOG"; }
 
 # ---- scenarios ---------------------------------------------------------------
-if [ "$PATCHED" = yes ]; then
-  fpm_start -d howdah.config="$WORK/enforce.toml" || { record $S fpm_start FAIL "php-fpm/nginx down"; exit 1; }
-  case "$(rec_row)" in
-    "off (patched"*) record $S phpinfo_off_patched PASS "row: $(rec_row)" ;;
-    *) record $S phpinfo_off_patched FAIL "row: $(rec_row) (want 'off (patched ...)')" ;;
-  esac
-  reset; P0=$(pid_now); reset
-  c=$(get /fatal.php); P1=$(pid_now)
-  if ! has '"rule":"fatal_recycle"' && [ "$P1" = "$P0" ]; then
-    record $S recycle_patched_off PASS "patched engine: PHP's own behavior (http=$c), worker pid $P0 unchanged, no fatal_recycle line"
-  else record $S recycle_patched_off FAIL "http=$c pid=$P0->$P1 log=$(tr -d '\n' < "$LOG" | head -c 160)"; fi
-  for sc in phpinfo_observe observe_no_exit phpinfo_enforce enforce_recycles producing_500_delivery oom_still_exits warning_survives facet_off_default; do
-    record $S "$sc" NOT-RUN "engine is patched; the recycle facet is correctly off here"
-  done
-  fpm_stop
-  echo "== [$PHPVER] fpm-nginx rows done (patched) ==" >&2
-  exit 0
-fi
 
 # -------- unpatched: the facet is off by default --------------------------------
 fpm_start -d howdah.config="$WORK/off.toml" || { record $S fpm_start FAIL "php-fpm/nginx down"; exit 1; }
@@ -204,7 +201,7 @@ esac
 
 # The producer set: an uncaught Error, a parse/compile error, a failed require.
 # Each must recycle the worker (fresh pid on the next request).
-for prod in fatal parse require; do
+for prod in fatal parse require session_shutdown; do
   reset; P0=$(pid_now); reset
   c=$(get "/$prod.php"); CPROD=$c
   P1=$(pid_now)
@@ -241,6 +238,20 @@ case "$RROW" in
   *) record $S producing_500_delivery FAIL "could not read the recycle delivery mode from the phpinfo row: $RROW" ;;
 esac
 
+# Patched engine: the recycle facet is armed (CVE-2026-129481 survives the 109619
+# fix), but §4.6's oom_exit backstop must STAY off there: an OOM fatal gets PHP's
+# own behavior (no out_of_memory line, no exit, no recycle).
+if [ "$PATCHED" = yes ]; then
+  case "$RROW" in
+    *memory_hard_limit_percent*) record $S recycle_armed_on_patched PASS "patched engine, recycle armed: $RROW" ;;
+    *) record $S recycle_armed_on_patched FAIL "patched engine but row: $RROW" ;;
+  esac
+  reset; P0=$(pid_now); reset
+  c=$(get /oom.php); P1=$(pid_now)
+  if ! has '"rule":"out_of_memory"' && ! has '"rule":"fatal_recycle"' && [ "$P1" = "$P0" ]; then
+    record $S oom_exit_gated_off_patched PASS "patched: OOM http=$c, no out_of_memory/fatal_recycle line, pid $P0 unchanged (oom_exit still gated by !patched)"
+  else record $S oom_exit_gated_off_patched FAIL "http=$c pid=$P0->$P1 log=$(tr -d '\n' < "$LOG" | head -c 160)"; fi
+else
 # OOM still immediate-exits even with recycle enforcing.
 reset; P0=$(pid_now); reset
 c=$(get /oom.php); P1=$(pid_now)
@@ -256,6 +267,7 @@ else
   else record $S oom_still_exits FAIL "follow-up http=$A"; fi
 fi
 
+fi
 # A warning still survives untouched.
 reset; P0=$(pid_now); reset
 c=$(get /warn.php); P1=$(pid_now)

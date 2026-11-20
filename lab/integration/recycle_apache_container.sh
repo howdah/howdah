@@ -46,6 +46,21 @@ PHP
 cat > "$DOCROOT/warn.php" <<'PHP'
 <?php @trigger_error('a user warning', E_USER_WARNING); echo "OK pid=", getmypid(), "\n";
 PHP
+cat > "$DOCROOT/session_shutdown.php" <<'PHP'
+<?php @file_put_contents('/dev/null', (string) getmypid());
+// Benign fault injection (NOT the CVE-2026-129481 trigger): a userland session
+// handler whose close() raises an uncaught Error. close() runs during request
+// shutdown, so this is a fatal raised from session teardown, the closest benign
+// analog of "a fatal during session stream close".
+$n = function () { return true; };
+session_set_save_handler(
+  $n,
+  function () { throw new RuntimeException('benign fatal at session close'); },
+  function () { return ''; }, $n, $n, $n);
+@session_start();
+$_SESSION['x'] = 1;
+echo "unreachable-as-clean\n";
+PHP
 cat > "$DOCROOT/info.php" <<'PHP'
 <?php ob_start(); phpinfo(INFO_MODULES); $h = ob_get_clean();
 if (preg_match('/Recycle after fatal[^<]*<\/td>\s*<td[^>]*>([^<]*)/', $h, $m)) echo "RECROW:", trim($m[1]);
@@ -98,18 +113,6 @@ printf 'mode = "block"\n' > "$WORK/off.toml"
 writeini ""   # a startable baseline before the first per-mode restart
 ap_start || { record $S ap_start FAIL "apache down"; exit 1; }
 
-if [ "$PATCHED" = yes ]; then
-  writeini "$WORK/enforce.toml"; ap_restart
-  case "$(rec_row)" in "off (patched"*) record $S phpinfo_off_patched PASS "row: $(rec_row)" ;; *) record $S phpinfo_off_patched FAIL "row: $(rec_row)" ;; esac
-  reset; P0=$(pid_now); reset; c=$(get /fatal.php); P1=$(pid_now)
-  if ! has '"rule":"fatal_recycle"' && [ "$P1" = "$P0" ]; then
-    record $S recycle_patched_off PASS "patched: PHP's own behavior (http=$c), child pid $P0 unchanged, no fatal_recycle line"
-  else record $S recycle_patched_off FAIL "http=$c pid=$P0->$P1 log=$(tr -d '\n' < "$LOG" | head -c 160)"; fi
-  for sc in phpinfo_observe observe_no_exit phpinfo_enforce enforce_recycles_fatal producing_500_delivery oom_still_exits warning_survives; do
-    record $S "$sc" NOT-RUN "engine is patched; the recycle facet is correctly off here"
-  done
-  ap_stop; echo "== [$PHPVER] apache rows done (patched) ==" >&2; exit 0
-fi
 
 # OFF control: PHP's own status for an uncaught fatal (facet off by default).
 writeini ""; ap_restart
@@ -131,7 +134,7 @@ writeini "$WORK/enforce.toml"; ap_restart
 RROW=$(rec_row)
 case "$RROW" in "armed (enforce"*) record $S phpinfo_enforce PASS "row: $RROW" ;; *) record $S phpinfo_enforce FAIL "row: $RROW" ;; esac
 
-for prod in fatal parse require; do
+for prod in fatal parse require session_shutdown; do
   reset; P0=$(pid_now); reset; c=$(get "/$prod.php"); P1=$(pid_now)
   if ! has '"rule":"fatal_recycle"' || ! has '"action":"block"'; then
     record $S "enforce_recycles_$prod" FAIL "$prod.php http=$c but no fatal_recycle block line ($(tr -d '\n' < "$LOG" | head -c 180))"
@@ -156,6 +159,20 @@ case "$RROW" in
   *) record $S producing_500_delivery FAIL "could not read the recycle delivery mode: $RROW" ;;
 esac
 
+# Patched engine: the recycle facet is armed (CVE-2026-129481 survives the 109619
+# fix), but §4.6's oom_exit backstop must STAY off there: an OOM fatal gets PHP's
+# own behavior (no out_of_memory line, no exit, no recycle).
+if [ "$PATCHED" = yes ]; then
+  case "$RROW" in
+    *memory_hard_limit_percent*) record $S recycle_armed_on_patched PASS "patched engine, recycle armed: $RROW" ;;
+    *) record $S recycle_armed_on_patched FAIL "patched engine but row: $RROW" ;;
+  esac
+  reset; P0=$(pid_now); reset
+  c=$(get /oom.php); P1=$(pid_now)
+  if ! has '"rule":"out_of_memory"' && ! has '"rule":"fatal_recycle"' && [ "$P1" = "$P0" ]; then
+    record $S oom_exit_gated_off_patched PASS "patched: OOM http=$c, no out_of_memory/fatal_recycle line, pid $P0 unchanged (oom_exit still gated by !patched)"
+  else record $S oom_exit_gated_off_patched FAIL "http=$c pid=$P0->$P1 log=$(tr -d '\n' < "$LOG" | head -c 160)"; fi
+else
 # OOM still immediate-exits even with recycle enforcing.
 reset; P0=$(pid_now); reset; c=$(get /oom.php); P1=$(pid_now)
 if [ "$c" = 200 ]; then record $S oom_still_exits FAIL "oom returned 200 (no out-of-memory?)"
@@ -166,6 +183,7 @@ else
   else record $S oom_still_exits FAIL "follow-up http=$A"; fi
 fi
 
+fi
 # A warning survives untouched.
 reset; P0=$(pid_now); reset; c=$(get /warn.php); P1=$(pid_now)
 if [ "$c" = 200 ] && ! has '"rule":"fatal_recycle"' && ! has '"rule":"out_of_memory"' && [ "$P1" = "$P0" ]; then

@@ -1013,9 +1013,11 @@ unsafe extern "C" fn minit(type_: c_int, module_number: c_int) -> c_int {
 
 /// Decide the OOM-backstop (§4.6) and recycle-facet (§4.7) gates, arm the shared
 /// `zend_error_cb` decide path, install the hook when either is armed, and set
-/// both phpinfo rows. Web SAPIs only; unpatched engine only (upstream's fix
-/// registers `memory_hard_limit_percent`). The backstop wants `oom_exit` on (the
-/// default); the recycle facet wants `recycle_on_fatal` on (off by default).
+/// both phpinfo rows. Web SAPIs only. The OOM backstop is also unpatched-engine
+/// only (upstream's fix registers `memory_hard_limit_percent`); the recycle
+/// facet is NOT, because the session-shutdown UAF CVE-2026-129481 survives that
+/// fix. The backstop wants `oom_exit` on (the default); the recycle facet wants
+/// `recycle_on_fatal` on (off by default).
 ///
 /// # Safety
 /// Called from `minit` once per process; `CTX` is set.
@@ -1036,9 +1038,16 @@ unsafe fn install_oom_backstop() {
     let patched = sys::howdah_memory_hard_limit_percent_exists() != 0;
     let web = is_backstop_sapi(&sapi);
 
-    // Effective, after the SAPI + patched-engine gates.
+    // Effective gates. The two facets are deliberately gated differently:
+    //  * oom_exit (§4.6): web SAPI AND unpatched engine. The OOM corruption
+    //    (CVE-2026-109618/109619) is fixed where `memory_hard_limit_percent`
+    //    exists, so there is nothing to _exit for.
+    //  * recycle_on_fatal (§4.7): web SAPI only. It is opt-in, and the patch
+    //    probe does NOT imply safety: 8.3.36 / 8.4.27 / 8.5.12 have the directive
+    //    yet remain vulnerable to the session-shutdown UAF CVE-2026-129481 (fixed
+    //    one patch later). An operator who turned it on gets it on every engine.
     let oom_exit_armed = oom_armed_cfg && web && !patched;
-    let recycle_mode = if recycle_armed_cfg && web && !patched {
+    let recycle_mode = if recycle_armed_cfg && web {
         if recycle_observe { oom_filter::RECYCLE_OBSERVE } else { oom_filter::RECYCLE_ENFORCE }
     } else {
         oom_filter::RECYCLE_OFF
@@ -1146,9 +1155,6 @@ fn recycle_facet_label(
     if !web {
         return format!("off (non-web SAPI: {sapi})");
     }
-    if patched {
-        return "off (patched PHP: memory_hard_limit_percent present)".to_string();
-    }
     if observe {
         return format!("armed (observe: logs a would-recycle, does not exit; SAPI {sapi})");
     }
@@ -1157,7 +1163,8 @@ fn recycle_facet_label(
     } else {
         "recycle after teardown (the request keeps its 500)"
     };
-    format!("armed (enforce: {how}; SAPI {sapi})")
+    let note = if patched { "; engine has memory_hard_limit_percent but stays exposed to CVE-2026-129481" } else { "" };
+    format!("armed (enforce: {how}; SAPI {sapi}{note})")
 }
 
 /// The `Include/eval hook` phpinfo row: what the shim reported installed, and
@@ -1294,7 +1301,7 @@ unsafe fn risky_ini_section() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::metadata(p).ok().filter(|m| m.is_dir()).map(|m| m.permissions().mode())
     };
-    let findings = crate::ini_risk::evaluate(&crate::ini_risk::Env { sapi: &sapi, get: &get, dir_mode: &dir_mode });
+    let findings = crate::ini_risk::evaluate(&crate::ini_risk::Env { sapi: &sapi, php_series: (sys::PHP_VERSION_ID as u32) / 100 * 100, get: &get, dir_mode: &dir_mode });
     sys::php_info_print_table_start();
     sys::php_info_print_table_header(2, b"Risky ini settings\0".as_ptr() as *const c_char, b"(read-only; Howdah changes none)\0".as_ptr() as *const c_char);
     if findings.is_empty() {

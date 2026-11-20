@@ -27,7 +27,7 @@ OUT="$REPO_ROOT/packaging/out"
 MINOR="${1:?usage: build-rpm.sh <minor> <x86_64|aarch64> [tarball]}"
 ARCH="${2:?usage: build-rpm.sh <minor> <x86_64|aarch64> [tarball]}"
 TARBALL="${3:-}"
-case "$MINOR" in 5.[456]|7.[0-4]|8.[0-5]) ;; *) echo "FATAL: unsupported PHP minor '$MINOR'" >&2; exit 2 ;; esac
+case "$MINOR" in 5.[456]|7.[0-4]|8.[0-6]) ;; *) echo "FATAL: unsupported PHP minor '$MINOR'" >&2; exit 2 ;; esac
 case "$ARCH" in x86_64|aarch64) ;; *) echo "FATAL: arch must be x86_64|aarch64 (got '$ARCH')" >&2; exit 2 ;; esac
 
 VERSION="${HOWDAH_VERSION:-$(grep -m1 '^version' "$REPO_ROOT/Cargo.toml" | sed -E 's/.*"([^"]+)".*/\1/')}"

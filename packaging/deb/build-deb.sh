@@ -4,7 +4,7 @@
 # rebuilt differently).
 #
 #   packaging/deb/build-deb.sh <minor> <arch> [path/to/release-tarball.tar.gz]
-#     minor  PHP minor, e.g. 7.4 (5.4 .. 8.5)
+#     minor  PHP minor, e.g. 7.4 (5.4 .. 8.6)
 #     arch   amd64 | arm64
 #
 # Input: the per-minor release tarball
@@ -40,7 +40,7 @@ OUT="$REPO_ROOT/packaging/out"
 MINOR="${1:?usage: build-deb.sh <minor> <amd64|arm64> [tarball]}"
 DEBARCH="${2:?usage: build-deb.sh <minor> <amd64|arm64> [tarball]}"
 TARBALL="${3:-}"
-case "$MINOR" in 5.[456]|7.[0-4]|8.[0-5]) ;; *) echo "FATAL: unsupported PHP minor '$MINOR'" >&2; exit 2 ;; esac
+case "$MINOR" in 5.[456]|7.[0-4]|8.[0-6]) ;; *) echo "FATAL: unsupported PHP minor '$MINOR'" >&2; exit 2 ;; esac
 case "$DEBARCH" in
   amd64) RELARCH=x86_64 ;;
   arm64) RELARCH=aarch64 ;;

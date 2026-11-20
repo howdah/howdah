@@ -558,10 +558,112 @@
         "fpm",
         "apache"
       ]
+    },
+    {
+      "minor": "8.6",
+      "version": null,
+      "status": "not-run",
+      "why": "New in 1.7.1. Built NTS from source: the official php:8.6 image is ZTS and Howdah is NTS-only. Not in the multipart matrix above; the 1.7.1 per-CVE lab scripts include PHP 8.6.0 (see the 2026-11-19 CVE table).",
+      "sapis": {},
+      "tested": []
     }
   ],
   "notRunMinors": [
     "5.5"
+  ],
+  "cves": [
+    {
+      "cve": "CVE-2026-129289",
+      "title": "FPM request smuggling, 9.2",
+      "does": "Drains the unread request body at teardown, removing the leftover-body desync precondition; + fastcgi_smuggle signature",
+      "def": "drain on; signature detect",
+      "caveat": "No-op on PHP 5.4 (no SG(post_read)); demonstrated for the malformed/oversize-multipart trigger the advisory describes"
+    },
+    {
+      "cve": "CVE-2026-115560",
+      "title": "session serializer mismatch, 9.2",
+      "does": "Withholds a `|`-bearing upload-progress key from PHP's session tracker so it never reaches unserialize",
+      "def": "neutralize in all modes but off; block=403",
+      "caveat": "Covers the documented injection point (the progress key value), 5.4–8.6"
+    },
+    {
+      "cve": "CVE-2026-128064",
+      "title": "mixed-case HTTPS/FTPS plaintext, 8.2",
+      "does": "Normalizes the scheme so PHP uses TLS",
+      "def": "fix",
+      "caveat": "Redirect hops not re-checked (documented gap); PHP 8.6 already fixed upstream; detect mode reports only"
+    },
+    {
+      "cve": "CVE-2026-129506",
+      "title": "SOAP DTD use-after-free",
+      "does": "Refuses SOAP requests carrying a DTD before the parser sees them",
+      "def": "block",
+      "caveat": "Lab-proven 7.4–8.6; code supports 5.6+; UTF-16 bodies not scanned"
+    },
+    {
+      "cve": "CVE-2026-15353",
+      "title": "SOAP arraySize heap over-read",
+      "does": "Refuses malformed arraySize values",
+      "def": "block",
+      "caveat": "Same guard as above"
+    },
+    {
+      "cve": "CVE-2026-128090",
+      "title": "phar signature downgrade, 7.7",
+      "does": "Requires an OpenSSL signature when a sibling .pubkey is pinned",
+      "def": "block",
+      "caveat": "Plain `include` of a .phar not hooked (never signature-protected); whole-archive-compressed = log-only; PHP 8.6 already fixed upstream"
+    },
+    {
+      "cve": "CVE-2026-129481",
+      "title": "session-shutdown UAF, 8.3–8.5",
+      "does": "Recycles the worker after a shutdown-phase fatal",
+      "def": "opt-in (recycle_on_fatal)",
+      "caveat": "Partial: opt-in; covers 8.3.0–8.3.36 / 8.4.0–8.4.27 / 8.5.0–8.5.12"
+    },
+    {
+      "cve": "CVE-2026-129496",
+      "title": "timezone-cache UAF",
+      "does": "Startup posture warning (ini_risk)",
+      "def": "warn",
+      "caveat": "Flagged only, not blocked (narrow timing-dependent UAF)"
+    },
+    {
+      "cve": "CVE-2026-129474",
+      "title": "magic-method backtrace UAF, 8.5",
+      "does": "Startup posture warning (ini_risk)",
+      "def": "warn",
+      "caveat": "Flagged only"
+    },
+    {
+      "cve": "CVE-2026-129292",
+      "title": "FPM status-page XSS",
+      "does": "Logs requests that plant HTML in the status page",
+      "def": "detect",
+      "caveat": "Detect-only: php-fpm writes the scoreboard before any extension runs, so blocking can't un-plant it"
+    }
+  ],
+  "cvesNotCovered": [
+    {
+      "cve": "CVE-2026-129538",
+      "why": "php-cgi PATH_INFO: runs before any extension"
+    },
+    {
+      "cve": "CVE-2026-129291",
+      "why": "FPM master privilege escalation: post-exploitation"
+    },
+    {
+      "cve": "CVE-2026-127960",
+      "why": "folded response headers"
+    },
+    {
+      "cve": "CVE-2026-126714",
+      "why": "needs a ZTS build; Howdah is NTS-only"
+    },
+    {
+      "cve": "CVE-2026-129182, CVE-2026-129501, CVE-2026-129438, CVE-2026-48841",
+      "why": "the 8.4/8.5-only bugs"
+    }
   ],
   "runtimeSource": "lab/integration/runtime-results.tsv",
   "runtimes": [

@@ -68,7 +68,7 @@ test('rules section covers the catalog with matching severities and a layer each
     assert.ok(r, c.name + ' missing from schema');
     assert.equal(r.severity, c.severity, c.name);
     assert.ok(RULE_LAYER[c.name], c.name + ' has no layer');
-    assert.equal(state['rules.' + c.name], 'inherit');
+    assert.equal(state['rules.' + c.name], c.name === 'fastcgi_smuggle' ? 'detect' : 'inherit');
   }
 });
 

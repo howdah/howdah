@@ -93,7 +93,7 @@ const aptLines = [
 >
   <div class="hero">
     <div class="wrap">
-      <p class="eyebrow">Open source &middot; defensive &middot; in-process &middot; PHP 5.4 to 8.5</p>
+      <p class="eyebrow">Open source &middot; defensive &middot; in-process &middot; PHP 5.4 to 8.6</p>
       <h1>Hardening that loads <em>inside</em> PHP — even on the end-of-life versions most tools dropped.</h1>
       <p class="lede">Howdah is a Rust extension that runs in the PHP worker, so it sees a request <em>as PHP parses it</em>, before any of your code runs. That is the only place you can refuse an upload-part flood — the shape of the PHP2Shell attack — before it exhausts memory. It installs with one <code>extension=</code> line and runs on PHP 5.4 through 8.5, including the EOL branches that will never get the official fix.</p>
       <p class="fine">No agent, no sidecar, no telemetry, no cloud. Four layers, log-first by default: it recognizes and refuses abusive requests on the versions tested in the <a href="/coverage/">coverage table</a> &mdash; and nothing else.</p>
@@ -340,7 +340,7 @@ const aptLines = [
 
   <section id="versions">
     <div class="wrap">
-      <h2>Version support: PHP 5.4 to 8.5</h2>
+      <h2>Version support: PHP 5.4 to 8.6</h2>
       <p>Howdah ships one build per PHP minor version. A version marked <strong>Tested</strong> has a passing lab result{ranDate && <> (matrix run {ranDate}{coverage.matrixVersion && <> on Howdah {coverage.matrixVersion}</>})</>}; a version marked <strong>Expected</strong> shares a generation's code path with a tested version but has not been independently run, so it is not claimed as a test result. The <a href="/coverage/">coverage page</a> has the full per-server-type detail.</p>
       <ul class="matrix" aria-label="PHP version support">
         {rows.map((r: any) => (

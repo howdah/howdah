@@ -115,6 +115,31 @@ function cell(sapi: any) {
         </>
       ))}
 
+      <h2 id="cves-2026-11-19">PHP 2026-11-19 CVEs (1.7.1)</h2>
+      <p>The 1.7.1 wave answers the PHP security release of 2026-11-19. Each row says what Howdah does, its shipped default and the honest caveat; none is stronger than its caveat. PHP 8.6 is a new supported version: it is built NTS from source, because the official <code>php:8.6</code> image is ZTS and Howdah is NTS-only.</p>
+      <div class="tablewrap" tabindex="0" role="region" aria-label="PHP 2026-11-19 CVE coverage (scrolls sideways on narrow screens)">
+        <table>
+          <caption class="sr-only">Per-CVE coverage for the PHP 2026-11-19 security release</caption>
+          <thead>
+            <tr><th scope="col">CVE</th><th scope="col">What Howdah does</th><th scope="col">Default</th><th scope="col">Honest caveat</th></tr>
+          </thead>
+          <tbody>
+            {coverage.cves.map((c: any) => (
+              <tr>
+                <th scope="row">{c.cve}<br /><small style="margin:0">{c.title}</small></th>
+                <td>{c.does}</td>
+                <td>{c.def}</td>
+                <td>{c.caveat}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <h3 class="lim-group">Not covered</h3>
+      <ul class="limits limits-no">
+        {coverage.cvesNotCovered.map((c: any) => <li><strong>{c.cve}</strong> <p>{c.why}</p></li>)}
+      </ul>
+
       <h2 id="limits">Honest limits</h2>
       <p>What this page does not show, and what Howdah cannot do. Each card leads with the point; open &ldquo;Details&rdquo; for the specifics.</p>
 

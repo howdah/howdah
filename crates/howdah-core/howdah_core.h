@@ -652,6 +652,18 @@ char *howdah_take_sink_log_line(struct howdah_ctx *ctx);
 int32_t howdah_selftest(struct howdah_ctx *ctx);
 
 /**
+ * CVE-2026-115560: report that the session.upload_progress field value held a
+ * serializer-breaking byte. Returns HOWDAH_ALLOW when the rule is off or
+ * excepted (the glue chains the event normally), otherwise HOWDAH_LOG (the glue
+ * withholds the event from session) or HOWDAH_BLOCK (withhold and refuse).
+ * The value is never passed to the core. Panic or NULL ctx returns 0.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_upload_progress_abuse(struct howdah_ctx *ctx);
+
+/**
  * Free a string from `howdah_take_log_line`. NULL is a no-op.
  *
  * # Safety

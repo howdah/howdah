@@ -755,12 +755,12 @@ unsafe fn register_ini(module_number: c_int) {
 
 /// Read a registered ini string by name (name includes a trailing NUL).
 /// Returns `None` when unset or empty.
-unsafe fn ini_string(name: &[u8]) -> Option<String> {
+pub(crate) unsafe fn ini_string(name: &[u8]) -> Option<String> {
     #[cfg(not(feature = "php5"))]
     let nlen = name.len() - 1; // php7/php8: strlen, no NUL
     #[cfg(feature = "php5")]
     let nlen = name.len(); // php5 hash keys include the NUL
-    let p = sys::zend_ini_string(name.as_ptr() as _, nlen as _, 0);
+    let p = sys::zend_ini_string(name.as_ptr() as _, nlen as _, Default::default());
     if p.is_null() {
         return None;
     }

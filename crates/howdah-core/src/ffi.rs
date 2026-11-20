@@ -1195,6 +1195,14 @@ impl howdah_ctx {
         self.stash(RuleId::SelfTest, Action::Log, describe(RuleId::SelfTest));
     }
 
+    /// CVE-2026-115560: an upload-progress field value carried `|`. Resolves
+    /// the rule's action (excepted/off -> Allow). Anything else means the glue
+    /// withholds the event from session; Block additionally refuses at END.
+    fn upload_progress_abuse(&mut self) -> Action {
+        let hit = crate::limits::upload_progress_abuse_hit();
+        self.apply(Some(&hit))
+    }
+
     fn malformed(&mut self) {
         let hit = LimitHit {
             rule: RuleId::MalformedMultipart,
@@ -2226,6 +2234,26 @@ pub unsafe extern "C" fn howdah_selftest(ctx: *mut howdah_ctx) -> i32 {
     r.unwrap_or_else(|_| {
         report_panic(ctx);
         code((*ctx).worst)
+    })
+}
+
+/// CVE-2026-115560: report that the session.upload_progress field value held a
+/// serializer-breaking byte. Returns HOWDAH_ALLOW when the rule is off or
+/// excepted (the glue chains the event normally), otherwise HOWDAH_LOG (the glue
+/// withholds the event from session) or HOWDAH_BLOCK (withhold and refuse).
+/// The value is never passed to the core. Panic or NULL ctx returns 0.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_upload_progress_abuse(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| code((*ctx).upload_progress_abuse())));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
     })
 }
 

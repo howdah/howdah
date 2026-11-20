@@ -380,6 +380,26 @@ pub fn is_selftest_name(name: &[u8]) -> bool {
     name == SELFTEST_FIELD
 }
 
+/// CVE-2026-115560 (session serializer mismatch): PHP's `session.upload_progress`
+/// tracker builds a session KEY from `prefix + <the PHP_SESSION_UPLOAD_PROGRESS
+/// field's VALUE>`. A `|` in that value is the `php` session handler's
+/// key/value delimiter, so on a `php_serialize`/`php_binary` write followed by
+/// a `php` read it smuggles a serialized payload into `unserialize()`. A
+/// legitimate progress key (a UUID, a counter, a token) never contains `|`.
+/// The glue reads the value only to test this predicate; it is never logged.
+pub fn upload_progress_value_unsafe(value: &[u8]) -> bool {
+    value.contains(&b'|')
+}
+
+/// The hit recorded for a withheld upload-progress key (fixed reason, no value).
+pub fn upload_progress_abuse_hit() -> LimitHit {
+    LimitHit {
+        rule: RuleId::UploadProgressAbuse,
+        severity: RuleId::UploadProgressAbuse.severity(),
+        detail: String::new(),
+    }
+}
+
 /// The hit recorded for the self-test marker (always `Standard`, never critical).
 pub fn selftest_hit() -> LimitHit {
     LimitHit {
@@ -905,6 +925,17 @@ mod tests {
         assert_eq!(RuleId::MaxParts.severity(), Severity::Critical);
         assert_eq!(RuleId::MaxFiles.severity(), Severity::Critical);
         assert_eq!(RuleId::MaxPartHeaders.severity(), Severity::Critical);
+    }
+
+    #[test]
+    fn upload_progress_pipe_predicate() {
+        assert!(upload_progress_value_unsafe(b"x|a:1:{}"));
+        assert!(upload_progress_value_unsafe(b"|"));
+        assert!(upload_progress_value_unsafe(b"abc|"));
+        for ok in ["", "550e8400-e29b-41d4-a716-446655440000", "abc123", "a!b", "a:b;c"] {
+            assert!(!upload_progress_value_unsafe(ok.as_bytes()), "{ok}");
+        }
+        assert_eq!(upload_progress_abuse_hit().rule, RuleId::UploadProgressAbuse);
     }
 
     #[test]

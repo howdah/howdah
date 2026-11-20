@@ -577,7 +577,7 @@
       "title": "FPM request smuggling, 9.2",
       "does": "Drains the unread request body at teardown, removing the leftover-body desync precondition; + fastcgi_smuggle signature",
       "def": "drain on; signature detect",
-      "caveat": "No-op on PHP 5.4 (no SG(post_read)); demonstrated for the malformed/oversize-multipart trigger the advisory describes"
+      "caveat": "No-op on PHP 5.4 (no SG(post_read)); demonstrated for the malformed/oversize-multipart trigger the advisory describes. The fastcgi_smuggle signature logs by default; opt into block only after validating against your traffic (raw binary bodies can rarely match)"
     },
     {
       "cve": "CVE-2026-115560",
@@ -598,14 +598,14 @@
       "title": "SOAP DTD use-after-free",
       "does": "Refuses SOAP requests carrying a DTD before the parser sees them",
       "def": "block",
-      "caveat": "Lab-proven 7.4–8.6; code supports 5.6+; UTF-16 bodies not scanned"
+      "caveat": "Lab-proven on PHP 7.4/8.0/8.1/8.3/8.6; verified hook-no-op where the dev image lacks ext-soap (5.6/7.0/8.5); code supports 5.6+. Block refuses before the parser; handle() is assumed terminal. UTF-16 bodies not scanned; compressed SOAP bodies on PHP 5.x are not inspected (gap)"
     },
     {
       "cve": "CVE-2026-15353",
       "title": "SOAP arraySize heap over-read",
       "does": "Refuses malformed arraySize values",
       "def": "block",
-      "caveat": "Same guard as above"
+      "caveat": "Same guard and caveats as above (lab-proven on 7.4/8.0/8.1/8.3/8.6; code supports 5.6+; handle() assumed terminal; compressed bodies on PHP 5.x not inspected)"
     },
     {
       "cve": "CVE-2026-128090",

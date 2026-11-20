@@ -9,7 +9,7 @@ tool: it recognizes and blocks abusive input. It is not a hacking tool, and it
 is not a replacement for patching PHP. Upgrade when you can; use Howdah when you
 can't, or until you can.
 
-> **Status: 1.7.0 is released** — Layer 1 (request-parsing limits), Layer 2 (input
+> **Status: 1.7.1 is released** — Layer 1 (request-parsing limits), Layer 2 (input
 > inspection, log-only), Layer 3 (sink hardening, log-first) and Layer 4
 > (after-breach behaviour, log-first). 1.7 adds a wave of new detections across
 > all four layers. On and enforcing by default: a Layer 2 signature for php-cgi
@@ -24,8 +24,8 @@ can't, or until you can.
 > (CVE-2026-109618) with a last-resort backstop that logs and exits the worker
 > cleanly, plus preventive Layer-1 multipart limits; against a vulnerable PHP
 > build the PHP2Shell exploit can no longer land with Howdah active. Signed
-> tarballs for PHP 5.4 to 8.5 are on the
-> [v1.7.0 release page](https://github.com/howdah/howdah/releases/tag/v1.7.0).
+> tarballs for PHP 5.4 to 8.6 are on the
+> [v1.7.1 release page](https://github.com/howdah/howdah/releases/tag/v1.7.1).
 > See the [changelog](CHANGELOG.md).
 > Defaults may still change.
 > Start in `detect` mode. Not every PHP version has been tested:

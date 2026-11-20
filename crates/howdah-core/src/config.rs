@@ -1392,7 +1392,7 @@ self_test = "off"
         assert_eq!(c.rule_modes.get(&RuleId::FastcgiSmuggle), Some(&Mode::Block));
         // Global off stays absolute: no default override re-arms the rule.
         let c = Config::from_toml("mode = \"off\"").unwrap();
-        assert!(c.rule_modes.get(&RuleId::FastcgiSmuggle).is_none());
+        assert!(!c.rule_modes.contains_key(&RuleId::FastcgiSmuggle));
     }
 
     #[test]

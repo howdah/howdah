@@ -536,9 +536,9 @@ fn has_html_meta(v: Option<&[u8]>) -> bool {
 /// Which of the three scoreboard-visible fields contain `<`, `>`, `"`, `'` or
 /// `&`. Returns a bitmask of `STATUS_FIELD_*` (0 = clean). Pure, linear.
 pub fn status_injection_fields(auth_user: Option<&[u8]>, method: Option<&[u8]>, script: Option<&[u8]>) -> u8 {
-    (has_html_meta(auth_user) as u8) * STATUS_FIELD_USER
-        | (has_html_meta(method) as u8) * STATUS_FIELD_METHOD
-        | (has_html_meta(script) as u8) * STATUS_FIELD_SCRIPT
+    ((has_html_meta(auth_user) as u8) * STATUS_FIELD_USER)
+        | ((has_html_meta(method) as u8) * STATUS_FIELD_METHOD)
+        | ((has_html_meta(script) as u8) * STATUS_FIELD_SCRIPT)
 }
 
 /// Fixed, value-free reason for a non-zero field mask.

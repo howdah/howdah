@@ -5,6 +5,11 @@ All notable changes to Howdah are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **PHP 8.6 support.** PHP 8.6 (released 2026-11-19) is now a supported and tested
+  version: lab image, cross-version matrix, CI, release packaging (source-header
+  build pinned to php-8.6.0) and the apt/yum repos cover 5.4 through 8.6.
+
 ## [1.7.0] - 2026-10-26
 
 ### Added

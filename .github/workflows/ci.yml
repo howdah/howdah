@@ -73,7 +73,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        minor: ['5.4', '5.6', '7.4', '8.4']
+        minor: ['5.4', '5.6', '7.4', '8.4', '8.6']
     steps:
       - uses: actions/checkout@v4
       - name: Build aarch64 tarball
@@ -195,6 +195,7 @@ jobs:
           - { php: '5.6', feature: php5, reduced: true }
           - { php: '7.3', feature: php7, reduced: true }
           - { php: '8.4', feature: php8, reduced: true }
+          - { php: '8.6', feature: php8, reduced: true }
           - { php: '5.4', feature: php5, reduced: false }
           - { php: '7.4', feature: php7, reduced: false }
           - { php: '8.1', feature: php8, reduced: false }

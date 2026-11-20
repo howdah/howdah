@@ -19,7 +19,7 @@
 //! * A ctx must not be used from two threads at once (PHP workers each own one).
 #![allow(non_camel_case_types)]
 
-use std::ffi::{c_char, CString};
+use std::ffi::{c_char, c_void, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -93,6 +93,11 @@ pub const HOWDAH_SINK_ASSERT: i32 = 9;
 pub const HOWDAH_SINK_CALLBACK: i32 = 10;
 pub const HOWDAH_SINK_XML: i32 = 11;
 pub const HOWDAH_SINK_TLS: i32 = 12;
+/// Mixed-case `HTTPS://`/`FTPS://` scheme normalization (CVE-2026-128064).
+pub const HOWDAH_SINK_SCHEME_CASE: i32 = 13;
+/// Phar signature downgrade with a pinned `.pubkey` (CVE-2026-128090). `arg` is
+/// the glue-computed verdict token `downgrade` / `indeterminate`.
+pub const HOWDAH_SINK_PHAR_SIG: i32 = 14;
 
 // SSRF event kinds (`howdah_sink_check_ssrf_kind_at`). RANGE is the original
 // check-time reserved-range verdict; REBIND judges the address a connection
@@ -250,6 +255,11 @@ pub struct howdah_ctx {
     /// clean 403; truncating there leaves the FastCGI body unread and resets the
     /// client. Reset by `scan_post_begin`.
     post_scan_blocked: bool,
+    /// CVE-2026-129289: FastCGI-framing detector for bodies the multipart scanner
+    /// does not frame (urlencoded, JSON, raw): every byte is eligible there.
+    fcgi_scan: crate::fcgi_smuggle::FcgiScan,
+    /// The `fastcgi_smuggle` hit was already folded this request.
+    fcgi_reported: bool,
     request_id: String,
     meta: Meta,
     worst: Action,
@@ -286,6 +296,7 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::ParseMemoryBudget => "body exceeds parse memory budget",
         RuleId::MalformedMultipart => "malformed or truncated multipart body",
         RuleId::UploadProgressAbuse => "upload progress abuse",
+        RuleId::FastcgiSmuggle => "fastcgi request smuggling payload in the request body",
         RuleId::SelfTest => "self test",
         RuleId::MaxInputVars => "too many input variables",
         RuleId::MaxInputNestingDepth => "input array nesting too deep",
@@ -296,6 +307,7 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::PathTraversal => "possible path traversal in request input",
         RuleId::CommandInjection => "possible command injection in request input",
         RuleId::CgiArgInjection => "query string shaped like php-cgi command-line arguments",
+        RuleId::StatusInjection => "fpm status page: request method, user or script contains HTML metacharacters",
         RuleId::CommandExec => "command execution sink called with a disallowed command",
         RuleId::Include => "file include sink called with a disallowed path",
         RuleId::Eval => "eval sink invoked",
@@ -317,6 +329,9 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::DangerousCallback => "string callback naming a command or code execution function",
         RuleId::Xxe => "XML external entity or entity bomb parsed with a dangerous libxml flag",
         RuleId::TlsVerify => "curl TLS certificate verification disabled",
+        RuleId::TlsSchemeCase => "mixed-case https/ftps URL scheme that PHP would send in plaintext",
+        RuleId::PharSignature => "phar archive signature downgraded to a keyless digest while an OpenSSL public key is pinned",
+        RuleId::SoapRequest => "soap request with a prolog DTD or a malformed array dimension",
         RuleId::OutOfMemory => "worker ended on out-of-memory",
         RuleId::StartupFatal => "fatal error during request startup",
         RuleId::FatalRecycle => "worker recycled after a poisoning-class fatal",
@@ -368,6 +383,8 @@ impl howdah_ctx {
             post_max_size: 0,
             memory_limit: -1,
             post_scan_blocked: false,
+            fcgi_scan: crate::fcgi_smuggle::FcgiScan::new(),
+            fcgi_reported: false,
             request_id: new_request_id(),
             meta: Meta::default(),
             worst: Action::Allow,
@@ -580,6 +597,33 @@ impl howdah_ctx {
             return Action::Allow;
         }
         let reason = "php-cgi argument-injection pattern in query string".to_string();
+        let hit = LimitHit { rule, severity: Severity::Standard, detail: reason.clone() };
+        self.apply_with_mode(&hit, mode, &std::collections::BTreeMap::new(), &reason)
+    }
+
+    /// Layer-2 FPM status-page HTML injection check (CVE-2026-129292) on the
+    /// three scoreboard-visible fields. Values are classified, never logged:
+    /// the reason is a fixed per-field-class string. Mode `[inspect]
+    /// status_injection` (default `detect`).
+    fn inspect_status(&mut self, user: Option<&[u8]>, method: Option<&[u8]>, script: Option<&[u8]>) -> Action {
+        #[cfg(test)]
+        if tests::FORCE_PANIC.with(|f| f.get()) {
+            panic!("injected test panic");
+        }
+        let mode = self.config.inspect.status_injection_mode(self.config.mode);
+        if mode == crate::config::Mode::Off {
+            return Action::Allow;
+        }
+        let mask = crate::inspect::status_injection_fields(user, method, script);
+        if mask == 0 {
+            return Action::Allow;
+        }
+        let rule = RuleId::StatusInjection;
+        if let Some(m) = self.excepted(rule, None, None, None) {
+            self.note_excepted_request(rule, &m);
+            return Action::Allow;
+        }
+        let reason = crate::inspect::status_injection_reason(mask);
         let hit = LimitHit { rule, severity: Severity::Standard, detail: reason.clone() };
         self.apply_with_mode(&hit, mode, &std::collections::BTreeMap::new(), &reason)
     }
@@ -832,6 +876,32 @@ impl howdah_ctx {
             // `arg` is the option token the shim passes ("verifypeer" /
             // "verifyhost"), not user data.
             SinkId::Tls => (RuleId::TlsVerify, legacy::tls_reason(arg).map(|r| format!("{r} via {n}"))),
+            // `arg` is the full URL (scanned, never logged); `n` is the lowercased
+            // scheme name. Fixed reason: no URL, host or credential.
+            SinkId::SchemeCase => (
+                RuleId::TlsSchemeCase,
+                (crate::sinks::scheme::mixed_case_tls_scheme_len(arg) > 0).then(|| {
+                    if sinks.scheme_case_mode(self.config.mode) == crate::config::SchemeCaseMode::Fix {
+                        format!("mixed-case {n} URL scheme lowercased so TLS is used via fopen wrapper")
+                    } else {
+                        format!("mixed-case {n} URL scheme sent in plaintext (detect only, not fixed) via fopen wrapper")
+                    }
+                }),
+            ),
+            // `arg` is a glue-computed token, never the path or archive bytes:
+            // `downgrade` (blockable) or `indeterminate` (log only).
+            SinkId::PharSig => (
+                RuleId::PharSignature,
+                match arg {
+                    b"downgrade" => Some(format!(
+                        "signature-downgrade: keyless signature on a phar with a pinned .pubkey via {n}"
+                    )),
+                    b"indeterminate" => Some(format!(
+                        "signature-indeterminate: signature type unreadable on a phar with a pinned .pubkey, not blocked via {n}"
+                    )),
+                    _ => None,
+                },
+            ),
             SinkId::Unserialize => {
                 let scan = unserialize_classes(arg);
                 let allow = &sinks.unserialize.allow_classes;
@@ -855,7 +925,7 @@ impl howdah_ctx {
         }
         // tls is detect-only in this release: a block mode is logged as log.
         let action = match mode {
-            Mode::Block if sink != SinkId::Tls => Action::Block,
+            Mode::Block if sink != SinkId::Tls && !(sink == SinkId::PharSig && arg == b"indeterminate") => Action::Block,
             _ => Action::Log,
         };
         self.sink_log = Some(self.record(rule, action, reason));
@@ -945,6 +1015,49 @@ impl howdah_ctx {
             reason: reason.to_string(),
         };
         self.sink_log = Some(log_line(&rec));
+        action
+    }
+
+    /// Layer-3 SOAP request guard (CVE-2026-129506, CVE-2026-15353). `xml` is
+    /// the raw request body about to reach `ext/soap`; it is scanned, never
+    /// logged (only the FIXED reason string is). `truncated` says the caller
+    /// capped an oversized body and scanned only the prefix. On a dangerous
+    /// shape the verdict is resolved against `[sinks.soap] mode` (default
+    /// `block`); a block records the hit and returns Block so the glue delivers
+    /// a clean 403 instead of calling SOAP. Reuses the per-call `sink_log` slot.
+    fn soap_check(&mut self, xml: &[u8], truncated: bool) -> Action {
+        #[cfg(test)]
+        if tests::FORCE_PANIC.with(|f| f.get()) {
+            panic!("injected test panic");
+        }
+        let mode = self.config.sinks.soap_mode(self.config.mode);
+        if mode == Mode::Off {
+            return Action::Allow;
+        }
+        let Some(kind) = crate::sinks::soap::soap_request_verdict(xml) else {
+            return Action::Allow;
+        };
+        let rule = RuleId::SoapRequest;
+        // Scoped exception: URI or client facets only (no script/param at the
+        // SOAP entry point).
+        if let Some(m) = self.excepted(rule, None, None, None) {
+            self.note_excepted_sink(rule, &m);
+            return Action::Allow;
+        }
+        let action = match mode {
+            Mode::Block => Action::Block,
+            _ => Action::Log,
+        };
+        let what = match kind {
+            crate::sinks::soap::REASON_DTD => {
+                "soap request (dtd): DTD/DOCTYPE in the prolog refused before ext/soap (CVE-2026-129506)"
+            }
+            _ => {
+                "soap request (array dimensions): malformed SOAP-ENC arraySize refused before ext/soap (CVE-2026-15353)"
+            }
+        };
+        let reason = if truncated { format!("{what}; scanned a capped prefix") } else { what.to_string() };
+        self.sink_log = Some(self.record(rule, action, reason));
         action
     }
 
@@ -1195,6 +1308,14 @@ impl howdah_ctx {
         self.stash(RuleId::SelfTest, Action::Log, describe(RuleId::SelfTest));
     }
 
+    /// CVE-2026-115560: an upload-progress field value carried `|`. Resolves
+    /// the rule's action (excepted/off -> Allow). Anything else means the glue
+    /// withholds the event from session; Block additionally refuses at END.
+    fn upload_progress_abuse(&mut self) -> Action {
+        let hit = crate::limits::upload_progress_abuse_hit();
+        self.apply(Some(&hit))
+    }
+
     fn malformed(&mut self) {
         let hit = LimitHit {
             rule: RuleId::MalformedMultipart,
@@ -1264,6 +1385,8 @@ impl howdah_ctx {
         self.post_max_size = post_max_size;
         self.memory_limit = memory_limit;
         self.post_scan_blocked = false;
+        self.fcgi_scan = crate::fcgi_smuggle::FcgiScan::new();
+        self.fcgi_reported = false;
     }
 
     /// §4.2: feed `chunk` raw body bytes to the byte-stream scanner and fold any
@@ -1287,7 +1410,13 @@ impl howdah_ctx {
         }
         let pms = self.post_max_size;
         let Some(state) = self.post_scan.as_mut() else {
-            return Action::Allow; // not multipart / no boundary: never truncate
+            // Not multipart / no boundary: never truncate. Every byte of such a
+            // body is eligible for the CVE-2026-129289 framing check.
+            self.fcgi_scan.feed(chunk);
+            if self.fcgi_scan.hit() {
+                self.report_fcgi_smuggle();
+            }
+            return Action::Allow;
         };
         let res = state.feed(chunk);
         let limits = &self.config.limits;
@@ -1306,6 +1435,9 @@ impl howdah_ctx {
         hits.push(limits.check_fed_bytes(state.total_fed_bytes()));
         // Gap B (§4.3): bytes actually read vs PHP's effective post_max_size.
         hits.push(limits.check_post_bytes(state.total_fed_bytes(), pms));
+        if state.fcgi_smuggle() {
+            self.report_fcgi_smuggle();
+        }
         // Every hit folds into `worst` (verdict + fail-closed), but only an
         // UNBOUNDED-growth limit stops the body: a bounded one (max_parts, etc.)
         // the scanner also detects must still drain for a clean 403.
@@ -1330,6 +1462,17 @@ impl howdah_ctx {
             Action::Block
         } else {
             Action::Allow
+        }
+    }
+
+    /// CVE-2026-129289: fold the `fastcgi_smuggle` hit once per request. It never
+    /// stops the read (see `rule_stops_the_read`); the verdict is delivered at the
+    /// end through the existing refusal path.
+    fn report_fcgi_smuggle(&mut self) {
+        if !self.fcgi_reported {
+            self.fcgi_reported = true;
+            let h = crate::limits::fastcgi_smuggle_hit();
+            self.apply(Some(&h));
         }
     }
 
@@ -1495,6 +1638,8 @@ pub unsafe extern "C" fn howdah_request_begin(
         };
         c.state = Some(MultipartState::new(&b));
         c.post_scan = None; // set by howdah_scan_post_begin once the boundary is known
+        c.fcgi_scan = crate::fcgi_smuggle::FcgiScan::new();
+        c.fcgi_reported = false;
         c.post_max_size = 0;
         c.memory_limit = -1;
         c.request_id = new_request_id();
@@ -1849,6 +1994,8 @@ pub unsafe extern "C" fn howdah_sink_check(
         HOWDAH_SINK_CALLBACK => SinkId::Callback,
         HOWDAH_SINK_XML => SinkId::Xml,
         HOWDAH_SINK_TLS => SinkId::Tls,
+        HOWDAH_SINK_SCHEME_CASE => SinkId::SchemeCase,
+        HOWDAH_SINK_PHAR_SIG => SinkId::PharSig,
         _ => return HOWDAH_ALLOW,
     };
     let r = catch_unwind(AssertUnwindSafe(|| {
@@ -2032,6 +2179,70 @@ pub unsafe extern "C" fn howdah_sink_ssrf_armed(ctx: *mut howdah_ctx) -> i32 {
     .unwrap_or(0)
 }
 
+/// Random-access read callback for `howdah_phar_sig_classify`: fill `buf[..len]`
+/// from absolute offset `off`; 1 on a full read, 0 otherwise.
+pub type howdah_phar_read_t = Option<unsafe extern "C" fn(*mut c_void, u64, *mut u8, usize) -> i32>;
+
+/// Classify the signature type a phar archive declares (CVE-2026-128090): 0 an
+/// OpenSSL type, 1 a keyless digest (downgrade candidate), 2 indeterminate
+/// (compressed, unreadable or not a phar). Only reads through `read`; never
+/// verifies or executes anything. NULL `read` or a panic is 2.
+///
+/// # Safety
+/// `read` must be safe to call with `ctx` for any in-range offset/len.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_phar_sig_classify(size: u64, read: howdah_phar_read_t, ctx: *mut c_void) -> i32 {
+    let Some(read) = read else { return 2 };
+    catch_unwind(AssertUnwindSafe(|| {
+        let mut rd = |off: u64, buf: &mut [u8]| read(ctx, off, buf.as_mut_ptr(), buf.len()) == 1;
+        match crate::sinks::phar_sig::classify(size, &mut rd) {
+            crate::sinks::phar_sig::PharSig::OpenSsl(_) => 0,
+            crate::sinks::phar_sig::PharSig::Keyless(_) => 1,
+            crate::sinks::phar_sig::PharSig::Indeterminate => 2,
+        }
+    }))
+    .unwrap_or(2)
+}
+
+/// `[sinks.scheme_case]` mode for the stream-wrapper proxy: 0 off, 1 detect
+/// (log only, PHP still goes plaintext), 2 fix (lowercase the scheme). NULL ctx
+/// or panic is 0.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_scheme_case_mode(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = &*ctx;
+        match c.config.sinks.scheme_case_mode(c.config.mode) {
+            crate::config::SchemeCaseMode::Off => 0,
+            crate::config::SchemeCaseMode::Detect => 1,
+            crate::config::SchemeCaseMode::Fix => 2,
+        }
+    }))
+    .unwrap_or(0)
+}
+
+/// Length of the scheme token if `url` is a mixed-case `https://`/`ftps://`
+/// URL (so the caller lowercases that many leading bytes of a COPY), else 0.
+/// Pure; NULL url is 0.
+///
+/// # Safety
+/// `url` NULL or valid for `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_scheme_case_len(url: *const c_char, len: usize) -> usize {
+    if url.is_null() || len == 0 {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        crate::sinks::scheme::mixed_case_tls_scheme_len(std::slice::from_raw_parts(url as *const u8, len))
+    }))
+    .unwrap_or(0)
+}
+
 /// 1 iff the given sink (`HOWDAH_SINK_*`) is armed (effective mode != off);
 /// NULL ctx, unknown sink or panic is 0. Never stashes a log line. Used by the
 /// glue to decide, once per process, whether to install the phar/ssrf hooks.
@@ -2057,6 +2268,8 @@ pub unsafe extern "C" fn howdah_sink_armed(ctx: *mut howdah_ctx, sink: i32) -> i
         HOWDAH_SINK_CALLBACK => SinkId::Callback,
         HOWDAH_SINK_XML => SinkId::Xml,
         HOWDAH_SINK_TLS => SinkId::Tls,
+        HOWDAH_SINK_SCHEME_CASE => SinkId::SchemeCase,
+        HOWDAH_SINK_PHAR_SIG => SinkId::PharSig,
         _ => return 0,
     };
     catch_unwind(AssertUnwindSafe(|| {
@@ -2229,6 +2442,26 @@ pub unsafe extern "C" fn howdah_selftest(ctx: *mut howdah_ctx) -> i32 {
     })
 }
 
+/// CVE-2026-115560: report that the session.upload_progress field value held a
+/// serializer-breaking byte. Returns HOWDAH_ALLOW when the rule is off or
+/// excepted (the glue chains the event normally), otherwise HOWDAH_LOG (the glue
+/// withholds the event from session) or HOWDAH_BLOCK (withhold and refuse).
+/// The value is never passed to the core. Panic or NULL ctx returns 0.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_upload_progress_abuse(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| code((*ctx).upload_progress_abuse())));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
 /// Free a string from `howdah_take_log_line`. NULL is a no-op.
 ///
 /// # Safety
@@ -2396,6 +2629,25 @@ pub unsafe extern "C" fn howdah_recycle_on_fatal(ctx: *mut howdah_ctx) -> i32 {
     catch_unwind(AssertUnwindSafe(|| i32::from((*ctx).config.recycle_on_fatal))).unwrap_or(0)
 }
 
+/// 1 iff the config ARMS the unread-body drain (CVE-2026-129289):
+/// `drain_unread_body` is on AND the global mode is not `off`. 0 for NULL and
+/// on panic (do not drain: the fail-open direction, no behavior change). The glue
+/// applies the SAPI gate on top.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_drain_unread_armed(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = &*ctx;
+        i32::from(c.config.drain_unread_body && c.config.mode != Mode::Off)
+    }))
+    .unwrap_or(0)
+}
+
 /// 1 iff the config ARMS the §4.7 recycle facet: `recycle_on_fatal` is on AND
 /// the global mode is not `off` (a global `off` disables every layer, this one
 /// included; `detect` keeps it armed, like the OOM backstop). The glue applies
@@ -2491,6 +2743,8 @@ pub unsafe extern "C" fn howdah_sink_check_at(
         HOWDAH_SINK_CALLBACK => SinkId::Callback,
         HOWDAH_SINK_XML => SinkId::Xml,
         HOWDAH_SINK_TLS => SinkId::Tls,
+        HOWDAH_SINK_SCHEME_CASE => SinkId::SchemeCase,
+        HOWDAH_SINK_PHAR_SIG => SinkId::PharSig,
         _ => return HOWDAH_ALLOW,
     };
     let r = catch_unwind(AssertUnwindSafe(|| {
@@ -3204,6 +3458,97 @@ pub unsafe extern "C" fn howdah_sink_xml_deny_external_entities(ctx: *mut howdah
     .unwrap_or(0)
 }
 
+/// 1 iff the SOAP request guard (`[sinks.soap]`) is armed (effective mode !=
+/// off); NULL ctx or panic is 0. Used by the glue to decide, once per process,
+/// whether to swap `SoapServer::handle`.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_soap_armed(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = &*ctx;
+        i32::from(c.config.sinks.soap_mode(c.config.mode) != Mode::Off)
+    }))
+    .unwrap_or(0)
+}
+
+/// SOAP request guard (CVE-2026-129506, CVE-2026-15353). `xml` is the raw
+/// request body about to reach `ext/soap`; `truncated != 0` says the caller
+/// capped an oversized body and `xml` is only its prefix. The body is scanned,
+/// never logged (only a FIXED reason string is). Returns 0 Allow / 1 Log / 2
+/// Block; on Block the glue delivers a clean 403 and does NOT call SOAP. NULL
+/// ctx or a panic is 0 (fail-open). A hit is retrievable with
+/// `howdah_take_sink_log_line`.
+///
+/// # Safety
+/// `ctx` NULL or live; `xml` NULL or valid for `xml_len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_soap_check(
+    ctx: *mut howdah_ctx,
+    xml: *const c_char,
+    xml_len: usize,
+    truncated: i32,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let bytes: &[u8] = if xml.is_null() || xml_len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(xml as *const u8, xml_len)
+        };
+        code((*ctx).soap_check(bytes, truncated != 0))
+    }));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
+/// Layer-2 FPM status-page HTML injection check (CVE-2026-129292), called once
+/// at RINIT under php-fpm. Each field is a NUL-free byte string or NULL when the
+/// SAPI supplied none. The values are classified for HTML metacharacters and
+/// NEVER logged. Detect-only by default (`[inspect] status_injection`): php-fpm
+/// writes the scoreboard before any extension runs, so even `block` (a clean
+/// refusal) cannot un-plant the entry. Returns 0 Allow, 1 Log, 2 Block; NULL ctx
+/// or panic returns 0.
+///
+/// # Safety
+/// `ctx` NULL or live; each pointer NULL or valid for its length.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_inspect_status(
+    ctx: *mut howdah_ctx,
+    user: *const c_char,
+    user_len: usize,
+    method: *const c_char,
+    method_len: usize,
+    script: *const c_char,
+    script_len: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let f = |p: *const c_char, n: usize| -> Option<&'static [u8]> {
+            if p.is_null() {
+                None
+            } else {
+                Some(std::slice::from_raw_parts(p as *const u8, n))
+            }
+        };
+        code((*ctx).inspect_status(f(user, user_len), f(method, method_len), f(script, script_len)))
+    }));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3552,6 +3897,41 @@ mod tests {
         unsafe { howdah_free(c) };
     }
 
+    fn status(c: *mut howdah_ctx, u: Option<&[u8]>, m: Option<&[u8]>, s: Option<&[u8]>) -> i32 {
+        let p = |o: Option<&[u8]>| o.map_or((std::ptr::null(), 0), |b| (b.as_ptr() as *const c_char, b.len()));
+        let (up, ul) = p(u);
+        let (mp, ml) = p(m);
+        let (sp, sl) = p(s);
+        unsafe { howdah_inspect_status(c, up, ul, mp, ml, sp, sl) }
+    }
+
+    #[test]
+    fn status_injection_detects_by_default_logs_no_value() {
+        let c = init("");
+        begin(c);
+        assert_eq!(status(c, Some(b"alice"), Some(b"GET"), Some(b"/a/index.php")), HOWDAH_ALLOW);
+        assert!(take(c).is_none());
+        assert_eq!(status(c, Some(b"<svg/onload=x>"), Some(b"GET"), None), HOWDAH_LOG);
+        let line = take(c).expect("log line");
+        assert!(line.contains("\"rule\":\"status_injection\""), "{line}");
+        assert!(line.contains("auth user"), "{line}");
+        assert!(!line.contains("svg"), "{line}");
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn status_injection_block_off_and_null() {
+        let c = init("[inspect]\nstatus_injection = \"block\"");
+        begin(c);
+        assert_eq!(status(c, None, Some(b"G<T"), None), HOWDAH_BLOCK);
+        unsafe { howdah_free(c) };
+        let c = init("[inspect]\nstatus_injection = \"off\"");
+        begin(c);
+        assert_eq!(status(c, Some(b"<x>"), None, None), HOWDAH_ALLOW);
+        unsafe { howdah_free(c) };
+        assert_eq!(status(std::ptr::null_mut(), Some(b"<x>"), None, None), HOWDAH_ALLOW);
+    }
+
     #[test]
     fn cgi_arg_log_omits_the_query() {
         let c = init("");
@@ -3666,6 +4046,57 @@ mod tests {
             howdah_free_str(p);
             Some(s)
         }
+    }
+
+    fn soap(c: *mut howdah_ctx, xml: &[u8], truncated: i32) -> i32 {
+        unsafe { howdah_soap_check(c, xml.as_ptr() as _, xml.len(), truncated) }
+    }
+
+    #[test]
+    fn soap_guard_blocks_dtd_and_bad_array_passes_benign() {
+        let c = init("");
+        begin(c);
+        // Armed and blocking by default.
+        assert_eq!(unsafe { howdah_soap_armed(c) }, 1);
+        // Prolog DOCTYPE -> block, reason carries dtd + CVE, never the body bytes.
+        let dtd = b"<!DOCTYPE r [<!ENTITY x SYSTEM \"file:///etc/passwd\">]><r/>";
+        assert_eq!(soap(c, dtd, 0), HOWDAH_BLOCK);
+        let line = take_sink(c).unwrap();
+        assert!(line.contains("\"rule\":\"soap_request\""), "{line}");
+        assert!(line.contains("\"action\":\"block\"") && line.contains("dtd"), "{line}");
+        assert!(!line.contains("passwd"), "body leaked: {line}");
+        assert!(line.contains("\"layer\":3"), "{line}");
+        // Malformed arraySize -> block.
+        let bad = b"<e:A xmlns:e=\"http://www.w3.org/2003/05/soap-encoding\" e:arraySize=\"abc\"/>";
+        assert_eq!(soap(c, bad, 0), HOWDAH_BLOCK);
+        assert!(take_sink(c).unwrap().contains("array dimensions"));
+        // Benign SOAP envelope and a valid array -> allow, nothing logged.
+        let ok = b"<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body><m:Ping xmlns:m=\"urn:x\"/></s:Body></s:Envelope>";
+        assert_eq!(soap(c, ok, 0), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        let okarr = b"<e:A xmlns:e=\"http://www.w3.org/2003/05/soap-encoding\" e:arraySize=\"* 3\"/>";
+        assert_eq!(soap(c, okarr, 0), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+    }
+
+    #[test]
+    fn soap_guard_detect_and_off_modes() {
+        let c = init("[sinks.soap]\nmode=\"detect\"");
+        begin(c);
+        let dtd = b"<!DOCTYPE r><r/>";
+        assert_eq!(soap(c, dtd, 1), HOWDAH_LOG);
+        let line = take_sink(c).unwrap();
+        assert!(line.contains("\"action\":\"log\"") && line.contains("capped prefix"), "{line}");
+        let c = init("[sinks.soap]\nmode=\"off\"");
+        begin(c);
+        assert_eq!(unsafe { howdah_soap_armed(c) }, 0);
+        assert_eq!(soap(c, dtd, 0), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        // Global off silences it too.
+        let c = init("mode=\"off\"");
+        begin(c);
+        assert_eq!(unsafe { howdah_soap_armed(c) }, 0);
+        assert_eq!(soap(c, dtd, 0), HOWDAH_ALLOW);
     }
 
     #[test]
@@ -4515,6 +4946,79 @@ mod tests {
         assert_eq!(sink(c, HOWDAH_SINK_PHAR, "f", b"phar:///tmp/x.phar"), HOWDAH_ALLOW);
         assert!(take_sink(c).is_none());
         unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn scheme_case_sink_fix_and_detect() {
+        let url = b"HTTPS://h.example/secret?token=abc";
+        let c = init("");
+        assert_eq!(unsafe { howdah_scheme_case_mode(c) }, 2);
+        assert_eq!(unsafe { howdah_sink_armed(c, HOWDAH_SINK_SCHEME_CASE) }, 1);
+        assert_eq!(sink(c, HOWDAH_SINK_SCHEME_CASE, "https", url), HOWDAH_LOG);
+        let line = take_sink(c).unwrap();
+        assert!(line.contains("\"rule\":\"tls_scheme_case\""), "{line}");
+        assert!(line.contains("lowercased"), "{line}");
+        assert!(!line.contains("secret") && !line.contains("token") && !line.contains("h.example"), "{line}");
+        // lowercase: nothing.
+        assert_eq!(sink(c, HOWDAH_SINK_SCHEME_CASE, "https", b"https://h/"), HOWDAH_ALLOW);
+        assert!(take_sink(c).is_none());
+        assert_eq!(unsafe { howdah_scheme_case_len(url.as_ptr() as _, url.len()) }, 5);
+        unsafe { howdah_free(c) };
+        let c = init("[sinks.scheme_case]\nmode=\"detect\"");
+        assert_eq!(unsafe { howdah_scheme_case_mode(c) }, 1);
+        assert_eq!(sink(c, HOWDAH_SINK_SCHEME_CASE, "https", url), HOWDAH_LOG);
+        assert!(take_sink(c).unwrap().contains("not fixed"));
+        unsafe { howdah_free(c) };
+        let c = init("[sinks.scheme_case]\nmode=\"off\"");
+        assert_eq!(unsafe { howdah_scheme_case_mode(c) }, 0);
+        assert_eq!(unsafe { howdah_sink_armed(c, HOWDAH_SINK_SCHEME_CASE) }, 0);
+        assert_eq!(sink(c, HOWDAH_SINK_SCHEME_CASE, "https", url), HOWDAH_ALLOW);
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn phar_signature_sink_block_detect_off() {
+        let c = init("");
+        assert_eq!(unsafe { howdah_sink_armed(c, HOWDAH_SINK_PHAR_SIG) }, 1);
+        assert_eq!(sink(c, HOWDAH_SINK_PHAR_SIG, "phar", b"downgrade"), HOWDAH_BLOCK);
+        let line = take_sink(c).unwrap();
+        assert!(line.contains("\"rule\":\"phar_signature\"") && line.contains("signature-downgrade"), "{line}");
+        assert!(!line.contains(".phar") && !line.contains("/"), "{line}");
+        // indeterminate is detect-only even in block mode
+        assert_eq!(sink(c, HOWDAH_SINK_PHAR_SIG, "phar", b"indeterminate"), HOWDAH_LOG);
+        assert!(take_sink(c).unwrap().contains("signature-indeterminate"));
+        assert_eq!(sink(c, HOWDAH_SINK_PHAR_SIG, "phar", b"other"), HOWDAH_ALLOW);
+        unsafe { howdah_free(c) };
+        let c = init("[sinks.phar]\nsignature=\"detect\"");
+        assert_eq!(sink(c, HOWDAH_SINK_PHAR_SIG, "phar", b"downgrade"), HOWDAH_LOG);
+        unsafe { howdah_free(c) };
+        let c = init("[sinks.phar]\nsignature=\"off\"");
+        assert_eq!(unsafe { howdah_sink_armed(c, HOWDAH_SINK_PHAR_SIG) }, 0);
+        assert_eq!(sink(c, HOWDAH_SINK_PHAR_SIG, "phar", b"downgrade"), HOWDAH_ALLOW);
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn phar_sig_classify_ffi() {
+        unsafe extern "C" fn rd(ctx: *mut c_void, off: u64, buf: *mut u8, len: usize) -> i32 {
+            let d = &*(ctx as *const Vec<u8>);
+            let o = off as usize;
+            if o + len > d.len() {
+                return 0;
+            }
+            std::ptr::copy_nonoverlapping(d[o..].as_ptr(), buf, len);
+            1
+        }
+        let mut v = b"<?php __HALT_COMPILER();".to_vec();
+        v.extend_from_slice(&[1u8; 16]);
+        v.extend_from_slice(&0x11u32.to_le_bytes());
+        v.extend_from_slice(b"GBMB");
+        let p = &v as *const Vec<u8> as *mut c_void;
+        assert_eq!(unsafe { howdah_phar_sig_classify(v.len() as u64, Some(rd), p) }, 0);
+        let n = v.len();
+        v[n - 8] = 4;
+        assert_eq!(unsafe { howdah_phar_sig_classify(n as u64, Some(rd), p) }, 1);
+        assert_eq!(unsafe { howdah_phar_sig_classify(n as u64, None, p) }, 2);
     }
 
     #[test]
@@ -5602,6 +6106,130 @@ mod tests {
             howdah_scan_post_begin(ctx, ct.as_ptr() as *const c_char, ct.len(), 0, -1);
             assert_eq!(howdah_scan_post(ctx, body.as_ptr() as *const c_char, body.len()), HOWDAH_ALLOW);
             howdah_free(ctx);
+        }
+    }
+
+    // ---- CVE-2026-129289: fastcgi_smuggle + the drain toggle ------------------
+
+    fn fcgi_params(name: &[u8], value: &[u8]) -> Vec<u8> {
+        let mut c = vec![name.len() as u8, value.len() as u8];
+        c.extend_from_slice(name);
+        c.extend_from_slice(value);
+        let mut r = vec![1, 4, 0, 1, (c.len() >> 8) as u8, c.len() as u8, 0, 0];
+        r.extend_from_slice(&c);
+        r
+    }
+
+    /// Run `body` through the scanner (split into `step`-byte chunks) for a
+    /// request of `ct`; returns (worst action code, log line).
+    fn scan_all(toml: &str, ct: &str, body: &[u8], step: usize) -> (i32, String) {
+        let ctx = init(toml);
+        // Structured mode (empty boundary): the byte feed is the scanner's, so
+        // request_end does not call a never-fed parser "truncated".
+        let (ip, m, u) = ("1.2.3.4", "POST", "/up");
+        let meta = RequestMeta {
+            client_ip: ip.as_ptr() as _,
+            client_ip_len: ip.len(),
+            method: m.as_ptr() as _,
+            method_len: m.len(),
+            uri: u.as_ptr() as _,
+            uri_len: u.len(),
+        };
+        unsafe { howdah_request_begin(ctx, std::ptr::null(), 0, &meta) };
+        let mut last = HOWDAH_ALLOW;
+        unsafe {
+            howdah_scan_post_begin(ctx, ct.as_ptr() as *const c_char, ct.len(), 0, -1);
+            for ch in body.chunks(step) {
+                last = howdah_scan_post(ctx, ch.as_ptr() as *const c_char, ch.len());
+            }
+            let end = howdah_request_end(ctx);
+            let line = scan_line(ctx);
+            howdah_free(ctx);
+            assert_eq!(last, HOWDAH_ALLOW, "a smuggle verdict must never stop the read");
+            (end, line)
+        }
+    }
+
+    fn mp(parts: &[(&str, Option<&str>, &[u8])], epilogue: &[u8]) -> Vec<u8> {
+        let mut b = Vec::new();
+        for (name, file, data) in parts {
+            b.extend_from_slice(b"--B\r\nContent-Disposition: form-data; name=\"");
+            b.extend_from_slice(name.as_bytes());
+            b.push(b'"');
+            if let Some(f) = file {
+                b.extend_from_slice(format!("; filename=\"{f}\"\r\nContent-Type: application/octet-stream").as_bytes());
+            }
+            b.extend_from_slice(b"\r\n\r\n");
+            b.extend_from_slice(data);
+            b.extend_from_slice(b"\r\n");
+        }
+        b.extend_from_slice(b"--B--\r\n");
+        b.extend_from_slice(epilogue);
+        b
+    }
+    const BLOCK: &str = "[rules]\nfastcgi_smuggle = \"block\"\n";
+
+
+    #[test]
+    fn fastcgi_smuggle_blocks_in_a_field_epilogue_and_raw_bodies_without_stopping_the_read() {
+        let smug = fcgi_params(b"PHP_ADMIN_VALUE", b"auto_prepend_file=php://input");
+        let mct = "multipart/form-data; boundary=B";
+        for step in [1usize, 5, 4096] {
+            let field = mp(&[("a", None, &smug)], b"");
+            let (end, line) = scan_all(BLOCK, mct, &field, step);
+            assert_eq!(end, HOWDAH_BLOCK, "field step {step}");
+            assert!(line.contains("fastcgi_smuggle"), "{line}");
+            assert!(!line.contains("auto_prepend"), "values are never logged: {line}");
+            let epi = mp(&[("a", None, b"x")], &smug);
+            assert_eq!(scan_all(BLOCK, mct, &epi, step).0, HOWDAH_BLOCK, "epilogue step {step}");
+            // Malformed framing still scans the rest of the body.
+            let mut broken = b"--B\r\ngarbage-no-disposition\r\n\r\n".to_vec();
+            broken.extend_from_slice(&smug);
+            assert_eq!(scan_all(BLOCK, mct, &broken, step).0, HOWDAH_BLOCK, "malformed step {step}");
+            for ct in ["application/json", "application/x-www-form-urlencoded", "application/octet-stream"] {
+                assert_eq!(scan_all(BLOCK, ct, &smug, step).0, HOWDAH_BLOCK, "{ct} step {step}");
+            }
+        }
+    }
+
+    #[test]
+    fn fastcgi_smuggle_ignores_file_part_data_and_benign_bodies() {
+        let smug = fcgi_params(b"SCRIPT_FILENAME", b"/etc/passwd");
+        let mct = "multipart/form-data; boundary=B";
+        let file = mp(&[("f", Some("x.pcap"), &smug), ("a", None, b"hi")], b"");
+        for step in [1usize, 7, 4096] {
+            assert_eq!(scan_all("", mct, &file, step).0, HOWDAH_ALLOW, "file step {step}");
+        }
+        let benign: &[&[u8]] = &[b"a=1&b=2", br#"{"k":"PHP_VALUE"}"#, b"\x01\x04 plain", b"<a>SCRIPT_FILENAME</a>"];
+        for b in benign {
+            assert_eq!(scan_all("", "application/json", b, 3).0, HOWDAH_ALLOW);
+            assert_eq!(scan_all("", mct, &mp(&[("a", None, b)], b""), 3).0, HOWDAH_ALLOW);
+        }
+    }
+
+    #[test]
+    fn fastcgi_smuggle_is_addressable_under_rules() {
+        let smug = fcgi_params(b"DOCUMENT_ROOT", b"/");
+        let (end, line) = scan_all("[rules]\nfastcgi_smuggle = \"detect\"\n", "text/plain", &smug, 64);
+        assert_eq!(end, HOWDAH_LOG);
+        assert!(line.contains("fastcgi_smuggle"));
+        assert_eq!(scan_all("[rules]\nfastcgi_smuggle = \"off\"\n", "text/plain", &smug, 64).0, HOWDAH_ALLOW);
+        assert_eq!(scan_all("mode = \"detect\"\n", "text/plain", &smug, 64).0, HOWDAH_LOG);
+    }
+
+    #[test]
+    fn drain_unread_armed_honors_key_and_mode() {
+        let on = init("");
+        assert_eq!(unsafe { howdah_drain_unread_armed(on) }, 1, "on by default");
+        let no = init("drain_unread_body = false\n");
+        assert_eq!(unsafe { howdah_drain_unread_armed(no) }, 0);
+        let off = init("mode = \"off\"\n");
+        assert_eq!(unsafe { howdah_drain_unread_armed(off) }, 0);
+        assert_eq!(unsafe { howdah_drain_unread_armed(std::ptr::null_mut()) }, 0);
+        unsafe {
+            howdah_free(on);
+            howdah_free(no);
+            howdah_free(off);
         }
     }
 

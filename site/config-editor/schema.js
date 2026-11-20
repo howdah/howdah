@@ -86,7 +86,12 @@
     // by a per-rule [rules] mode.
     out_of_memory: 'other', startup_fatal: 'other',
     // The §4.7 recycle facet's rule (Layer 1): governed by recycle_on_fatal.
-    fatal_recycle: 'other'
+    fatal_recycle: 'other',
+    // 1.7.1: fastcgi_smuggle is a real [rules] key (Layer 1); the others are
+    // governed by their own knobs ([sinks.*] / [inspect]) and are no-ops here.
+    fastcgi_smuggle: 'multipart',
+    tls_scheme_case: 'sinks', soap_request: 'sinks', phar_signature: 'sinks',
+    status_injection: 'inspect'
   };
 
   // Rules shown in the [rules] section for completeness but not controllable
@@ -113,7 +118,9 @@
       var backstop = !!BACKSTOP_RULES[r.name];
       var noop = layer === 'inspect' || layer === 'sinks' || layer === 'behavior' || backstop;
       return {
-        key: r.name, type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: 'inherit',
+        // fastcgi_smuggle ships as an explicit [rules] default of detect (the core
+        // fills it in), so the editor's default is detect, not inherit.
+        key: r.name, type: 'mode-or-inherit', values: MODE_OR_INHERIT, default: r.name === 'fastcgi_smuggle' ? 'detect' : 'inherit',
         severity: r.severity, layer: layer, noop: noop,
         note: r.name === 'fatal_recycle' ? RECYCLE_NOOP_NOTE : backstop ? OOM_NOOP_NOTE : (r.name === 'cgi_arg_injection' ? CGI_ARG_NOOP_NOTE : (noop ? NOOP_NOTE : (RULE_NOTES[r.severity] || '')))
       };
@@ -127,6 +134,8 @@
     { key: 'sqli', type: 'bool', default: true, note: 'Look for SQL-injection shapes.' },
     { key: 'traversal', type: 'bool', default: true, note: 'Look for path-traversal shapes.' },
     { key: 'cmdi', type: 'bool', default: true, note: 'Look for command-injection shapes.' },
+    { key: 'status_injection', type: 'enum', values: MODES, default: 'detect',
+      note: 'FPM status-page HTML injection (CVE-2026-129292). Logs a request whose authenticated user, HTTP method or script path carries HTML/URL-metacharacters that php-fpm would write into its status scoreboard. Detect by default. Detect-only in effect: php-fpm writes the scoreboard before any extension runs, so block refuses the request but cannot un-plant the entry. The matched value is not logged.' },
     { key: 'cgi_arg', type: 'enum', values: MODES, default: 'block',
       note: 'php-cgi argument injection (CVE-2012-1823, CVE-2024-4577): a query string with no literal = that parses as php-cgi options, such as ?-d+allow_url_include%3d1+-d+auto_prepend_file%3dphp://input or the soft-hyphen form ?%ADd+... Unlike the three classes above this one is enforced by default: block refuses the request before the script runs, whatever the global mode and inspect.mode. detect logs only; off disables it. The query string is never logged.' },
     { key: 'limits.max_value_bytes', type: 'int', min: 1, default: 16384, note: 'Scan at most this many bytes of one value.' },
@@ -165,6 +174,13 @@
       note: 'phar:// stream access (1.3). Off by default; a global or [sinks] block does not arm it. detect logs phar access outside allow_paths; block refuses it.' },
     { key: 'phar.allow_paths', type: 'list', default: [],
       note: 'Realpath prefixes under which .phar archives may be opened, one per line; matched component-wise up to and including the .phar segment. Empty means every phar access is a hit in detect.' },
+    // 1.7.1: three independent knobs, each outside sinks.mode (a global off still silences them).
+    { key: 'scheme_case.mode', type: 'enum', values: ['fix', 'detect', 'off'], default: 'fix',
+      note: 'Mixed-case HTTPS/FTPS URL schemes (CVE-2026-128064: PHP treated a mixed-case scheme as plaintext). fix (default) normalizes the scheme so PHP uses TLS; detect only reports; off disables. Redirect hops are not re-checked; PHP 8.6 is already fixed upstream.' },
+    { key: 'soap.mode', type: 'enum', values: MODES, default: 'block',
+      note: 'SOAP server requests (CVE-2026-129506 DTD use-after-free, CVE-2026-15353 malformed arraySize). block (default) refuses a SOAP request carrying a DTD or a malformed arraySize before the parser sees it; detect logs only. UTF-16 bodies are not scanned.' },
+    { key: 'phar.signature', type: 'enum', values: MODES, default: 'block',
+      note: 'Phar signature downgrade (CVE-2026-128090). block (default) requires an OpenSSL signature when a sibling .pubkey is pinned; detect logs only. Independent of phar.mode. A plain include of a .phar is not hooked; a whole-archive-compressed phar is log-only; PHP 8.6 is already fixed upstream.' },
     { key: 'ssrf.mode', type: 'enum', values: MODES, default: 'off',
       note: 'Outbound requests to hosts not in allow_hosts (1.3). Off by default; a global or [sinks] block does not arm it.' },
     { key: 'ssrf.allow_hosts', type: 'list', default: [],
@@ -205,6 +221,8 @@
       note: 'Write every matched [[exceptions]] entry to the event log as action "excepted" (Layers 3 and 4: one line per excepted call; Layers 1 and 2: at most one per request). Off by default so adding an exception never adds log volume by itself; turn it on while tuning or when an auditor wants to see exceptions in use.' },
     { key: 'oom_exit', type: 'bool', default: true,
       note: 'End the PHP worker if it runs out of memory (or hits a fatal during request startup) before any code runs on the half-built request state — the PHP2Shell backstop (CVE-2026-109618/109619). On by default. Web SAPIs only (php-fpm, Apache mod_php, cgi-fcgi, LiteSpeed), never the command line, and automatically off on PHP versions that carry upstream’s fix (detected at runtime). The dropped request becomes a 502 and the worker is replaced; the event is logged with rule out_of_memory or startup_fatal. Set to false to keep PHP’s default behaviour, which on an unpatched engine reopens the PHP2Shell window.' },
+    { key: 'drain_unread_body', type: 'bool', default: true,
+      note: 'Drain the unread request body at teardown, removing the leftover-body desync precondition behind CVE-2026-129289 (FPM request smuggling). On by default. A no-op on PHP 5.4 (no SG(post_read)). The fastcgi_smuggle signature (a [rules] entry, detect by default) is separate.' },
     { key: 'recycle_on_fatal', type: 'bool', default: false,
       note: 'Recycle the PHP worker AFTER a poisoning-class bailout fatal during the script — an uncaught Error, a parse/compile error, a failed require, or max_execution_time — so a worker never serves a second request on the corrupt state CVE-2026-109619 leaves behind (§4.7). The companion to oom_exit: that backstop covers out-of-memory and request-startup fatals, this covers the script-phase fatals it does not. Off by default — an operator opt-in for unpatched, long-lived-worker deployments. Same gates as oom_exit: web SAPIs only, and off on engines that carry upstream’s fix (decided at startup). The producing request still returns its own 500; the event is logged with rule fatal_recycle.' },
     { key: 'recycle_observe', type: 'bool', default: false,

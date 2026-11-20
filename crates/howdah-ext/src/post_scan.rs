@@ -46,25 +46,28 @@ pub(crate) unsafe extern "C" fn decide(buf: *const c_char, len: usize) -> c_int 
         }
         if !ARMED {
             ARMED = true;
-            // Arm ONLY for a body PHP itself resolved as multipart/form-data.
-            // read_post also serves php://input (PUT/PATCH, enable_post_data_reading=0)
-            // and urlencoded; those are not multipart, have no gap-A/B exposure,
-            // and must not be scanned or truncated. Leaving the scanner off here
-            // means howdah_scan_post returns Allow (post_scan stays None).
-            if sys::howdah_is_multipart_post() != 0 {
-                // The body is being read: open the core request (idempotent) and
-                // arm the scanner from the Content-Type + PHP's parsed limits.
-                module::maybe_begin();
-                let ct = sys::howdah_request_content_type();
-                let ct_len = if ct.is_null() { 0 } else { CStr::from_ptr(ct).to_bytes().len() };
-                core::howdah_scan_post_begin(
-                    module::CTX,
-                    ct,
-                    ct_len,
-                    sys::howdah_post_max_size(),
-                    sys::howdah_memory_limit(),
-                );
-            }
+            // Arm for EVERY body read through read_post. The multipart framing
+            // (gap A/B counters) only exists when PHP resolved the body as
+            // multipart/form-data: the core leaves its framed scanner off for any
+            // other Content-Type (no boundary), so urlencoded / php://input / PUT
+            // bodies are never truncated or counted. They ARE fed to the
+            // CVE-2026-129289 FastCGI-framing check, which needs the raw bytes
+            // whatever the Content-Type (the attacker picks it).
+            // The body is being read: open the core request (idempotent) and
+            // arm the scanner from the Content-Type + PHP's parsed limits.
+            module::maybe_begin();
+            let ct = sys::howdah_request_content_type();
+            let ct_len = if ct.is_null() { 0 } else { CStr::from_ptr(ct).to_bytes().len() };
+            let multipart = sys::howdah_is_multipart_post() != 0;
+            core::howdah_scan_post_begin(
+                module::CTX,
+                // A non-multipart body gets an empty Content-Type so no boundary
+                // is extracted and only the byte-framing check runs.
+                if multipart { ct } else { std::ptr::null() },
+                if multipart { ct_len } else { 0 },
+                sys::howdah_post_max_size(),
+                sys::howdah_memory_limit(),
+            );
         }
         i32::from(core::howdah_scan_post(module::CTX, buf, len) == core::HOWDAH_BLOCK)
     }))

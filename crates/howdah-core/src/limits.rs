@@ -380,6 +380,35 @@ pub fn is_selftest_name(name: &[u8]) -> bool {
     name == SELFTEST_FIELD
 }
 
+/// CVE-2026-115560 (session serializer mismatch): PHP's `session.upload_progress`
+/// tracker builds a session KEY from `prefix + <the PHP_SESSION_UPLOAD_PROGRESS
+/// field's VALUE>`. A `|` in that value is the `php` session handler's
+/// key/value delimiter, so on a `php_serialize`/`php_binary` write followed by
+/// a `php` read it smuggles a serialized payload into `unserialize()`. A
+/// legitimate progress key (a UUID, a counter, a token) never contains `|`.
+/// The glue reads the value only to test this predicate; it is never logged.
+pub fn upload_progress_value_unsafe(value: &[u8]) -> bool {
+    value.contains(&b'|')
+}
+
+/// The hit recorded for a withheld upload-progress key (fixed reason, no value).
+pub fn upload_progress_abuse_hit() -> LimitHit {
+    LimitHit {
+        rule: RuleId::UploadProgressAbuse,
+        severity: RuleId::UploadProgressAbuse.severity(),
+        detail: String::new(),
+    }
+}
+
+/// The hit recorded for a FastCGI-smuggling body (fixed reason, no value).
+pub fn fastcgi_smuggle_hit() -> LimitHit {
+    LimitHit {
+        rule: RuleId::FastcgiSmuggle,
+        severity: RuleId::FastcgiSmuggle.severity(),
+        detail: String::new(),
+    }
+}
+
 /// The hit recorded for the self-test marker (always `Standard`, never critical).
 pub fn selftest_hit() -> LimitHit {
     LimitHit {
@@ -402,6 +431,12 @@ pub enum RuleId {
     ParseMemoryBudget,
     MalformedMultipart,
     UploadProgressAbuse,
+    /// CVE-2026-129289: a request body carries FastCGI record framing with a dangerous
+    /// PARAMS name (PHP_ADMIN_VALUE, SCRIPT_FILENAME, ...): the payload that smuggles
+    /// a second request through an unread body. Standard, Layer 1. The body drain
+    /// (`drain_unread_body`) is the fix; this is visibility and a refusal. See
+    /// `crate::fcgi_smuggle`.
+    FastcgiSmuggle,
     SelfTest,
     MaxInputVars,
     MaxInputNestingDepth,
@@ -416,6 +451,12 @@ pub enum RuleId {
     /// default (`[inspect] cgi_arg`), because an `=`-less option-shaped query is not
     /// something an application sends. See `crate::inspect::cgi_arg_injection`.
     CgiArgInjection,
+    /// FPM status-page HTML injection (CVE-2026-129292): the request method, authenticated
+    /// user or script carries an HTML metacharacter that php-fpm stores in its scoreboard
+    /// BEFORE any extension runs and the full-HTML status page prints unescaped. Detect-only
+    /// by default: refusing the request cannot un-plant the entry. See
+    /// `crate::inspect::status_injection_fields`.
+    StatusInjection,
     CommandExec,
     Include,
     Eval,
@@ -463,6 +504,18 @@ pub enum RuleId {
     DangerousCallback,
     Xxe,
     TlsVerify,
+    /// A mixed-case `HTTPS://` / `FTPS://` URL that PHP would send in plaintext
+    /// (CVE-2026-128064). Standard, Layer 3; normalized to lowercase by default.
+    TlsSchemeCase,
+    /// A phar archive whose declared signature type is a keyless digest while an
+    /// OpenSSL `.pubkey` is pinned beside it (CVE-2026-128090). Standard, Layer 3.
+    PharSignature,
+    /// A SOAP request whose body opens with a DTD/DOCTYPE in the prolog
+    /// (CVE-2026-129506, SoapServer DTD use-after-free) or carries a malformed
+    /// SOAP-ENC `arraySize` (CVE-2026-15353, heap over-read). Standard, Layer 3;
+    /// refused before `ext/soap` parses it, enforced by default
+    /// (`[sinks.soap] mode`). See `crate::sinks::soap`.
+    SoapRequest,
     /// PHP ran out of memory while the engine was parsing/handling the request
     /// (the PHP2Shell out-of-memory backstop; see `crate::oom`). Critical,
     /// Layer 1. Not produced by any limit check: the glue's `zend_error_cb`
@@ -500,6 +553,7 @@ impl RuleId {
         match self {
             RuleId::MalformedMultipart
             | RuleId::UploadProgressAbuse
+            | RuleId::FastcgiSmuggle
             | RuleId::SelfTest
             | RuleId::MaxInputKeyBytes
             | RuleId::MaxRequestHeaders
@@ -508,6 +562,7 @@ impl RuleId {
             | RuleId::PathTraversal
             | RuleId::CommandInjection
             | RuleId::CgiArgInjection
+            | RuleId::StatusInjection
             | RuleId::CommandExec
             | RuleId::Include
             | RuleId::Eval
@@ -528,7 +583,10 @@ impl RuleId {
             | RuleId::AssertString
             | RuleId::DangerousCallback
             | RuleId::Xxe
-            | RuleId::TlsVerify => Severity::Standard,
+            | RuleId::TlsVerify
+            | RuleId::TlsSchemeCase
+            | RuleId::PharSignature
+            | RuleId::SoapRequest => Severity::Standard,
             _ => Severity::Critical,
         }
     }
@@ -540,7 +598,7 @@ impl RuleId {
 /// or miss one it accepts. `rule_catalog_covers_every_variant` fails to
 /// compile when a variant is added here but not to the list.
 pub fn rule_catalog() -> &'static [RuleId] {
-    const ALL: [RuleId; 46] = [
+    const ALL: [RuleId; 51] = [
         RuleId::MaxParts,
         RuleId::MaxFiles,
         RuleId::MaxPartHeaders,
@@ -550,6 +608,7 @@ pub fn rule_catalog() -> &'static [RuleId] {
         RuleId::ParseMemoryBudget,
         RuleId::MalformedMultipart,
         RuleId::UploadProgressAbuse,
+        RuleId::FastcgiSmuggle,
         RuleId::SelfTest,
         RuleId::MaxInputVars,
         RuleId::MaxInputNestingDepth,
@@ -560,6 +619,7 @@ pub fn rule_catalog() -> &'static [RuleId] {
         RuleId::PathTraversal,
         RuleId::CommandInjection,
         RuleId::CgiArgInjection,
+        RuleId::StatusInjection,
         RuleId::CommandExec,
         RuleId::Include,
         RuleId::Eval,
@@ -581,6 +641,9 @@ pub fn rule_catalog() -> &'static [RuleId] {
         RuleId::DangerousCallback,
         RuleId::Xxe,
         RuleId::TlsVerify,
+        RuleId::TlsSchemeCase,
+        RuleId::PharSignature,
+        RuleId::SoapRequest,
         RuleId::OutOfMemory,
         RuleId::StartupFatal,
         RuleId::PostTooLarge,
@@ -817,6 +880,7 @@ mod tests {
                 | RuleId::ParseMemoryBudget
                 | RuleId::MalformedMultipart
                 | RuleId::UploadProgressAbuse
+                | RuleId::FastcgiSmuggle
                 | RuleId::SelfTest
                 | RuleId::MaxInputVars
                 | RuleId::MaxInputNestingDepth
@@ -827,6 +891,7 @@ mod tests {
                 | RuleId::PathTraversal
                 | RuleId::CommandInjection
                 | RuleId::CgiArgInjection
+                | RuleId::StatusInjection
                 | RuleId::CommandExec
                 | RuleId::Include
                 | RuleId::Eval
@@ -848,6 +913,9 @@ mod tests {
                 | RuleId::DangerousCallback
                 | RuleId::Xxe
                 | RuleId::TlsVerify
+                | RuleId::TlsSchemeCase
+                | RuleId::PharSignature
+                | RuleId::SoapRequest
                 | RuleId::OutOfMemory
                 | RuleId::StartupFatal
                 | RuleId::PostTooLarge
@@ -856,7 +924,7 @@ mod tests {
                 | RuleId::FatalRecycle => {}
             }
         }
-        assert_eq!(rule_catalog().len(), 46);
+        assert_eq!(rule_catalog().len(), 51);
         let mut sorted = all.to_vec();
         sorted.sort();
         sorted.dedup();
@@ -898,6 +966,9 @@ mod tests {
             RuleId::DangerousCallback,
             RuleId::Xxe,
             RuleId::TlsVerify,
+            RuleId::TlsSchemeCase,
+            RuleId::PharSignature,
+            RuleId::SoapRequest,
         ] {
             assert_eq!(r.severity(), Severity::Standard, "{r:?}");
         }
@@ -905,6 +976,17 @@ mod tests {
         assert_eq!(RuleId::MaxParts.severity(), Severity::Critical);
         assert_eq!(RuleId::MaxFiles.severity(), Severity::Critical);
         assert_eq!(RuleId::MaxPartHeaders.severity(), Severity::Critical);
+    }
+
+    #[test]
+    fn upload_progress_pipe_predicate() {
+        assert!(upload_progress_value_unsafe(b"x|a:1:{}"));
+        assert!(upload_progress_value_unsafe(b"|"));
+        assert!(upload_progress_value_unsafe(b"abc|"));
+        for ok in ["", "550e8400-e29b-41d4-a716-446655440000", "abc123", "a!b", "a:b;c"] {
+            assert!(!upload_progress_value_unsafe(ok.as_bytes()), "{ok}");
+        }
+        assert_eq!(upload_progress_abuse_hit().rule, RuleId::UploadProgressAbuse);
     }
 
     #[test]

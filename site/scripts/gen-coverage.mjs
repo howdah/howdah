@@ -11,7 +11,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '../..');
 const raw = readFileSync(resolve(repo, 'lab/integration/matrix-results.tsv'), 'utf8').split('\n');
 
-const ALL_MINORS = ['5.4','5.5','5.6','7.0','7.1','7.2','7.3','7.4','8.0','8.1','8.2','8.3','8.4','8.5'];
+const ALL_MINORS = ['5.4','5.5','5.6','7.0','7.1','7.2','7.3','7.4','8.0','8.1','8.2','8.3','8.4','8.5','8.6'];
 const SAPIS = ['cli', 'fpm', 'apache'];
 const SAPI_LABEL = { cli: 'cli-server', fpm: 'php-fpm', apache: 'Apache mod_php' };
 
@@ -77,7 +77,9 @@ for (const minor of ALL_MINORS) {
     const nr = notRun.find((n) => n.minor === minor);
     const why = minor === '5.5'
       ? 'The upstream php:5.5 Docker image is broken (corrupt layers on Docker Hub), so no test environment can be built. PHP 5.5 shares the PHP 5 code path with 5.4 and 5.6, which pass.'
-      : 'Not tested yet: no test environment built.';
+      : minor === '8.6'
+        ? 'New in 1.7.1. Built NTS from source: the official php:8.6 image is ZTS and Howdah is NTS-only. Not in the multipart matrix above; the 1.7.1 per-CVE lab scripts include PHP 8.6.0 (see the 2026-11-19 CVE table).'
+        : 'Not tested yet: no test environment built.';
     rows.push({ minor, version: null, status: 'not-run', why, sapis: {}, tested: [] });
     continue;
   }
@@ -106,7 +108,9 @@ for (const sp of Object.values(cells)) for (const sc of Object.values(sp)) for (
 }
 // Minors with no test rows at all (whether or not the run emitted a NOT-RUN
 // comment for them): these repeat a tested generation but were not run.
-const notRunMinors = ALL_MINORS.filter((m) => !cellsByMinor[m]);
+// 8.6 has its own explanation (built NTS from source, per-CVE lab runs) and is
+// not described as "no lab base image".
+const notRunMinors = ALL_MINORS.filter((m) => !cellsByMinor[m] && m !== '8.6');
 
 // ---- runtimes and SAPIs outside the matrix --------------------------------
 // lab/integration/runtime-results.tsv: one row per run of a named script
@@ -130,10 +134,41 @@ for (const r of runtimeRuns) {
   }
 }
 
+
+// ---- PHP 2026-11-19 CVEs (1.7.1): hand-authored, honest wording ------------
+// Rendered into docs/coverage.md below and into the site's coverage page via
+// coverage.json. Do not strengthen a claim here without a lab result.
+const cves = [
+  { cve: 'CVE-2026-129289', title: 'FPM request smuggling, 9.2', does: 'Drains the unread request body at teardown, removing the leftover-body desync precondition; + fastcgi_smuggle signature', def: 'drain on; signature detect', caveat: 'No-op on PHP 5.4 (no SG(post_read)); demonstrated for the malformed/oversize-multipart trigger the advisory describes. The fastcgi_smuggle signature logs by default; opt into block only after validating against your traffic (raw binary bodies can rarely match)' },
+  { cve: 'CVE-2026-115560', title: 'session serializer mismatch, 9.2', does: 'Withholds a `|`-bearing upload-progress key from PHP\'s session tracker so it never reaches unserialize', def: 'neutralize in all modes but off; block=403', caveat: 'Covers the documented injection point (the progress key value), 5.4–8.6' },
+  { cve: 'CVE-2026-128064', title: 'mixed-case HTTPS/FTPS plaintext, 8.2', does: 'Normalizes the scheme so PHP uses TLS', def: 'fix', caveat: 'Redirect hops not re-checked (documented gap); PHP 8.6 already fixed upstream; detect mode reports only' },
+  { cve: 'CVE-2026-129506', title: 'SOAP DTD use-after-free', does: 'Refuses SOAP requests carrying a DTD before the parser sees them', def: 'block', caveat: 'Lab-proven on PHP 7.4/8.0/8.1/8.3/8.6; verified hook-no-op where the dev image lacks ext-soap (5.6/7.0/8.5); code supports 5.6+. Block refuses before the parser; handle() is assumed terminal. UTF-16 bodies not scanned; compressed SOAP bodies on PHP 5.x are not inspected (gap)' },
+  { cve: 'CVE-2026-15353', title: 'SOAP arraySize heap over-read', does: 'Refuses malformed arraySize values', def: 'block', caveat: 'Same guard and caveats as above (lab-proven on 7.4/8.0/8.1/8.3/8.6; code supports 5.6+; handle() assumed terminal; compressed bodies on PHP 5.x not inspected)' },
+  { cve: 'CVE-2026-128090', title: 'phar signature downgrade, 7.7', does: 'Requires an OpenSSL signature when a sibling .pubkey is pinned', def: 'block', caveat: 'Plain `include` of a .phar not hooked (never signature-protected); whole-archive-compressed = log-only; PHP 8.6 already fixed upstream' },
+  { cve: 'CVE-2026-129481', title: 'session-shutdown UAF, 8.3–8.5', does: 'Recycles the worker after a shutdown-phase fatal', def: 'opt-in (recycle_on_fatal)', caveat: 'Partial: opt-in; covers 8.3.0–8.3.36 / 8.4.0–8.4.27 / 8.5.0–8.5.12' },
+  { cve: 'CVE-2026-129496', title: 'timezone-cache UAF', does: 'Startup posture warning (ini_risk)', def: 'warn', caveat: 'Flagged only, not blocked (narrow timing-dependent UAF)' },
+  { cve: 'CVE-2026-129474', title: 'magic-method backtrace UAF, 8.5', does: 'Startup posture warning (ini_risk)', def: 'warn', caveat: 'Flagged only' },
+  { cve: 'CVE-2026-129292', title: 'FPM status-page XSS', does: 'Logs requests that plant HTML in the status page', def: 'detect', caveat: 'Detect-only: php-fpm writes the scoreboard before any extension runs, so blocking can\'t un-plant it' },
+];
+const cvesNotCovered = [
+  { cve: 'CVE-2026-129538', why: 'php-cgi PATH_INFO: runs before any extension' },
+  { cve: 'CVE-2026-129291', why: 'FPM master privilege escalation: post-exploitation' },
+  { cve: 'CVE-2026-127960', why: 'folded response headers' },
+  { cve: 'CVE-2026-126714', why: 'needs a ZTS build; Howdah is NTS-only' },
+  { cve: 'CVE-2026-129182, CVE-2026-129501, CVE-2026-129438, CVE-2026-48841', why: 'the 8.4/8.5-only bugs' },
+];
+const esc = (t) => t.replace(/\|/g, '\\|');
+const cveMd = [
+  '| CVE | What Howdah does | Default | Honest caveat |',
+  '|---|---|---|---|',
+  ...cves.map((c) => `| **${c.cve}** (${c.title}) | ${esc(c.does)} | ${esc(c.def)} | ${esc(c.caveat)} |`),
+].join('\n');
+const cveNotMd = cvesNotCovered.map((c) => `- ${c.cve}: ${c.why}`).join('\n');
+
 const data = {
   generated, matrixVersion, source: 'lab/integration/matrix-results.tsv',
   totals: { pass: P, fail: F, skip: S }, corpusFalsePositives: corpusBad,
-  rows, notRunMinors,
+  rows, notRunMinors, cves, cvesNotCovered,
   runtimeSource: 'lab/integration/runtime-results.tsv', runtimes,
 };
 mkdirSync(resolve(here, '../src/data'), { recursive: true });
@@ -651,6 +686,19 @@ another request on that state; the 1.6 out-of-memory backstop already
 worker takes the immediate exit (the 500 is not flushed before teardown there
 anyway), so the producing request's response is dropped; the next-request
 window is closed either way.
+
+## PHP 2026-11-19 CVEs (1.7.1)
+
+The 1.7.1 wave answers the PHP security release of 2026-11-19. Each row says
+what Howdah does, its shipped default and the honest caveat; none is stronger
+than its caveat. PHP 8.6 is a new supported version: it is built NTS from
+source (the official php:8.6 image is ZTS and Howdah is NTS-only).
+
+${cveMd}
+
+**Not covered:**
+
+${cveNotMd}
 
 ## Performance and the OPcache JIT
 

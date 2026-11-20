@@ -80,6 +80,7 @@ configuration) so PHP's multipart callback fires on every version.
 | 8.3.36 | Blocked, 403 (cli-server, php-fpm, Apache mod_php) | Blocked, 403 (cli-server, php-fpm, Apache mod_php) | Run on cli-server, php-fpm, Apache mod_php |
 | 8.4.27 | Blocked, 403 (cli-server, php-fpm, Apache mod_php) | Blocked, 403 (cli-server, php-fpm, Apache mod_php) | Run on cli-server, php-fpm, Apache mod_php |
 | 8.5.12 | Blocked, 403 (cli-server, php-fpm, Apache mod_php) | Blocked, 403 (cli-server, php-fpm, Apache mod_php) | Run on cli-server, php-fpm, Apache mod_php |
+| 8.6 | Not run | Not run | New in 1.7.1. Built NTS from source: the official php:8.6 image is ZTS and Howdah is NTS-only. Not in the multipart matrix above; the 1.7.1 per-CVE lab scripts include PHP 8.6.0 (see the 2026-11-19 CVE table). |
 
 ## Table 2: test results by SAPI
 
@@ -105,6 +106,7 @@ scenario on that SAPI.
 | 8.3.36 | 25/27 pass | 27/27 pass | 27/27 pass |
 | 8.4.27 | 25/27 pass | 27/27 pass | 27/27 pass |
 | 8.5.12 | 25/27 pass | 27/27 pass | 27/27 pass |
+| 8.6 | not run | not run | not run |
 
 Totals in the matrix file: **973 PASS / 0 FAIL / 33 SKIP**. Failures on the
 benign corpus (false positives): **0**.
@@ -133,6 +135,7 @@ version-dependent), shown as "Not run" there but covered by the other SAPIs.
 | 8.3.36 | Enforced (cli-server, php-fpm, Apache mod_php) | Enforced (cli-server, php-fpm, Apache mod_php) | Enforced (php-fpm, Apache mod_php) |
 | 8.4.27 | Enforced (cli-server, php-fpm, Apache mod_php) | Enforced (cli-server, php-fpm, Apache mod_php) | Enforced (php-fpm, Apache mod_php) |
 | 8.5.12 | Enforced (Apache mod_php) | Enforced (Apache mod_php) | Enforced (Apache mod_php) |
+| 8.6 | Not run | Not run | Not run |
 
 *Enforcement (since 1.5):* the input-shape rules (`max_input_vars`, nesting
 depth) **drop** the offending variable(s) (bounding the symbol table — the
@@ -511,6 +514,34 @@ another request on that state; the 1.6 out-of-memory backstop already
 worker takes the immediate exit (the 500 is not flushed before teardown there
 anyway), so the producing request's response is dropped; the next-request
 window is closed either way.
+
+## PHP 2026-11-19 CVEs (1.7.1)
+
+The 1.7.1 wave answers the PHP security release of 2026-11-19. Each row says
+what Howdah does, its shipped default and the honest caveat; none is stronger
+than its caveat. PHP 8.6 is a new supported version: it is built NTS from
+source (the official php:8.6 image is ZTS and Howdah is NTS-only).
+
+| CVE | What Howdah does | Default | Honest caveat |
+|---|---|---|---|
+| **CVE-2026-129289** (FPM request smuggling, 9.2) | Drains the unread request body at teardown, removing the leftover-body desync precondition; + fastcgi_smuggle signature | drain on; signature detect | No-op on PHP 5.4 (no SG(post_read)); demonstrated for the malformed/oversize-multipart trigger the advisory describes. The fastcgi_smuggle signature logs by default; opt into block only after validating against your traffic (raw binary bodies can rarely match) |
+| **CVE-2026-115560** (session serializer mismatch, 9.2) | Withholds a `\|`-bearing upload-progress key from PHP's session tracker so it never reaches unserialize | neutralize in all modes but off; block=403 | Covers the documented injection point (the progress key value), 5.4–8.6 |
+| **CVE-2026-128064** (mixed-case HTTPS/FTPS plaintext, 8.2) | Normalizes the scheme so PHP uses TLS | fix | Redirect hops not re-checked (documented gap); PHP 8.6 already fixed upstream; detect mode reports only |
+| **CVE-2026-129506** (SOAP DTD use-after-free) | Refuses SOAP requests carrying a DTD before the parser sees them | block | Lab-proven on PHP 7.4/8.0/8.1/8.3/8.6; verified hook-no-op where the dev image lacks ext-soap (5.6/7.0/8.5); code supports 5.6+. Block refuses before the parser; handle() is assumed terminal. UTF-16 bodies not scanned; compressed SOAP bodies on PHP 5.x are not inspected (gap) |
+| **CVE-2026-15353** (SOAP arraySize heap over-read) | Refuses malformed arraySize values | block | Same guard and caveats as above (lab-proven on 7.4/8.0/8.1/8.3/8.6; code supports 5.6+; handle() assumed terminal; compressed bodies on PHP 5.x not inspected) |
+| **CVE-2026-128090** (phar signature downgrade, 7.7) | Requires an OpenSSL signature when a sibling .pubkey is pinned | block | Plain `include` of a .phar not hooked (never signature-protected); whole-archive-compressed = log-only; PHP 8.6 already fixed upstream |
+| **CVE-2026-129481** (session-shutdown UAF, 8.3–8.5) | Recycles the worker after a shutdown-phase fatal | opt-in (recycle_on_fatal) | Partial: opt-in; covers 8.3.0–8.3.36 / 8.4.0–8.4.27 / 8.5.0–8.5.12 |
+| **CVE-2026-129496** (timezone-cache UAF) | Startup posture warning (ini_risk) | warn | Flagged only, not blocked (narrow timing-dependent UAF) |
+| **CVE-2026-129474** (magic-method backtrace UAF, 8.5) | Startup posture warning (ini_risk) | warn | Flagged only |
+| **CVE-2026-129292** (FPM status-page XSS) | Logs requests that plant HTML in the status page | detect | Detect-only: php-fpm writes the scoreboard before any extension runs, so blocking can't un-plant it |
+
+**Not covered:**
+
+- CVE-2026-129538: php-cgi PATH_INFO: runs before any extension
+- CVE-2026-129291: FPM master privilege escalation: post-exploitation
+- CVE-2026-127960: folded response headers
+- CVE-2026-126714: needs a ZTS build; Howdah is NTS-only
+- CVE-2026-129182, CVE-2026-129501, CVE-2026-129438, CVE-2026-48841: the 8.4/8.5-only bugs
 
 ## Performance and the OPcache JIT
 

@@ -48,6 +48,8 @@ mod rfc1867;
 mod sink_filter;
 #[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]
 mod ssrf_filter;
+#[cfg(any(feature = "php5", feature = "php7", feature = "php8"))]
+mod soap_filter;
 
 /// Belt-and-suspenders (carry-forward #2): confirm at runtime that this binary
 /// actually catches panics (i.e. was built `panic = "unwind"`). Returns true

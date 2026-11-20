@@ -86,6 +86,17 @@
 
 #define HOWDAH_SINK_TLS 12
 
+/**
+ * Mixed-case `HTTPS://`/`FTPS://` scheme normalization (CVE-2026-128064).
+ */
+#define HOWDAH_SINK_SCHEME_CASE 13
+
+/**
+ * Phar signature downgrade with a pinned `.pubkey` (CVE-2026-128090). `arg` is
+ * the glue-computed verdict token `downgrade` / `indeterminate`.
+ */
+#define HOWDAH_SINK_PHAR_SIG 14
+
 #define HOWDAH_SSRF_KIND_RANGE 0
 
 #define HOWDAH_SSRF_KIND_REBIND 1
@@ -226,6 +237,21 @@
 #define FILE_NAME_WEIGHT 5
 
 /**
+ * Bit set in [`status_injection_fields`]'s result: the authenticated user.
+ */
+#define STATUS_FIELD_USER 1
+
+/**
+ * Bit: the request method.
+ */
+#define STATUS_FIELD_METHOD 2
+
+/**
+ * Bit: the script filename / request path.
+ */
+#define STATUS_FIELD_SCRIPT 4
+
+/**
  * §4.5 cost of one array-nesting level in the parse-memory estimate (bytes).
  * A Zend array (HashTable + initial buckets) is on this order. Provisional;
  * the Task-8 RSS calibration pins it.
@@ -311,6 +337,12 @@ typedef struct RequestMeta {
   const char *uri;
   size_t uri_len;
 } RequestMeta;
+
+/**
+ * Random-access read callback for `howdah_phar_sig_classify`: fill `buf[..len]`
+ * from absolute offset `off`; 1 on a full read, 0 otherwise.
+ */
+typedef int32_t (*howdah_phar_read_t)(void*, uint64_t, uint8_t*, size_t);
 
 /**
  * Create a context from TOML config. Invalid, non-UTF-8 or NULL config falls
@@ -565,6 +597,37 @@ int32_t howdah_behavior_check_php_write(struct howdah_ctx *ctx,
 int32_t howdah_sink_ssrf_armed(struct howdah_ctx *ctx);
 
 /**
+ * Classify the signature type a phar archive declares (CVE-2026-128090): 0 an
+ * OpenSSL type, 1 a keyless digest (downgrade candidate), 2 indeterminate
+ * (compressed, unreadable or not a phar). Only reads through `read`; never
+ * verifies or executes anything. NULL `read` or a panic is 2.
+ *
+ * # Safety
+ * `read` must be safe to call with `ctx` for any in-range offset/len.
+ */
+int32_t howdah_phar_sig_classify(uint64_t size, howdah_phar_read_t read, void *ctx);
+
+/**
+ * `[sinks.scheme_case]` mode for the stream-wrapper proxy: 0 off, 1 detect
+ * (log only, PHP still goes plaintext), 2 fix (lowercase the scheme). NULL ctx
+ * or panic is 0.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_scheme_case_mode(struct howdah_ctx *ctx);
+
+/**
+ * Length of the scheme token if `url` is a mixed-case `https://`/`ftps://`
+ * URL (so the caller lowercases that many leading bytes of a COPY), else 0.
+ * Pure; NULL url is 0.
+ *
+ * # Safety
+ * `url` NULL or valid for `len` bytes.
+ */
+size_t howdah_scheme_case_len(const char *url, size_t len);
+
+/**
  * 1 iff the given sink (`HOWDAH_SINK_*`) is armed (effective mode != off);
  * NULL ctx, unknown sink or panic is 0. Never stashes a log line. Used by the
  * glue to decide, once per process, whether to install the phar/ssrf hooks.
@@ -650,6 +713,18 @@ char *howdah_take_sink_log_line(struct howdah_ctx *ctx);
  * `ctx` NULL or live.
  */
 int32_t howdah_selftest(struct howdah_ctx *ctx);
+
+/**
+ * CVE-2026-115560: report that the session.upload_progress field value held a
+ * serializer-breaking byte. Returns HOWDAH_ALLOW when the rule is off or
+ * excepted (the glue chains the event normally), otherwise HOWDAH_LOG (the glue
+ * withholds the event from session) or HOWDAH_BLOCK (withhold and refuse).
+ * The value is never passed to the core. Panic or NULL ctx returns 0.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_upload_progress_abuse(struct howdah_ctx *ctx);
 
 /**
  * Free a string from `howdah_take_log_line`. NULL is a no-op.
@@ -742,6 +817,17 @@ int32_t howdah_oom_armed(struct howdah_ctx *ctx);
  * `ctx` NULL or live.
  */
 int32_t howdah_recycle_on_fatal(struct howdah_ctx *ctx);
+
+/**
+ * 1 iff the config ARMS the unread-body drain (CVE-2026-129289):
+ * `drain_unread_body` is on AND the global mode is not `off`. 0 for NULL and
+ * on panic (do not drain: the fail-open direction, no behavior change). The glue
+ * applies the SAPI gate on top.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_drain_unread_armed(struct howdah_ctx *ctx);
 
 /**
  * 1 iff the config ARMS the §4.7 recycle facet: `recycle_on_fatal` is on AND
@@ -1095,5 +1181,52 @@ int32_t howdah_sink_check_xml(struct howdah_ctx *ctx,
  * `ctx` NULL or live.
  */
 int32_t howdah_sink_xml_deny_external_entities(struct howdah_ctx *ctx);
+
+/**
+ * 1 iff the SOAP request guard (`[sinks.soap]`) is armed (effective mode !=
+ * off); NULL ctx or panic is 0. Used by the glue to decide, once per process,
+ * whether to swap `SoapServer::handle`.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_soap_armed(struct howdah_ctx *ctx);
+
+/**
+ * SOAP request guard (CVE-2026-129506, CVE-2026-15353). `xml` is the raw
+ * request body about to reach `ext/soap`; `truncated != 0` says the caller
+ * capped an oversized body and `xml` is only its prefix. The body is scanned,
+ * never logged (only a FIXED reason string is). Returns 0 Allow / 1 Log / 2
+ * Block; on Block the glue delivers a clean 403 and does NOT call SOAP. NULL
+ * ctx or a panic is 0 (fail-open). A hit is retrievable with
+ * `howdah_take_sink_log_line`.
+ *
+ * # Safety
+ * `ctx` NULL or live; `xml` NULL or valid for `xml_len` readable bytes.
+ */
+int32_t howdah_soap_check(struct howdah_ctx *ctx,
+                          const char *xml,
+                          size_t xml_len,
+                          int32_t truncated);
+
+/**
+ * Layer-2 FPM status-page HTML injection check (CVE-2026-129292), called once
+ * at RINIT under php-fpm. Each field is a NUL-free byte string or NULL when the
+ * SAPI supplied none. The values are classified for HTML metacharacters and
+ * NEVER logged. Detect-only by default (`[inspect] status_injection`): php-fpm
+ * writes the scoreboard before any extension runs, so even `block` (a clean
+ * refusal) cannot un-plant the entry. Returns 0 Allow, 1 Log, 2 Block; NULL ctx
+ * or panic returns 0.
+ *
+ * # Safety
+ * `ctx` NULL or live; each pointer NULL or valid for its length.
+ */
+int32_t howdah_inspect_status(struct howdah_ctx *ctx,
+                              const char *user,
+                              size_t user_len,
+                              const char *method,
+                              size_t method_len,
+                              const char *script,
+                              size_t script_len);
 
 #endif  /* HOWDAH_CORE_H */

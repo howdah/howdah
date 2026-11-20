@@ -88,6 +88,33 @@ extern "C" {
     /// missing-file sentinel without calling phar.
     pub fn howdah_install_phar_hook(cb: HowdahSinkDecide) -> ::std::ffi::c_int;
 
+    /// Arm the phar signature-downgrade guard (CVE-2026-128090, see
+    /// `phar_hook.c`): proxies the phar wrapper and the Phar/PharData open entry
+    /// points. `classify` is the core's `howdah_phar_sig_classify`. Returns how
+    /// many entry points were hooked (0 if phar is absent).
+    pub fn howdah_install_phar_sig_hook(
+        cb: HowdahSinkDecide,
+        classify: unsafe extern "C" fn(
+            u64,
+            Option<unsafe extern "C" fn(*mut ::std::ffi::c_void, u64, *mut u8, usize) -> i32>,
+            *mut ::std::ffi::c_void,
+        ) -> i32,
+    ) -> ::std::ffi::c_int;
+
+    /// Drop the per-request phar signature verdict cache. Call at every RINIT.
+    pub fn howdah_phar_sig_reset();
+
+    /// Proxy the http/https and ftp/ftps stream wrappers (see `scheme_hook.c`) so a
+    /// mixed-case `HTTPS://`/`FTPS://` URL is reported (and, `mode` 2, lowercased
+    /// so TLS is used; `mode` 1 only reports). `lenfn` is the core's scheme
+    /// classifier. Only registrations still holding PHP's own wrapper are touched.
+    /// Returns how many scheme names were proxied.
+    pub fn howdah_install_scheme_hook(
+        cb: HowdahSinkDecide,
+        lenfn: unsafe extern "C" fn(*const ::std::ffi::c_char, usize) -> usize,
+        mode: ::std::ffi::c_int,
+    ) -> ::std::ffi::c_int;
+
     /// Install the SSRF egress trampolines (see `ssrf_hook.c`): URL sinks,
     /// socket openers and the curl handle->URL map. `armed` gates all DNS work;
     /// `decide` is the Rust verdict. Call once at MINIT.
@@ -182,6 +209,12 @@ extern "C" {
     /// on a persistent fpm/Apache worker.
     pub fn howdah_read_post_reset();
 
+    /// CVE-2026-129289: drain the request body PHP leaves unread (see
+    /// `read_post_hook.c`). Gated in C on a FastCGI-family SAPI, a live
+    /// `server_context` and `!post_read`; suspends the scanner hook for the
+    /// drain; never bails. Returns the bytes drained.
+    pub fn howdah_drain_unread_body() -> i64;
+
     /// PHP's effective PARSED `memory_limit` for this request in bytes
     /// (`PG(memory_limit)`; `-1` = no limit). Not `zend_ini_long`, which would
     /// misread the `128M` shorthand.
@@ -194,6 +227,16 @@ extern "C" {
     /// The request's `Content-Type` (`SG(request_info).content_type`;
     /// NUL-terminated, or NULL). Engine-owned; never freed.
     pub fn howdah_request_content_type() -> *const ::std::ffi::c_char;
+
+    /// FPM status-page injection inputs (CVE-2026-129292): the request's
+    /// authenticated user, method and script filename as the SAPI recorded them
+    /// (NUL-terminated or NULL; engine-owned). Read at RINIT to LOG a planting
+    /// request; php-fpm stores them in its scoreboard before any extension runs.
+    pub fn howdah_req_auth_user() -> *const ::std::ffi::c_char;
+    pub fn howdah_req_method() -> *const ::std::ffi::c_char;
+    pub fn howdah_req_script() -> *const ::std::ffi::c_char;
+    /// 1 iff the SAPI is php-fpm (`fpm-fcgi`).
+    pub fn howdah_sapi_is_fpm() -> ::std::ffi::c_int;
 
     /// 1 iff PHP resolved this request's body as `multipart/form-data` (its
     /// `post_entry` is the multipart reader). The glue arms the byte scanner only
@@ -211,6 +254,15 @@ extern "C" {
     /// startup (`output_handler = ob_gzhandler`) cannot add headers later and
     /// warn "headers already sent".
     pub fn howdah_sys_output_discard_all();
+
+    /// Swap `SoapServer::handle` (see `soap_hook.c`): the trampoline acquires
+    /// the request XML (explicit `$request` arg, else `SG(request_info)
+    /// .request_body`, inflating gzip/deflate on PHP 7+), caps it, and asks the
+    /// SOAP guard callback. On BLOCK the glue delivers a clean 403 and SOAP is
+    /// never called. Call once at first RINIT when the guard is armed (soap is a
+    /// shared ext often loaded after howdah). Returns 1 if swapped (or already
+    /// ours), 0 if the soapserver class is absent (honest no-op). NTS only.
+    pub fn howdah_install_soap_hook(cb: HowdahSoapDecide) -> ::std::ffi::c_int;
 }
 
 extern "C" {
@@ -247,6 +299,16 @@ pub type HowdahMailDecide = unsafe extern "C" fn(
     headers_len: usize,
     params: *const ::std::ffi::c_char,
     params_len: usize,
+) -> ::std::ffi::c_int;
+
+/// The SOAP request guard decide callback (see `soap_hook.c`): the raw request
+/// XML (`xml`/`xml_len`, scanned never logged) and whether an oversized body was
+/// capped to its prefix (`truncated`). Returns 0 ALLOW / 1 LOG / 2 BLOCK; on
+/// BLOCK the glue has already delivered a clean 403 and SOAP must not be called.
+pub type HowdahSoapDecide = unsafe extern "C" fn(
+    xml: *const ::std::ffi::c_char,
+    xml_len: usize,
+    truncated: ::std::ffi::c_int,
 ) -> ::std::ffi::c_int;
 
 /// The XML-string decide callback: the guarded function name, the document, the

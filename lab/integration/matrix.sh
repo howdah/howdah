@@ -40,6 +40,7 @@ spec() {
     8.3) echo "lab-php-8.3 php8" ;;
     8.4) echo "lab-php-8.4 php8" ;;
     8.5) echo "lab-php-8.5 php8" ;;
+    8.6) echo "lab-php-8.6 php8" ;;
     *) echo "UNKNOWN -" ;;
   esac
 }

@@ -94,6 +94,9 @@ pub struct MultipartState {
     /// `finish` to find missing and no `Failed` phase that could stop the
     /// counters.
     structured: bool,
+    /// CVE-2026-129289: FastCGI-framing detector over the bytes eligible for it
+    /// (everything but file-part data and part headers). Feed mode only.
+    fcgi: crate::fcgi_smuggle::FcgiScan,
 }
 
 impl MultipartState {
@@ -141,6 +144,7 @@ impl MultipartState {
             // report parts with `note_part`/`note_data` instead (`feed` stays
             // an error, as before).
             structured: boundary.is_empty(),
+            fcgi: crate::fcgi_smuggle::FcgiScan::new(),
         }
     }
 
@@ -263,7 +267,24 @@ impl MultipartState {
         }
     }
 
+    /// CVE-2026-129289: has FastCGI record framing carrying a dangerous PARAMS
+    /// name been seen outside file-part data? Sticky.
+    pub fn fcgi_smuggle(&self) -> bool {
+        self.fcgi.hit()
+    }
+
     pub fn feed(&mut self, chunk: &[u8]) -> Result<Vec<Event>, MalformedBody> {
+        let r = self.feed_inner(chunk);
+        if r.is_err() {
+            // The parser lost framing: it can no longer say which bytes are file
+            // data, so offer the whole chunk (over-scan; the signature is exact).
+            self.fcgi.push(chunk);
+        }
+        self.fcgi.scan();
+        r
+    }
+
+    fn feed_inner(&mut self, chunk: &[u8]) -> Result<Vec<Event>, MalformedBody> {
         self.total_fed = self.total_fed.saturating_add(chunk.len() as u64);
         let mut ev = Vec::new();
         let mut i = 0;
@@ -278,6 +299,9 @@ impl MultipartState {
                                 if !preamble {
                                     self.data_len += (chunk.len() - i) as u64;
                                 }
+                                if !self.current_is_file {
+                                    self.fcgi.push(&chunk[i..]);
+                                }
                                 i = chunk.len();
                                 continue;
                             }
@@ -285,12 +309,18 @@ impl MultipartState {
                                 if !preamble {
                                     self.data_len += p as u64;
                                 }
+                                if !self.current_is_file {
+                                    self.fcgi.push(&chunk[i..i + p]);
+                                }
                                 i += p;
                             }
                         }
                     }
                     let c = chunk[i];
                     i += 1;
+                    if !self.current_is_file {
+                        self.fcgi.push(&[c]);
+                    }
                     let nm = self.step(self.m, c);
                     if !preamble {
                         // Bytes held as a possible delimiter that turned out
@@ -315,6 +345,7 @@ impl MultipartState {
                 Phase::Epilogue => {
                     let c = chunk[i];
                     i += 1;
+                    self.fcgi.push(&[c]);
                     self.m = self.step(self.m, c);
                     if self.m == self.pat.len() {
                         return Err(self.fail_with("duplicate boundary after closing boundary"));

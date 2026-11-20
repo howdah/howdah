@@ -20,7 +20,7 @@
 #            producing request's 500 delivery is recorded per SAPI (the §4.7
 #            flush-ordering finding). OOM and startup fatals STILL immediate-exit;
 #            a warning still survives.
-#   patched (8.2/8.3/8.4): the facet is off; the phpinfo row reads "off (patched)".
+#   patched (8.2/8.3/8.4): recycle still arms (session_shutdown row, CVE-2026-129481); oom_exit stays off.
 #
 # Runs php-fpm behind a real nginx (sidecar sharing the netns) and Apache mod_php
 # prefork pinned to a single child.

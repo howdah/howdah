@@ -146,6 +146,39 @@ printf '%s\n' "$out" | grep -q '^9 risky setting(s) flagged$'; check "ini: risky
 printf '%s\n' "$out" | grep -c '^      why: ' | grep -q '^9$'; check "ini: every flagged line has a why" $?
 printf '%s\n' "$out" | grep -c '^      set: ' | grep -q '^9$'; check "ini: every flagged line has a fix" $?
 
+# CVE-2026-129496 (timezone cache) and CVE-2026-129474 (fatal backtraces): series-aware
+DFALL='disable_functions => exec,system,passthru,shell_exec,popen,proc_open => x'
+vinfo() { # version, file; extra lines on stdin
+  mkinfo "$2"; sed -i "s/^PHP Version => .*/PHP Version => $1/" "$2"; cat >> "$2"; echo "$DFALL" >> "$2"
+}
+vinfo 8.3.30 "$T/ini/tz.txt" <<EOF
+log_errors => On => On
+error_log => /var/log/php.log => /var/log/php.log
+EOF
+out=$(ini_run "$T/ini/tz.txt")
+printf '%s\n' "$out" | grep -q '^FLAG  date.timezone = (empty)'; check "ini: empty date.timezone + file error_log flagged (CVE-2026-129496)" $?
+printf '%s\n' "$out" | grep -q 'CVE-2026-129496'; check "ini: timezone flag names the CVE" $?
+vinfo 8.6.0 "$T/ini/tz86.txt" <<EOF
+log_errors => On => On
+error_log => /var/log/php.log => /var/log/php.log
+EOF
+ini_run "$T/ini/tz86.txt" | grep -q 'date.timezone'; [ $? -ne 0 ]; check "ini: 8.6 is not flagged for the timezone cache" $?
+vinfo 8.3.30 "$T/ini/tzsys.txt" <<EOF
+log_errors => On => On
+error_log => syslog => syslog
+EOF
+ini_run "$T/ini/tzsys.txt" | grep -q 'date.timezone'; [ $? -ne 0 ]; check "ini: syslog error_log is not flagged" $?
+vinfo 8.5.5 "$T/ini/fb.txt" <<EOF
+fatal_error_backtraces => On => On
+zend.exception_ignore_args => Off => Off
+EOF
+ini_run "$T/ini/fb.txt" | grep -q '^FLAG  fatal_error_backtraces = On'; check "ini: fatal_error_backtraces on 8.5 flagged (CVE-2026-129474)" $?
+vinfo 8.4.20 "$T/ini/fb84.txt" <<EOF
+fatal_error_backtraces => On => On
+zend.exception_ignore_args => Off => Off
+EOF
+ini_run "$T/ini/fb84.txt" | grep -q 'fatal_error_backtraces'; [ $? -ne 0 ]; check "ini: fatal_error_backtraces off-series (8.4) not flagged" $?
+
 # docroot heuristic for session.save_path, and read-only: the ini file is untouched
 sum1=$(cksum < "$T/ini/php.ini")
 mkinfo "$T/ini/docroot.txt" <<EOF

@@ -325,3 +325,40 @@ mod tests {
         assert_eq!(source_for(99, b"q"), None);
     }
 }
+
+/// Layer 2, FPM status-page HTML injection (CVE-2026-129292), once per request
+/// at RINIT. php-fpm copies the request method, authenticated user and script
+/// filename into its scoreboard in `fpm_request_info()`, BEFORE
+/// `php_request_startup()`, so no extension can stop the entry being planted;
+/// this only LOGS (and, with `status_injection = "block"`, refuses the request,
+/// which does NOT remove an entry already planted). On any other SAPI it is one
+/// cheap string compare. The core request is begun only when a field actually
+/// carries an HTML metacharacter, so clean traffic pays nothing more. The
+/// values are classified in the core and never logged. Fail-open at the call
+/// site (`catch_unwind`).
+pub(crate) unsafe fn inspect_status_page_fields() {
+    if module::CTX.is_null() || sys::howdah_sapi_is_fpm() != 1 {
+        return;
+    }
+    let get = |p: *const c_char| -> Option<&'static [u8]> {
+        if p.is_null() {
+            None
+        } else {
+            Some(CStr::from_ptr(p).to_bytes())
+        }
+    };
+    let user = get(sys::howdah_req_auth_user());
+    let method = get(sys::howdah_req_method());
+    let script = get(sys::howdah_req_script());
+    if howdah_core::inspect::status_injection_fields(user, method, script) == 0 {
+        return;
+    }
+    module::maybe_begin();
+    let p = |o: Option<&[u8]>| o.map_or((ptr::null(), 0usize), |b| (b.as_ptr() as *const c_char, b.len()));
+    let (up, ul) = p(user);
+    let (mp, ml) = p(method);
+    let (sp, sl) = p(script);
+    if core::howdah_inspect_status(module::CTX, up, ul, mp, ml, sp, sl) == core::HOWDAH_BLOCK {
+        INPUT_BLOCKED = true;
+    }
+}

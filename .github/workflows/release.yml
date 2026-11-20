@@ -42,10 +42,10 @@ jobs:
       fail-fast: false
       matrix:
         # Full supported matrix. build-release.sh builds <= 8.1 from Remi EL7
-        # headers and 8.2-8.5 from pinned+verified PHP source, both on a
+        # headers and 8.2-8.6 from pinned+verified PHP source, both on a
         # glibc-2.17 (CentOS 7) base, and asserts via objdump that no glibc
         # symbol newer than 2.17 is referenced (the build fails otherwise).
-        minor: ["5.4", "5.5", "5.6", "7.0", "7.1", "7.2", "7.3", "7.4", "8.0", "8.1", "8.2", "8.3", "8.4", "8.5"]
+        minor: ["5.4", "5.5", "5.6", "7.0", "7.1", "7.2", "7.3", "7.4", "8.0", "8.1", "8.2", "8.3", "8.4", "8.5", "8.6"]
     steps:
       - uses: actions/checkout@v4
 
@@ -82,7 +82,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        minor: ["5.4", "5.5", "5.6", "7.0", "7.1", "7.2", "7.3", "7.4", "8.0", "8.1", "8.2", "8.3", "8.4", "8.5"]
+        minor: ["5.4", "5.5", "5.6", "7.0", "7.1", "7.2", "7.3", "7.4", "8.0", "8.1", "8.2", "8.3", "8.4", "8.5", "8.6"]
     steps:
       - uses: actions/checkout@v4
 
@@ -112,7 +112,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        minor: ["5.4", "5.5", "5.6", "7.0", "7.1", "7.2", "7.3", "7.4", "8.0", "8.1", "8.2", "8.3", "8.4", "8.5"]
+        minor: ["5.4", "5.5", "5.6", "7.0", "7.1", "7.2", "7.3", "7.4", "8.0", "8.1", "8.2", "8.3", "8.4", "8.5", "8.6"]
     steps:
       - uses: actions/checkout@v4
 

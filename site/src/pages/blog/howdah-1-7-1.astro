@@ -1,0 +1,58 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { REPO } from '../../lib/site';
+---
+<Layout
+  title="Howdah 1.7.1: virtual patches for the November 2026 PHP CVEs"
+  description="On 2026-11-19 PHP shipped fixes for 18 CVEs, and end-of-life PHP gets none of them. Howdah 1.7.1 virtually patches many of them in-process on PHP 5.4 to 8.6, and adds PHP 8.6 support."
+  path="/blog/howdah-1-7-1/"
+>
+  <article class="post">
+    <div class="pagehead">
+      <div class="wrap">
+        <p class="crumbs"><a href="/">Home</a> / <a href="/blog/">Blog</a> / <span aria-current="page">Howdah 1.7.1</span></p>
+        <h1>Howdah 1.7.1: virtual patches for the November 2026 PHP CVEs</h1>
+        <p class="lede"><time datetime="2026-11-19">19 November 2026</time></p>
+      </div>
+    </div>
+
+    <div class="wrap prose">
+      <p>On 19 November 2026 PHP shipped fixes for 18 CVEs, in PHP 8.2.36, 8.3.37, 8.4.28, 8.5.13 and 8.6.0. Most of the bugs reach back to PHP 5.x, and PHP 8.1 and older are end of life, so they will never get the upstream fix. Howdah runs inside PHP on every version from 5.4 to 8.6, which lets it add a virtual patch on exactly the versions that will not be patched. 1.7.1 does that for the bugs an in-process extension can reach and says plainly which ones it cannot. It is a virtual patch, not a replacement: upgrade PHP where you can.</p>
+
+      <h2>PHP 8.6 is supported</h2>
+      <p>PHP 8.6 is now a supported and tested version. Howdah is built for non-thread-safe (NTS) PHP only, and the official <code>php:8.6</code> image is thread-safe (ZTS), so the 8.6 lab, CI and packages build PHP from source as NTS. Supported versions now run from 5.4 to 8.6.</p>
+
+      <h2>What is covered</h2>
+      <p>The wording below matches the <a href="/coverage/">coverage page</a>.</p>
+      <ul class="facts">
+        <li><strong>CVE-2026-129289, FPM request smuggling (covered).</strong> Howdah drains the unread request body at teardown, removing the leftover-body desync precondition, and adds a <code>fastcgi_smuggle</code> detection rule. The drain is on by default; the signature logs by default. The drain is a no-op on PHP 5.4, which predates the bug. It is demonstrated for the malformed or oversize multipart trigger the advisory describes. Opt the signature into block only after validating it against your traffic, since raw binary bodies can occasionally match it.</li>
+        <li><strong>CVE-2026-115560, session serializer mismatch (covered).</strong> A serializer-breaking upload-progress key is withheld from PHP's session tracker so it never reaches <code>unserialize()</code>. It covers the documented injection point, on 5.4 to 8.6.</li>
+        <li><strong>CVE-2026-128064, mixed-case HTTPS/FTPS sent in plaintext (covered).</strong> Howdah normalizes the URL scheme so PHP uses TLS. On by default (<code>[sinks.scheme_case] mode = fix</code>). Redirect hops are not re-checked, and PHP 8.6 already fixed this upstream.</li>
+        <li><strong>CVE-2026-129506 and CVE-2026-15353, SoapServer DTD use-after-free and arraySize heap over-read (covered).</strong> SOAP requests carrying a DTD or a malformed arraySize are refused before the parser sees them. On by default (<code>[sinks.soap] mode = block</code>). Lab-proven on PHP 7.4, 8.0, 8.1, 8.3 and 8.6; verified hook-no-op where the dev image lacks ext-soap (5.6, 7.0, 8.5); the code supports 5.6 and up. This assumes <code>SoapServer::handle()</code> is terminal. UTF-16 bodies are not scanned, and compressed SOAP bodies on PHP 5.x are not inspected.</li>
+        <li><strong>CVE-2026-128090, phar signature downgrade (covered).</strong> Howdah requires an OpenSSL signature when a sibling <code>.pubkey</code> is pinned. On by default (<code>[sinks.phar] signature = block</code>). A plain <code>include</code> of a <code>.phar</code> is not hooked, whole-archive-compressed phars are log-only, and PHP 8.6 already fixed this upstream.</li>
+        <li><strong>CVE-2026-129481, session-shutdown use-after-free (partial, opt-in).</strong> The worker-recycle facet (<code>recycle_on_fatal</code>) now covers it on affected 8.3.0 to 8.3.36, 8.4.0 to 8.4.27 and 8.5.0 to 8.5.12. It is off by default.</li>
+        <li><strong>CVE-2026-129292, FPM status-page XSS (detect-only).</strong> <code>status_injection</code> logs requests that plant HTML into the status page. php-fpm writes the scoreboard before any extension runs, so Howdah cannot un-plant it.</li>
+        <li><strong>CVE-2026-129496 (timezone-cache use-after-free) and CVE-2026-129474 (magic-method backtrace use-after-free, PHP 8.5) (flagged only).</strong> Howdah prints a read-only startup posture warning. It does not block anything for these.</li>
+      </ul>
+      <p>The rule catalog grows from 46 to 51.</p>
+
+      <h2>What is not covered</h2>
+      <ul class="facts">
+        <li><strong>CVE-2026-129538 (php-cgi PATH_INFO)</strong> is handled before any extension runs.</li>
+        <li><strong>CVE-2026-129291 (FPM master privilege escalation)</strong> is post-exploitation, outside what an in-process extension can stop.</li>
+        <li><strong>CVE-2026-127960 (folded HTTP response headers)</strong> is not covered.</li>
+        <li><strong>CVE-2026-126714</strong> needs a thread-safe build, and Howdah is NTS-only.</li>
+        <li><strong>CVE-2026-129182, CVE-2026-129501, CVE-2026-129438 and CVE-2026-48841</strong> affect only PHP 8.4 and 8.5.</li>
+      </ul>
+      <p>The <a href="/coverage/">coverage page</a> has the full per-CVE table, defaults and caveats.</p>
+
+      <h2>Upgrade</h2>
+      <p>Debian and Ubuntu: <code>apt-get update &amp;&amp; apt-get upgrade</code>. RHEL family: the yum equivalent. Fresh installs start at the <a href="/install/">install picker</a>, builds are on the <a href="/downloads/">downloads page</a>, and every release is signed (see <a href="/docs/verify/">verifying a release</a>). The source and this site are on <a href={REPO}>GitHub</a>.</p>
+    </div>
+  </article>
+</Layout>
+
+<style>
+  .prose { max-width: 46rem; padding-bottom: 1rem; }
+  .prose h2 { margin-top: 2rem; }
+</style>

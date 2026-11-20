@@ -514,6 +514,75 @@ pub fn cgi_arg_injection(query: &[u8], max_bytes: usize) -> bool {
     })
 }
 
+// ---- FPM status-page HTML injection (CVE-2026-129292) ----------------------
+//
+// php-fpm's full-HTML status page prints the scoreboard's request method,
+// authenticated user and script filename without escaping. The scoreboard is
+// filled before any extension runs, so this is detect-only: the classifier
+// reports WHICH field carries an HTML metacharacter; the values are never
+// logged (the reason is a fixed string per field class).
+
+/// Bit set in [`status_injection_fields`]'s result: the authenticated user.
+pub const STATUS_FIELD_USER: u8 = 1;
+/// Bit: the request method.
+pub const STATUS_FIELD_METHOD: u8 = 2;
+/// Bit: the script filename / request path.
+pub const STATUS_FIELD_SCRIPT: u8 = 4;
+
+fn has_html_meta(v: Option<&[u8]>) -> bool {
+    v.is_some_and(|b| b.iter().any(|c| matches!(c, b'<' | b'>' | b'"' | b'\'' | b'&')))
+}
+
+/// Which of the three scoreboard-visible fields contain `<`, `>`, `"`, `'` or
+/// `&`. Returns a bitmask of `STATUS_FIELD_*` (0 = clean). Pure, linear.
+pub fn status_injection_fields(auth_user: Option<&[u8]>, method: Option<&[u8]>, script: Option<&[u8]>) -> u8 {
+    ((has_html_meta(auth_user) as u8) * STATUS_FIELD_USER)
+        | ((has_html_meta(method) as u8) * STATUS_FIELD_METHOD)
+        | ((has_html_meta(script) as u8) * STATUS_FIELD_SCRIPT)
+}
+
+/// Fixed, value-free reason for a non-zero field mask.
+pub fn status_injection_reason(mask: u8) -> String {
+    let mut f = Vec::new();
+    if mask & STATUS_FIELD_USER != 0 {
+        f.push("auth user");
+    }
+    if mask & STATUS_FIELD_METHOD != 0 {
+        f.push("request method");
+    }
+    if mask & STATUS_FIELD_SCRIPT != 0 {
+        f.push("script path");
+    }
+    format!("fpm status: {} contains HTML metacharacters", f.join(" and "))
+}
+
+#[cfg(test)]
+mod status_injection_tests {
+    use super::*;
+
+    #[test]
+    fn flags_each_field_and_reason_names_no_value() {
+        let m = status_injection_fields(Some(b"<svg/onload=x>"), None, None);
+        assert_eq!(m, STATUS_FIELD_USER);
+        let r = status_injection_reason(m);
+        assert_eq!(r, "fpm status: auth user contains HTML metacharacters");
+        assert!(!r.contains("svg"));
+        assert_eq!(status_injection_fields(None, Some(b"G\"ET"), Some(b"/a&b.php")), STATUS_FIELD_METHOD | STATUS_FIELD_SCRIPT);
+        assert_eq!(status_injection_fields(None, None, Some(b"/x'y")), STATUS_FIELD_SCRIPT);
+    }
+
+    #[test]
+    fn benign_values_are_clean() {
+        assert_eq!(
+            status_injection_fields(Some(b"alice"), Some(b"GET"), Some(b"/var/www/html/index.php")),
+            0
+        );
+        assert_eq!(status_injection_fields(Some(b"bob.smith"), Some(b"PUT"), Some(b"/app/a-b_c.php")), 0);
+        assert_eq!(status_injection_fields(Some(b"o@x.org"), Some(b"POST"), None), 0);
+        assert_eq!(status_injection_fields(None, None, None), 0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

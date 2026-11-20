@@ -39,6 +39,7 @@ impl Layer {
             | RuleId::ParseMemoryBudget
             | RuleId::MalformedMultipart
             | RuleId::UploadProgressAbuse
+            | RuleId::FastcgiSmuggle
             | RuleId::SelfTest
             | RuleId::MaxInputVars
             | RuleId::MaxInputNestingDepth
@@ -51,7 +52,7 @@ impl Layer {
             | RuleId::PostTooLarge
             | RuleId::NestingBudget
             | RuleId::ParseMemoryEstimate => Layer::Limits,
-            RuleId::SqlInjection | RuleId::PathTraversal | RuleId::CommandInjection | RuleId::CgiArgInjection => {
+            RuleId::SqlInjection | RuleId::PathTraversal | RuleId::CommandInjection | RuleId::CgiArgInjection | RuleId::StatusInjection => {
                 Layer::Inspect
             }
             RuleId::CommandExec
@@ -68,7 +69,10 @@ impl Layer {
             | RuleId::AssertString
             | RuleId::DangerousCallback
             | RuleId::Xxe
-            | RuleId::TlsVerify => Layer::Sinks,
+            | RuleId::TlsVerify
+            | RuleId::TlsSchemeCase
+            | RuleId::PharSignature
+            | RuleId::SoapRequest => Layer::Sinks,
             RuleId::UploadExec
             | RuleId::UnexpectedBinary
             | RuleId::UnexpectedEgress

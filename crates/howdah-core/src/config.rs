@@ -217,6 +217,11 @@ pub struct InspectConfig {
     /// blocks it), like a Critical rule; a `[inspect.rule_modes] cgi_arg_injection`
     /// entry overrides it. `enabled = false` and a global `off` still silence it.
     pub cgi_arg: Mode,
+    /// FPM status-page HTML injection (CVE-2026-129292). DETECT by default: php-fpm
+    /// stores the scoreboard entry before any extension runs, so `block` can refuse
+    /// the request but can NOT un-plant the entry. A `[inspect.rule_modes]
+    /// status_injection` entry overrides it.
+    pub status_injection: Mode,
     pub limits: InspectLimits,
     /// Per-class mode overrides.
     pub rule_modes: BTreeMap<RuleId, Mode>,
@@ -231,6 +236,7 @@ impl Default for InspectConfig {
             traversal: true,
             cmdi: true,
             cgi_arg: Mode::Block,
+            status_injection: Mode::Detect,
             limits: InspectLimits::defaults(),
             rule_modes: BTreeMap::new(),
         }
@@ -265,6 +271,18 @@ impl InspectConfig {
             Mode::Off
         } else {
             self.rule_modes.get(&RuleId::CgiArgInjection).copied().unwrap_or(self.cgi_arg)
+        }
+    }
+
+    /// Effective mode of the FPM status-page injection rule (CVE-2026-129292).
+    /// Off if the global mode is off or Layer 2 is disabled; otherwise a
+    /// `[inspect.rule_modes] status_injection` entry, else `status_injection`
+    /// (default `detect`: blocking cannot un-plant the scoreboard entry).
+    pub fn status_injection_mode(&self, global: Mode) -> Mode {
+        if global == Mode::Off || !self.enabled {
+            Mode::Off
+        } else {
+            self.rule_modes.get(&RuleId::StatusInjection).copied().unwrap_or(self.status_injection)
         }
     }
 }
@@ -340,11 +358,16 @@ impl Default for UnserializeConfig {
 pub struct PharConfig {
     pub mode: Option<Mode>,
     pub allow_paths: Vec<String>,
+    /// Refuse a phar whose declared signature type is a keyless digest while a
+    /// sibling `<archive>.pubkey` is pinned (CVE-2026-128090). `block` (default),
+    /// `detect` or `off`. Independent of `mode` (the deserialization guard) and of
+    /// `sinks.mode`; a global `off` or `[sinks] enabled = false` still silences it.
+    pub signature: Mode,
 }
 
 impl Default for PharConfig {
     fn default() -> Self {
-        PharConfig { mode: Some(Mode::Off), allow_paths: Vec::new() }
+        PharConfig { mode: Some(Mode::Off), allow_paths: Vec::new(), signature: Mode::Block }
     }
 }
 
@@ -466,6 +489,11 @@ pub struct SinkConfig {
     /// Detect-only in this release: a `block` here or inherited is logged,
     /// not enforced.
     pub tls: LegacySinkConfig,
+    /// Mixed-case TLS URL scheme normalization (default `fix`).
+    pub scheme_case: SchemeCaseConfig,
+    /// SOAP request guard (default `block`): refuse a prolog DTD/DOCTYPE or a
+    /// malformed SOAP-ENC `arraySize` before `ext/soap` parses it.
+    pub soap: SoapConfig,
 }
 
 /// Settings of one legacy-era sink: a mode that inherits `sinks.mode`.
@@ -521,6 +549,49 @@ impl XmlConfig {
     }
 }
 
+/// What to do with a mixed-case `HTTPS://` / `FTPS://` URL (CVE-2026-128064).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SchemeCaseMode {
+    /// Lowercase the scheme before PHP opens the URL so TLS is used, and log.
+    Fix,
+    /// Log only. PHP still sends the request in plaintext: detect does NOT protect.
+    Detect,
+    Off,
+}
+
+/// `[sinks.scheme_case]`. Independent of `sinks.mode` (default `fix`); a global
+/// `off` or `[sinks] enabled = false` still silences it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SchemeCaseConfig {
+    pub mode: SchemeCaseMode,
+}
+
+impl Default for SchemeCaseConfig {
+    fn default() -> Self {
+        SchemeCaseConfig { mode: SchemeCaseMode::Fix }
+    }
+}
+
+/// `[sinks.soap]`: the SOAP request guard (CVE-2026-129506 DTD use-after-free,
+/// CVE-2026-15353 malformed `arraySize` heap over-read). Enforced by default
+/// (`mode` defaults to `block`) and independent of `sinks.mode` (like
+/// `[sinks.xml]`): a request whose body opens with a prolog DTD/DOCTYPE or
+/// carries a malformed SOAP-ENC `arraySize` is refused before `ext/soap`
+/// parses it. A global `off` or `[sinks] enabled = false` still silences it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SoapConfig {
+    pub mode: Mode,
+}
+
+impl Default for SoapConfig {
+    fn default() -> Self {
+        SoapConfig { mode: Mode::Block }
+    }
+}
+
 impl Default for SinkConfig {
     fn default() -> Self {
         SinkConfig {
@@ -540,6 +611,8 @@ impl Default for SinkConfig {
             callback: LegacySinkConfig::default(),
             xml: XmlConfig::default(),
             tls: LegacySinkConfig::default(),
+            scheme_case: SchemeCaseConfig::default(),
+            soap: SoapConfig::default(),
         }
     }
 }
@@ -669,6 +742,8 @@ impl SinkConfig {
             SinkId::Eval => self.eval.mode,
             SinkId::Unserialize => self.unserialize.mode,
             SinkId::Phar => self.phar.mode,
+            // Own key, independent of `phar.mode` and `sinks.mode`.
+            SinkId::PharSig => Some(self.phar.signature),
             SinkId::Ssrf => self.ssrf.mode,
             SinkId::Mail => self.mail.mode,
             SinkId::PregEval => self.preg_eval.mode,
@@ -678,8 +753,35 @@ impl SinkConfig {
             // Enforced by default and independent of `sinks.mode` (see `XmlConfig`).
             SinkId::Xml => Some(self.xml.mode),
             SinkId::Tls => self.tls.mode,
+            // Own mode enum, independent of sinks.mode: any non-off value is
+            // "armed" (reported as Detect; the fix/detect split is `scheme_case_mode`).
+            SinkId::SchemeCase => Some(match self.scheme_case.mode {
+                SchemeCaseMode::Off => Mode::Off,
+                _ => Mode::Detect,
+            }),
         };
         sub.unwrap_or(self.mode)
+    }
+
+    /// Resolved `[sinks.scheme_case]` mode: off if the global mode is off or
+    /// sinks are disabled.
+    pub fn scheme_case_mode(&self, global: Mode) -> SchemeCaseMode {
+        if global == Mode::Off || !self.enabled {
+            SchemeCaseMode::Off
+        } else {
+            self.scheme_case.mode
+        }
+    }
+
+    /// Effective `[sinks.soap]` mode: off if the global mode is off or sinks are
+    /// disabled, else the SOAP guard's own mode (default `block`). Independent
+    /// of `sinks.mode` and the global `detect`/`block`, like the `xxe` rule.
+    pub fn soap_mode(&self, global: Mode) -> Mode {
+        if global == Mode::Off || !self.enabled {
+            Mode::Off
+        } else {
+            self.soap.mode
+        }
     }
 
     /// True iff the `[sinks.xml] external_entities = "deny"` toggle is in
@@ -817,13 +919,19 @@ pub struct Config {
     /// `max_execution_time` — so the worker never serves a second request on the
     /// state CVE-2026-109619 leaves behind (§4.7). The producing request still
     /// delivers its own 500. **Off by default** (an operator opt-in for
-    /// unpatched, long-lived-worker deployments). Same gates as `oom_exit`: web
-    /// SAPIs only, off on patched engines (decided by the glue at startup).
+    /// unpatched, long-lived-worker deployments). Web SAPIs only (decided by the
+    /// glue at startup). Unlike `oom_exit` it is NOT disabled on patched engines:
+    /// 8.3.36 / 8.4.27 / 8.5.12 still have the session-shutdown UAF CVE-2026-129481.
     pub recycle_on_fatal: bool,
     /// When `recycle_on_fatal` is on, only LOG a "would-recycle" event instead
     /// of recycling, so an operator can size their uncaught-fatal rate before
     /// enforcing. Off by default (enforce). No effect unless the facet is armed.
     pub recycle_observe: bool,
+    /// Drain the request body PHP leaves unread (CVE-2026-129289) before the next
+    /// request on a FastCGI connection can parse it. On by default; a global
+    /// `mode = "off"` also disables it. Not a rule: it completes what PHP should
+    /// have done, so it has no `[rules]` entry and adds nothing to the catalog.
+    pub drain_unread_body: bool,
 }
 
 #[derive(Deserialize)]
@@ -842,6 +950,7 @@ struct RawConfig {
     oom_exit: bool,
     recycle_on_fatal: bool,
     recycle_observe: bool,
+    drain_unread_body: bool,
 }
 
 impl Default for RawConfig {
@@ -851,7 +960,7 @@ impl Default for RawConfig {
             mode: c.mode,
             limits: c.limits,
             log: c.log,
-            rules: c.rule_modes,
+            rules: BTreeMap::new(),
             inspect: c.inspect,
             sinks: c.sinks,
             behavior: c.behavior,
@@ -861,6 +970,7 @@ impl Default for RawConfig {
             oom_exit: c.oom_exit,
             recycle_on_fatal: c.recycle_on_fatal,
             recycle_observe: c.recycle_observe,
+            drain_unread_body: c.drain_unread_body,
         }
     }
 }
@@ -922,11 +1032,18 @@ impl Config {
             }
         }
         crate::exceptions::Exceptions::validate(&raw.exceptions).map_err(ConfigError)?;
+        // `fastcgi_smuggle` defaults to detect (log only): the always-on body drain
+        // is the enforcement; a false block of an upload is the costlier error.
+        // `[rules] fastcgi_smuggle = "block"` opts in. Global `off` stays absolute.
+        let mut rule_modes = raw.rules;
+        if raw.mode != Mode::Off {
+            rule_modes.entry(RuleId::FastcgiSmuggle).or_insert(Mode::Detect);
+        }
         Ok(Config {
             mode: raw.mode,
             limits: raw.limits,
             log: raw.log,
-            rule_modes: raw.rules,
+            rule_modes,
             inspect: raw.inspect,
             sinks: raw.sinks,
             behavior: raw.behavior,
@@ -936,6 +1053,7 @@ impl Config {
             oom_exit: raw.oom_exit,
             recycle_on_fatal: raw.recycle_on_fatal,
             recycle_observe: raw.recycle_observe,
+            drain_unread_body: raw.drain_unread_body,
         })
     }
 
@@ -997,7 +1115,7 @@ impl Config {
             mode: Mode::Block,
             limits: Limits::default(),
             log: LogConfig::default(),
-            rule_modes: BTreeMap::new(),
+            rule_modes: BTreeMap::from([(RuleId::FastcgiSmuggle, Mode::Detect)]),
             inspect: InspectConfig::default(),
             sinks: SinkConfig::default(),
             behavior: BehaviorConfig::default(),
@@ -1007,6 +1125,7 @@ impl Config {
             oom_exit: true,
             recycle_on_fatal: false,
             recycle_observe: false,
+            drain_unread_body: true,
         }
     }
 }
@@ -1258,7 +1377,22 @@ self_test = "off"
         assert_eq!(c.mode, Mode::Block);
         assert!(c.limits.max_parts > 0);
         assert!(c.limits.validate().is_ok());
-        assert!(c.rule_modes.is_empty());
+        assert_eq!(c.rule_modes.get(&RuleId::FastcgiSmuggle), Some(&Mode::Detect));
+        assert_eq!(c.rule_modes.len(), 1);
+    }
+
+    #[test]
+    fn fastcgi_smuggle_defaults_to_detect_and_block_is_opt_in() {
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.mode, Mode::Block);
+        assert_eq!(c.rule_modes.get(&RuleId::FastcgiSmuggle), Some(&Mode::Detect));
+        let c = Config::from_toml("[rules]\nsql_injection = \"detect\"").unwrap();
+        assert_eq!(c.rule_modes.get(&RuleId::FastcgiSmuggle), Some(&Mode::Detect));
+        let c = Config::from_toml("[rules]\nfastcgi_smuggle = \"block\"").unwrap();
+        assert_eq!(c.rule_modes.get(&RuleId::FastcgiSmuggle), Some(&Mode::Block));
+        // Global off stays absolute: no default override re-arms the rule.
+        let c = Config::from_toml("mode = \"off\"").unwrap();
+        assert!(!c.rule_modes.contains_key(&RuleId::FastcgiSmuggle));
     }
 
     #[test]
@@ -1280,6 +1414,22 @@ self_test = "off"
         let c = Config::from_toml("[inspect]\nmode = \"block\"\ncmdi = false").unwrap();
         assert_eq!(c.inspect.effective_mode(Mode::Block), Mode::Block);
         assert!(!c.inspect.class_enabled(crate::inspect::InspectClass::CommandInjection));
+    }
+
+    #[test]
+    fn status_injection_defaults_to_detect() {
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.inspect.status_injection, Mode::Detect);
+        for g in [Mode::Detect, Mode::Block] {
+            assert_eq!(c.inspect.status_injection_mode(g), Mode::Detect, "{g:?}");
+        }
+        assert_eq!(c.inspect.status_injection_mode(Mode::Off), Mode::Off);
+        let b = Config::from_toml("[inspect]\nstatus_injection = \"block\"").unwrap();
+        assert_eq!(b.inspect.status_injection_mode(Mode::Detect), Mode::Block);
+        let o = Config::from_toml("[inspect]\nstatus_injection = \"block\"\n[inspect.rule_modes]\nstatus_injection = \"off\"").unwrap();
+        assert_eq!(o.inspect.status_injection_mode(Mode::Detect), Mode::Off);
+        let d = Config::from_toml("[inspect]\nenabled = false\nstatus_injection = \"block\"").unwrap();
+        assert_eq!(d.inspect.status_injection_mode(Mode::Detect), Mode::Off);
     }
 
     #[test]
@@ -1381,6 +1531,32 @@ self_test = "off"
     #[test]
     fn sinks_unknown_key_rejected() {
         assert!(Config::from_toml("[sinks]\nnope = 1").is_err());
+    }
+
+    #[test]
+    fn phar_signature_defaults_block_and_is_independent() {
+        use crate::sinks::SinkId;
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.sinks.phar.signature, Mode::Block);
+        // Existing deserialization guard stays off by default.
+        assert_eq!(c.sinks.effective_mode(SinkId::Phar, Mode::Detect), Mode::Off);
+        assert_eq!(c.sinks.effective_mode(SinkId::PharSig, Mode::Detect), Mode::Block);
+        // Independent of sinks.mode and of phar.mode, in both directions.
+        let c = Config::from_toml("[sinks]\nmode=\"detect\"\n[sinks.phar]\nmode=\"block\"\nsignature=\"off\"").unwrap();
+        assert_eq!(c.sinks.effective_mode(SinkId::Phar, Mode::Detect), Mode::Block);
+        assert_eq!(c.sinks.effective_mode(SinkId::PharSig, Mode::Detect), Mode::Off);
+        let c = Config::from_toml("[sinks.phar]\nmode=\"off\"\nsignature=\"detect\"").unwrap();
+        assert_eq!(c.sinks.effective_mode(SinkId::Phar, Mode::Block), Mode::Off);
+        assert_eq!(c.sinks.effective_mode(SinkId::PharSig, Mode::Block), Mode::Detect);
+        // Existing keys keep working alongside the new one.
+        let c = Config::from_toml("[sinks.phar]\nallow_paths=[\"/a.phar\"]").unwrap();
+        assert_eq!(c.sinks.phar.signature, Mode::Block);
+        assert_eq!(c.sinks.phar.allow_paths, vec!["/a.phar".to_string()]);
+        // Global off / sinks disabled still silence it.
+        assert_eq!(c.sinks.effective_mode(SinkId::PharSig, Mode::Off), Mode::Off);
+        let c = Config::from_toml("[sinks]\nenabled=false").unwrap();
+        assert_eq!(c.sinks.effective_mode(SinkId::PharSig, Mode::Block), Mode::Off);
+        assert!(Config::from_toml("[sinks.phar]\nsignature=\"nope\"").is_err());
     }
 
     #[test]
@@ -1677,6 +1853,46 @@ self_test = "off"
         // A global or [sinks] block never arms them past what the others get.
         let c = Config::from_toml("mode=\"block\"").unwrap();
         assert_eq!(c.sinks.effective_mode(SinkId::Callback, Mode::Block), Mode::Detect);
+    }
+
+    #[test]
+    fn scheme_case_modes() {
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.sinks.scheme_case.mode, SchemeCaseMode::Fix);
+        assert_eq!(c.sinks.scheme_case_mode(Mode::Detect), SchemeCaseMode::Fix);
+        assert_eq!(c.sinks.scheme_case_mode(Mode::Off), SchemeCaseMode::Off);
+        assert_eq!(c.sinks.effective_mode(SinkId::SchemeCase, Mode::Detect), Mode::Detect);
+        let c = Config::from_toml("[sinks.scheme_case]\nmode=\"detect\"").unwrap();
+        assert_eq!(c.sinks.scheme_case_mode(Mode::Block), SchemeCaseMode::Detect);
+        let c = Config::from_toml("[sinks.scheme_case]\nmode=\"off\"").unwrap();
+        assert_eq!(c.sinks.effective_mode(SinkId::SchemeCase, Mode::Detect), Mode::Off);
+        // Independent of sinks.mode.
+        let c = Config::from_toml("[sinks]\nmode=\"off\"").unwrap();
+        assert_eq!(c.sinks.scheme_case_mode(Mode::Detect), SchemeCaseMode::Fix);
+        assert!(Config::from_toml("[sinks.scheme_case]\nmode=\"block\"").is_err());
+        assert!(Config::from_toml("[sinks.scheme_case]\nnope=1").is_err());
+    }
+
+    #[test]
+    fn soap_guard_block_by_default_and_independent_of_sinks_mode() {
+        // Default: block, under global detect or block.
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.sinks.soap.mode, Mode::Block);
+        assert_eq!(c.sinks.soap_mode(Mode::Detect), Mode::Block);
+        assert_eq!(c.sinks.soap_mode(Mode::Block), Mode::Block);
+        // Global off (or sinks disabled) silences it.
+        assert_eq!(c.sinks.soap_mode(Mode::Off), Mode::Off);
+        let c = Config::from_toml("[sinks]\nenabled=false").unwrap();
+        assert_eq!(c.sinks.soap_mode(Mode::Block), Mode::Off);
+        // Independent of sinks.mode.
+        let c = Config::from_toml("[sinks]\nmode=\"off\"").unwrap();
+        assert_eq!(c.sinks.soap_mode(Mode::Block), Mode::Block);
+        // Explicit detect / off.
+        let c = Config::from_toml("[sinks.soap]\nmode=\"detect\"").unwrap();
+        assert_eq!(c.sinks.soap_mode(Mode::Block), Mode::Detect);
+        let c = Config::from_toml("[sinks.soap]\nmode=\"off\"").unwrap();
+        assert_eq!(c.sinks.soap_mode(Mode::Block), Mode::Off);
+        assert!(Config::from_toml("[sinks.soap]\nnope=1").is_err());
     }
 
     #[test]

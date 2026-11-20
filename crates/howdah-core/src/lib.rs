@@ -3,6 +3,7 @@ pub mod behavior;
 pub mod boundary;
 pub mod config;
 pub mod exceptions;
+pub mod fcgi_smuggle;
 pub mod ffi;
 pub mod input;
 pub mod inspect;

@@ -5,6 +5,26 @@ All notable changes to Howdah are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-11-19
+
+Virtual patches for the PHP CVEs released on 2026-11-19 (PHP 8.2.36 / 8.3.37 / 8.4.28 / 8.5.13 / 8.6.0), so unpatched and end-of-life PHP (5.4–8.6) is protected in-process. Added PHP 8.6 as a supported version.
+
+### Added
+- PHP 8.6 support — built and tested NTS from source (the official php:8.6 image is ZTS; Howdah is NTS-only). Lab, CI, and packaging now include 8.6.
+- CVE-2026-129289 (FPM request smuggling): Howdah drains the unread request body at teardown, removing the leftover-body desync precondition, plus a `fastcgi_smuggle` detection rule. Drain on by default (no-op on PHP 5.4, which predates the bug); `fastcgi_smuggle` logs by default.
+- CVE-2026-115560 (session serializer mismatch): `upload_progress_abuse` now withholds a serializer-breaking upload-progress key from PHP's session tracker so it never reaches unserialize().
+- CVE-2026-128064 (mixed-case HTTPS/FTPS sent in plaintext): Howdah normalizes the URL scheme so PHP uses TLS. On by default (`[sinks.scheme_case] mode = fix`).
+- CVE-2026-129506 and CVE-2026-15353 (SoapServer DTD use-after-free and SOAP arraySize heap over-read): Howdah refuses SOAP requests carrying a DTD or a malformed SOAP-ENC arraySize before they reach the parser. On by default (`[sinks.soap] mode = block`).
+- CVE-2026-128090 (phar signature downgrade): Howdah requires an OpenSSL signature when a sibling `.pubkey` is pinned. On by default (`[sinks.phar] signature = block`).
+- CVE-2026-129481 (session-shutdown use-after-free): the opt-in worker-recycle facet now covers it on affected 8.3–8.5 builds.
+- CVE-2026-129292 (FPM status-page XSS): `status_injection` logs requests that plant HTML into the status page (detect-only — php-fpm records the scoreboard before any extension runs, so it cannot be un-planted).
+- Read-only startup posture warnings for CVE-2026-129496 (timezone-cache UAF) and CVE-2026-129474 (magic-method backtrace UAF).
+- Rule catalog grows from 46 to 51.
+
+### Notes
+- Not covered (out of reach for an in-process extension): CVE-2026-129538 (php-cgi PATH_INFO, before any extension runs), CVE-2026-129291 (FPM master privilege escalation), CVE-2026-127960 (folded HTTP response headers), CVE-2026-126714 (needs a thread-safe build; Howdah is NTS-only). CVE-2026-129182/-129501/-129438/-48841 affect only PHP 8.4/8.5.
+  build pinned to php-8.6.0) and the apt/yum repos cover 5.4 through 8.6.
+
 ## [1.7.0] - 2026-10-26
 
 ### Added

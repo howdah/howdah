@@ -39,3 +39,5 @@
 /.superpowers/
 # Playwright MCP screenshots/snapshots from browser checks
 /.playwright-mcp
+.aider*
+/lab/integration/.*-out/

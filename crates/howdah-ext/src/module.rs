@@ -57,6 +57,8 @@ pub(crate) static mut DEFERRED: Deferred = Deferred::new();
 /// script (Layer 2 never scans header values), and an armed class refuses
 /// before execution.
 static INSPECT_ARMED: AtomicBool = AtomicBool::new(false);
+/// CVE-2026-129289: drain the unread request body at `post_deactivate`.
+static DRAIN_ARMED: AtomicBool = AtomicBool::new(false);
 static mut MODULE_NUMBER: c_int = 0;
 /// For the info table: (mode, config path, log destination, hook) as displayed.
 static mut DISP_MODE: Option<CString> = None;
@@ -269,12 +271,32 @@ unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
     } else {
         sys::howdah_refuse_disarm();
     }
+    sys::howdah_phar_sig_reset();
     static INSTALLED: AtomicBool = AtomicBool::new(false);
     if !INSTALLED.swap(true, Ordering::Relaxed) && !CTX.is_null() {
         let _ = catch_unwind(AssertUnwindSafe(|| {
             INSPECT_ARMED.store(core::howdah_inspect_armed(CTX) != 0, Ordering::Relaxed);
             if core::howdah_sink_armed(CTX, core::HOWDAH_SINK_PHAR) != 0 {
                 sys::howdah_install_phar_hook(crate::sink_filter::decide);
+            }
+            // CVE-2026-128090: refuse a keyless-digest phar when an OpenSSL
+            // .pubkey is pinned beside it. Default block; independent of the
+            // deserialization guard above.
+            if core::howdah_sink_armed(CTX, core::HOWDAH_SINK_PHAR_SIG) != 0 {
+                sys::howdah_install_phar_sig_hook(
+                    crate::sink_filter::decide,
+                    core::howdah_phar_sig_classify,
+                );
+            }
+            // CVE-2026-128064: proxy http/https + ftp/ftps so a mixed-case TLS
+            // scheme is lowercased (fix) or reported (detect). Default fix.
+            let scheme_mode = core::howdah_scheme_case_mode(CTX);
+            if scheme_mode != 0 {
+                sys::howdah_install_scheme_hook(
+                    crate::sink_filter::decide,
+                    core::howdah_scheme_case_len,
+                    scheme_mode,
+                );
             }
             // SSRF trampolines: install when the L3 SSRF sink is armed OR the L4
             // behavior egress / php-write facet is armed. Egress-only operation
@@ -392,6 +414,13 @@ unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
             };
             DISP_LEGACY = Some(cstring(&crate::legacy_filter::describe(armed, installed)));
             XML_DENY = core::howdah_sink_xml_deny_external_entities(CTX) != 0;
+            // SOAP request guard (CVE-2026-129506, CVE-2026-15353): swap
+            // SoapServer::handle so a prolog DTD / malformed arraySize is refused
+            // before ext/soap parses it. On by default; a no-op when ext/soap is
+            // not loaded. First RINIT, like the other shared-ext hooks.
+            if core::howdah_soap_armed(CTX) != 0 {
+                sys::howdah_install_soap_hook(crate::soap_filter::decide);
+            }
         }));
     }
     // Layer 2 armed: build `$_SERVER` now (a no-op unless auto_globals_jit
@@ -420,6 +449,11 @@ unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
             maybe_begin();
         }
     }));
+    // Layer 2, FPM status-page HTML injection (CVE-2026-129292): log a request
+    // that plants HTML in the scoreboard fields. php-fpm fills the scoreboard
+    // before any extension runs, so this detects (and optionally refuses) but
+    // can never un-plant. FPM only; a no-op on every other SAPI.
+    let _ = catch_unwind(AssertUnwindSafe(|| input_filter::inspect_status_page_fields()));
     // Layer-4 main-script exec-dir check: the primary, opcache-independent
     // control. Runs every request, BEFORE the script executes, and records a
     // 403 if the main script resolves under a denied exec dir.
@@ -585,6 +619,16 @@ unsafe fn exec_dir_decision() -> Option<(c_int, String)> {
 /// Called by PHP once per request at shutdown (NTS).
 unsafe extern "C" fn post_deactivate() -> c_int {
     let _ = catch_unwind(AssertUnwindSafe(|| clear_request_state()));
+    // CVE-2026-129289: consume the request body PHP left unread BEFORE PHP's own
+    // (skipped-on-php://input) drain would have, so the leftover bytes can never
+    // be parsed as the next FastCGI request on a reused connection. Gated in C on
+    // a FastCGI-family SAPI + !post_read + a live server_context. The drain
+    // neutralises our read_post scanner (stop latch + decide) so it actually
+    // consumes, and never bails. It runs BEFORE the recycle exit below, so a
+    // recycled worker has still emptied its connection.
+    if DRAIN_ARMED.load(Ordering::Relaxed) {
+        let _ = catch_unwind(AssertUnwindSafe(|| sys::howdah_drain_unread_body()));
+    }
     // §4.7 recycle facet: if this request raised a poisoning-class fatal while
     // the facet was enforcing, the error-cb marked the worker tainted. Now that
     // request teardown is done (PHP has rendered and, on SAPIs that flush here,
@@ -755,12 +799,12 @@ unsafe fn register_ini(module_number: c_int) {
 
 /// Read a registered ini string by name (name includes a trailing NUL).
 /// Returns `None` when unset or empty.
-unsafe fn ini_string(name: &[u8]) -> Option<String> {
+pub(crate) unsafe fn ini_string(name: &[u8]) -> Option<String> {
     #[cfg(not(feature = "php5"))]
     let nlen = name.len() - 1; // php7/php8: strlen, no NUL
     #[cfg(feature = "php5")]
     let nlen = name.len(); // php5 hash keys include the NUL
-    let p = sys::zend_ini_string(name.as_ptr() as _, nlen as _, 0);
+    let p = sys::zend_ini_string(name.as_ptr() as _, nlen as _, Default::default());
     if p.is_null() {
         return None;
     }
@@ -962,14 +1006,23 @@ unsafe extern "C" fn minit(type_: c_int, module_number: c_int) -> c_int {
     // read once here. Fail-open: a panic leaves `zend_error_cb` untouched.
     let _ = catch_unwind(AssertUnwindSafe(|| install_oom_backstop()));
 
+    // CVE-2026-129289: arm the unread-body drain (`drain_unread_body`, default on;
+    // a global `mode = "off"` disables it). Process-static, read once here. The
+    // SAPI gate (FastCGI family) is applied in C at drain time.
+    let drain_on = catch_unwind(AssertUnwindSafe(|| !CTX.is_null() && core::howdah_drain_unread_armed(CTX) != 0))
+        .unwrap_or(false);
+    DRAIN_ARMED.store(drain_on, Ordering::Relaxed);
+
     SUCCESS
 }
 
 /// Decide the OOM-backstop (§4.6) and recycle-facet (§4.7) gates, arm the shared
 /// `zend_error_cb` decide path, install the hook when either is armed, and set
-/// both phpinfo rows. Web SAPIs only; unpatched engine only (upstream's fix
-/// registers `memory_hard_limit_percent`). The backstop wants `oom_exit` on (the
-/// default); the recycle facet wants `recycle_on_fatal` on (off by default).
+/// both phpinfo rows. Web SAPIs only. The OOM backstop is also unpatched-engine
+/// only (upstream's fix registers `memory_hard_limit_percent`); the recycle
+/// facet is NOT, because the session-shutdown UAF CVE-2026-129481 survives that
+/// fix. The backstop wants `oom_exit` on (the default); the recycle facet wants
+/// `recycle_on_fatal` on (off by default).
 ///
 /// # Safety
 /// Called from `minit` once per process; `CTX` is set.
@@ -990,9 +1043,16 @@ unsafe fn install_oom_backstop() {
     let patched = sys::howdah_memory_hard_limit_percent_exists() != 0;
     let web = is_backstop_sapi(&sapi);
 
-    // Effective, after the SAPI + patched-engine gates.
+    // Effective gates. The two facets are deliberately gated differently:
+    //  * oom_exit (§4.6): web SAPI AND unpatched engine. The OOM corruption
+    //    (CVE-2026-109618/109619) is fixed where `memory_hard_limit_percent`
+    //    exists, so there is nothing to _exit for.
+    //  * recycle_on_fatal (§4.7): web SAPI only. It is opt-in, and the patch
+    //    probe does NOT imply safety: 8.3.36 / 8.4.27 / 8.5.12 have the directive
+    //    yet remain vulnerable to the session-shutdown UAF CVE-2026-129481 (fixed
+    //    one patch later). An operator who turned it on gets it on every engine.
     let oom_exit_armed = oom_armed_cfg && web && !patched;
-    let recycle_mode = if recycle_armed_cfg && web && !patched {
+    let recycle_mode = if recycle_armed_cfg && web {
         if recycle_observe { oom_filter::RECYCLE_OBSERVE } else { oom_filter::RECYCLE_ENFORCE }
     } else {
         oom_filter::RECYCLE_OFF
@@ -1100,9 +1160,6 @@ fn recycle_facet_label(
     if !web {
         return format!("off (non-web SAPI: {sapi})");
     }
-    if patched {
-        return "off (patched PHP: memory_hard_limit_percent present)".to_string();
-    }
     if observe {
         return format!("armed (observe: logs a would-recycle, does not exit; SAPI {sapi})");
     }
@@ -1111,7 +1168,8 @@ fn recycle_facet_label(
     } else {
         "recycle after teardown (the request keeps its 500)"
     };
-    format!("armed (enforce: {how}; SAPI {sapi})")
+    let note = if patched { "; engine has memory_hard_limit_percent but stays exposed to CVE-2026-129481" } else { "" };
+    format!("armed (enforce: {how}; SAPI {sapi}{note})")
 }
 
 /// The `Include/eval hook` phpinfo row: what the shim reported installed, and
@@ -1248,7 +1306,7 @@ unsafe fn risky_ini_section() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::metadata(p).ok().filter(|m| m.is_dir()).map(|m| m.permissions().mode())
     };
-    let findings = crate::ini_risk::evaluate(&crate::ini_risk::Env { sapi: &sapi, get: &get, dir_mode: &dir_mode });
+    let findings = crate::ini_risk::evaluate(&crate::ini_risk::Env { sapi: &sapi, php_series: (sys::PHP_VERSION_ID as u32) / 100 * 100, get: &get, dir_mode: &dir_mode });
     sys::php_info_print_table_start();
     sys::php_info_print_table_header(2, b"Risky ini settings\0".as_ptr() as *const c_char, b"(read-only; Howdah changes none)\0".as_ptr() as *const c_char);
     if findings.is_empty() {

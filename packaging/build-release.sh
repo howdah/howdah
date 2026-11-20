@@ -82,8 +82,8 @@ case "$LIBC" in
   *) echo "FATAL: unsupported HOWDAH_LIBC '$LIBC' (glibc|musl)" >&2; exit 2 ;;
 esac
 
-# Full supported matrix (PHP 5.4 .. 8.5). Default build set when none given.
-ALL_MINORS=(5.4 5.5 5.6 7.0 7.1 7.2 7.3 7.4 8.0 8.1 8.2 8.3 8.4 8.5)
+# Full supported matrix (PHP 5.4 .. 8.6). Default build set when none given.
+ALL_MINORS=(5.4 5.5 5.6 7.0 7.1 7.2 7.3 7.4 8.0 8.1 8.2 8.3 8.4 8.5 8.6)
 
 # Minors Remi EL7 does not carry (PHP > 8.1): built from source headers on the
 # same glibc-2.17 base. PINNED to a REAL current patch + its sha256 (never a
@@ -97,6 +97,7 @@ php_src_pin() {
     8.3) echo "8.3.36 c93f3441f87f6ab156bef4432db215d7e61ca2c0183bb3a2aa28d9886ab59f53" ;;
     8.4) echo "8.4.27 5bafed9994c1a49796b25b5f61c22c9183bfe046b6acc7b363842d03c77f972f" ;;
     8.5) echo "8.5.12 81a0f450349e84b08eb43faa85f8a4c835684f3cc1c50471775d1317a046c525" ;;
+    8.6) echo "8.6.0 62337dccde3d9fcc39797d4529f42637613036eaf3875353c206874e5813a3c1" ;;
     *)   return 1 ;;
   esac
 }

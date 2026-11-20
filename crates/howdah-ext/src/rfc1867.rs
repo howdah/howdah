@@ -38,6 +38,9 @@ const FAILURE: c_int = -1;
 // Per-request state (NTS: one request at a time per worker).
 static mut BLOCKED: bool = false;
 static mut SELFTEST_SEEN: bool = false;
+/// `session.upload_progress.name` for this request; `None` when upload progress
+/// is disabled (nothing to withhold). Cached at START.
+static mut PROGRESS_NAME: Option<Vec<u8>> = None;
 
 /// Installed as `php_rfc1867_callback` by MINIT.
 ///
@@ -50,12 +53,15 @@ pub(crate) unsafe extern "C" fn callback(
 ) -> c_int {
     // Our own processing is fully panic-guarded: a glue bug must never unwind
     // into PHP (carry-forward #4). On panic we simply do not suppress.
-    let suppress = catch_unwind(AssertUnwindSafe(|| process(event, event_data))).unwrap_or(false);
+    let (suppress, skip_chain) =
+        catch_unwind(AssertUnwindSafe(|| process(event, event_data))).unwrap_or((false, false));
 
-    // Chain to the prior callback for EVERY event, including past the cap.
+    // Chain to the prior callback for EVERY event, including past the cap —
+    // except the one upload-progress FORMDATA withheld for CVE-2026-115560, so
+    // session never builds the `prefix + value` key and tracking never starts.
     let chained: c_int = match *ptr::addr_of!(module::PRIOR) {
-        Some(prior) => prior(event, event_data, extra),
-        None => SUCCESS,
+        Some(prior) if !skip_chain => prior(event, event_data, extra),
+        _ => SUCCESS,
     };
 
     if event == sys::MULTIPART_EVENT_END {
@@ -79,8 +85,10 @@ pub(crate) unsafe extern "C" fn callback(
 /// Translate one event into core calls. Returns whether PHP should cancel
 /// (FAILURE) this event's part — true only once the core has decided Block, and
 /// only for the part-introducing events, so over-limit parts are not allocated.
-unsafe fn process(event: c_uint, event_data: *mut c_void) -> bool {
-    match event {
+/// The second flag says "do not chain this event to the prior callback".
+unsafe fn process(event: c_uint, event_data: *mut c_void) -> (bool, bool) {
+    let mut skip = false;
+    let suppress = match event {
         x if x == sys::MULTIPART_EVENT_START => {
             start();
             false
@@ -95,6 +103,7 @@ unsafe fn process(event: c_uint, event_data: *mut c_void) -> bool {
             if ev.length > 0 {
                 note(core::howdah_part_data(module::CTX, ev.length as usize));
             }
+            skip = upload_progress_withheld(&name, ev);
             BLOCKED
         }
         x if x == sys::MULTIPART_EVENT_FILE_START => {
@@ -119,7 +128,33 @@ unsafe fn process(event: c_uint, event_data: *mut c_void) -> bool {
             false
         }
         _ => false,
+    };
+    (suppress, skip)
+}
+
+/// CVE-2026-115560. True when this FORMDATA is the session.upload_progress
+/// field and its VALUE carries a `|`: the event must then be withheld from
+/// session, which would otherwise key its tracking data on `prefix + value` and
+/// let the `php` serialize handler split it into a smuggled payload. Withholding
+/// happens in every mode except `off` (the rule resolves Allow); `block`
+/// additionally refuses at END via the sticky Block. The value is only
+/// inspected here; it is never copied into any log field.
+unsafe fn upload_progress_withheld(name: &[u8], ev: &sys::multipart_event_formdata) -> bool {
+    if ev.value.is_null() || (*ev.value).is_null() || ev.length == 0 {
+        return false;
     }
+    let want = &*ptr::addr_of!(PROGRESS_NAME);
+    match want {
+        Some(n) if n.as_slice() == name => {}
+        _ => return false,
+    }
+    let value = std::slice::from_raw_parts(*ev.value as *const u8, ev.length as usize);
+    if !howdah_core::limits::upload_progress_value_unsafe(value) {
+        return false;
+    }
+    let action = core::howdah_upload_progress_abuse(module::CTX);
+    note(action);
+    action != core::HOWDAH_ALLOW
 }
 
 /// The glue sees real field names (the core only sees lengths), so the
@@ -160,6 +195,22 @@ unsafe fn add_selftest_header(request_id: &str) {
 unsafe fn start() {
     BLOCKED = false;
     SELFTEST_SEEN = false;
+    // Cache the session upload-progress field name (None when disabled).
+    let enabled = module::ini_string(b"session.upload_progress.enabled\0")
+        .map(|v| {
+            let v = v.to_ascii_lowercase();
+            !matches!(v.as_str(), "0" | "off" | "no" | "false" | "none")
+        })
+        .unwrap_or(false);
+    PROGRESS_NAME = if enabled {
+        Some(
+            module::ini_string(b"session.upload_progress.name\0")
+                .unwrap_or_else(|| "PHP_SESSION_UPLOAD_PROGRESS".to_string())
+                .into_bytes(),
+        )
+    } else {
+        None
+    };
     // Mark this a multipart request: fires before any field is registered, so
     // the input_filter skips the POST fields (counted here as parts instead).
     module::MULTIPART = true;

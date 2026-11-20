@@ -237,6 +237,21 @@
 #define FILE_NAME_WEIGHT 5
 
 /**
+ * Bit set in [`status_injection_fields`]'s result: the authenticated user.
+ */
+#define STATUS_FIELD_USER 1
+
+/**
+ * Bit: the request method.
+ */
+#define STATUS_FIELD_METHOD 2
+
+/**
+ * Bit: the script filename / request path.
+ */
+#define STATUS_FIELD_SCRIPT 4
+
+/**
  * §4.5 cost of one array-nesting level in the parse-memory estimate (bytes).
  * A Zend array (HashTable + initial buckets) is on this order. Provisional;
  * the Task-8 RSS calibration pins it.
@@ -1193,5 +1208,25 @@ int32_t howdah_soap_check(struct howdah_ctx *ctx,
                           const char *xml,
                           size_t xml_len,
                           int32_t truncated);
+
+/**
+ * Layer-2 FPM status-page HTML injection check (CVE-2026-129292), called once
+ * at RINIT under php-fpm. Each field is a NUL-free byte string or NULL when the
+ * SAPI supplied none. The values are classified for HTML metacharacters and
+ * NEVER logged. Detect-only by default (`[inspect] status_injection`): php-fpm
+ * writes the scoreboard before any extension runs, so even `block` (a clean
+ * refusal) cannot un-plant the entry. Returns 0 Allow, 1 Log, 2 Block; NULL ctx
+ * or panic returns 0.
+ *
+ * # Safety
+ * `ctx` NULL or live; each pointer NULL or valid for its length.
+ */
+int32_t howdah_inspect_status(struct howdah_ctx *ctx,
+                              const char *user,
+                              size_t user_len,
+                              const char *method,
+                              size_t method_len,
+                              const char *script,
+                              size_t script_len);
 
 #endif  /* HOWDAH_CORE_H */

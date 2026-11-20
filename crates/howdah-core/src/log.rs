@@ -50,7 +50,7 @@ pub fn rule_layer(r: RuleId) -> u8 {
         | RuleId::PostTooLarge
         | RuleId::NestingBudget
         | RuleId::ParseMemoryEstimate => 1,
-        RuleId::SqlInjection | RuleId::PathTraversal | RuleId::CommandInjection | RuleId::CgiArgInjection => 2,
+        RuleId::SqlInjection | RuleId::PathTraversal | RuleId::CommandInjection | RuleId::CgiArgInjection | RuleId::StatusInjection => 2,
         RuleId::CommandExec
         | RuleId::Include
         | RuleId::Eval
@@ -115,6 +115,7 @@ fn rule_name(r: RuleId) -> &'static str {
         RuleId::PathTraversal => "path_traversal",
         RuleId::CommandInjection => "command_injection",
         RuleId::CgiArgInjection => "cgi_arg_injection",
+        RuleId::StatusInjection => "status_injection",
         RuleId::CommandExec => "command_exec",
         RuleId::Include => "include",
         RuleId::Eval => "eval",
@@ -430,6 +431,7 @@ mod tests {
             (RuleId::PathTraversal, 2),
             (RuleId::CommandInjection, 2),
             (RuleId::CgiArgInjection, 2),
+            (RuleId::StatusInjection, 2),
             (RuleId::CommandExec, 3),
             (RuleId::Include, 3),
             (RuleId::Eval, 3),
@@ -461,7 +463,7 @@ mod tests {
             (RuleId::NestingBudget, 1),
             (RuleId::ParseMemoryEstimate, 1),
         ];
-        assert_eq!(rule_catalog().len(), 50);
+        assert_eq!(rule_catalog().len(), 51);
         assert_eq!(want.len(), rule_catalog().len(), "layer table and rule_catalog differ");
         for r in rule_catalog() {
             let w = want.iter().find(|(x, _)| x == r).unwrap_or_else(|| panic!("{r:?} has no layer in this table")).1;

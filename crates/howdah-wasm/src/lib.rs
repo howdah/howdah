@@ -299,7 +299,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&rule_catalog_json()).unwrap();
         let rules = v.as_array().unwrap();
         let names: Vec<&str> = rules.iter().map(|r| r["name"].as_str().unwrap()).collect();
-        assert_eq!(names.len(), 50, "{names:?}");
+        assert_eq!(names.len(), 51, "{names:?}");
         assert!(names.contains(&"max_parts") && names.contains(&"unserialize") && names.contains(&"ssrf"));
         // The SOAP request guard (CVE-2026-129506, CVE-2026-15353).
         assert!(names.contains(&"soap_request"));

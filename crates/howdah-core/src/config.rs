@@ -217,6 +217,11 @@ pub struct InspectConfig {
     /// blocks it), like a Critical rule; a `[inspect.rule_modes] cgi_arg_injection`
     /// entry overrides it. `enabled = false` and a global `off` still silence it.
     pub cgi_arg: Mode,
+    /// FPM status-page HTML injection (CVE-2026-129292). DETECT by default: php-fpm
+    /// stores the scoreboard entry before any extension runs, so `block` can refuse
+    /// the request but can NOT un-plant the entry. A `[inspect.rule_modes]
+    /// status_injection` entry overrides it.
+    pub status_injection: Mode,
     pub limits: InspectLimits,
     /// Per-class mode overrides.
     pub rule_modes: BTreeMap<RuleId, Mode>,
@@ -231,6 +236,7 @@ impl Default for InspectConfig {
             traversal: true,
             cmdi: true,
             cgi_arg: Mode::Block,
+            status_injection: Mode::Detect,
             limits: InspectLimits::defaults(),
             rule_modes: BTreeMap::new(),
         }
@@ -265,6 +271,18 @@ impl InspectConfig {
             Mode::Off
         } else {
             self.rule_modes.get(&RuleId::CgiArgInjection).copied().unwrap_or(self.cgi_arg)
+        }
+    }
+
+    /// Effective mode of the FPM status-page injection rule (CVE-2026-129292).
+    /// Off if the global mode is off or Layer 2 is disabled; otherwise a
+    /// `[inspect.rule_modes] status_injection` entry, else `status_injection`
+    /// (default `detect`: blocking cannot un-plant the scoreboard entry).
+    pub fn status_injection_mode(&self, global: Mode) -> Mode {
+        if global == Mode::Off || !self.enabled {
+            Mode::Off
+        } else {
+            self.rule_modes.get(&RuleId::StatusInjection).copied().unwrap_or(self.status_injection)
         }
     }
 }
@@ -1396,6 +1414,22 @@ self_test = "off"
         let c = Config::from_toml("[inspect]\nmode = \"block\"\ncmdi = false").unwrap();
         assert_eq!(c.inspect.effective_mode(Mode::Block), Mode::Block);
         assert!(!c.inspect.class_enabled(crate::inspect::InspectClass::CommandInjection));
+    }
+
+    #[test]
+    fn status_injection_defaults_to_detect() {
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.inspect.status_injection, Mode::Detect);
+        for g in [Mode::Detect, Mode::Block] {
+            assert_eq!(c.inspect.status_injection_mode(g), Mode::Detect, "{g:?}");
+        }
+        assert_eq!(c.inspect.status_injection_mode(Mode::Off), Mode::Off);
+        let b = Config::from_toml("[inspect]\nstatus_injection = \"block\"").unwrap();
+        assert_eq!(b.inspect.status_injection_mode(Mode::Detect), Mode::Block);
+        let o = Config::from_toml("[inspect]\nstatus_injection = \"block\"\n[inspect.rule_modes]\nstatus_injection = \"off\"").unwrap();
+        assert_eq!(o.inspect.status_injection_mode(Mode::Detect), Mode::Off);
+        let d = Config::from_toml("[inspect]\nenabled = false\nstatus_injection = \"block\"").unwrap();
+        assert_eq!(d.inspect.status_injection_mode(Mode::Detect), Mode::Off);
     }
 
     #[test]

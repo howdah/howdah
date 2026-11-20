@@ -451,6 +451,12 @@ pub enum RuleId {
     /// default (`[inspect] cgi_arg`), because an `=`-less option-shaped query is not
     /// something an application sends. See `crate::inspect::cgi_arg_injection`.
     CgiArgInjection,
+    /// FPM status-page HTML injection (CVE-2026-129292): the request method, authenticated
+    /// user or script carries an HTML metacharacter that php-fpm stores in its scoreboard
+    /// BEFORE any extension runs and the full-HTML status page prints unescaped. Detect-only
+    /// by default: refusing the request cannot un-plant the entry. See
+    /// `crate::inspect::status_injection_fields`.
+    StatusInjection,
     CommandExec,
     Include,
     Eval,
@@ -556,6 +562,7 @@ impl RuleId {
             | RuleId::PathTraversal
             | RuleId::CommandInjection
             | RuleId::CgiArgInjection
+            | RuleId::StatusInjection
             | RuleId::CommandExec
             | RuleId::Include
             | RuleId::Eval
@@ -591,7 +598,7 @@ impl RuleId {
 /// or miss one it accepts. `rule_catalog_covers_every_variant` fails to
 /// compile when a variant is added here but not to the list.
 pub fn rule_catalog() -> &'static [RuleId] {
-    const ALL: [RuleId; 50] = [
+    const ALL: [RuleId; 51] = [
         RuleId::MaxParts,
         RuleId::MaxFiles,
         RuleId::MaxPartHeaders,
@@ -612,6 +619,7 @@ pub fn rule_catalog() -> &'static [RuleId] {
         RuleId::PathTraversal,
         RuleId::CommandInjection,
         RuleId::CgiArgInjection,
+        RuleId::StatusInjection,
         RuleId::CommandExec,
         RuleId::Include,
         RuleId::Eval,
@@ -883,6 +891,7 @@ mod tests {
                 | RuleId::PathTraversal
                 | RuleId::CommandInjection
                 | RuleId::CgiArgInjection
+                | RuleId::StatusInjection
                 | RuleId::CommandExec
                 | RuleId::Include
                 | RuleId::Eval
@@ -915,7 +924,7 @@ mod tests {
                 | RuleId::FatalRecycle => {}
             }
         }
-        assert_eq!(rule_catalog().len(), 50);
+        assert_eq!(rule_catalog().len(), 51);
         let mut sorted = all.to_vec();
         sorted.sort();
         sorted.dedup();

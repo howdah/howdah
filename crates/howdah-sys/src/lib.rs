@@ -228,6 +228,16 @@ extern "C" {
     /// NUL-terminated, or NULL). Engine-owned; never freed.
     pub fn howdah_request_content_type() -> *const ::std::ffi::c_char;
 
+    /// FPM status-page injection inputs (CVE-2026-129292): the request's
+    /// authenticated user, method and script filename as the SAPI recorded them
+    /// (NUL-terminated or NULL; engine-owned). Read at RINIT to LOG a planting
+    /// request; php-fpm stores them in its scoreboard before any extension runs.
+    pub fn howdah_req_auth_user() -> *const ::std::ffi::c_char;
+    pub fn howdah_req_method() -> *const ::std::ffi::c_char;
+    pub fn howdah_req_script() -> *const ::std::ffi::c_char;
+    /// 1 iff the SAPI is php-fpm (`fpm-fcgi`).
+    pub fn howdah_sapi_is_fpm() -> ::std::ffi::c_int;
+
     /// 1 iff PHP resolved this request's body as `multipart/form-data` (its
     /// `post_entry` is the multipart reader). The glue arms the byte scanner only
     /// then, so PUT / `php://input` / urlencoded bodies — which PHP does not

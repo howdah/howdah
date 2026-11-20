@@ -307,6 +307,7 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::PathTraversal => "possible path traversal in request input",
         RuleId::CommandInjection => "possible command injection in request input",
         RuleId::CgiArgInjection => "query string shaped like php-cgi command-line arguments",
+        RuleId::StatusInjection => "fpm status page: request method, user or script contains HTML metacharacters",
         RuleId::CommandExec => "command execution sink called with a disallowed command",
         RuleId::Include => "file include sink called with a disallowed path",
         RuleId::Eval => "eval sink invoked",
@@ -596,6 +597,33 @@ impl howdah_ctx {
             return Action::Allow;
         }
         let reason = "php-cgi argument-injection pattern in query string".to_string();
+        let hit = LimitHit { rule, severity: Severity::Standard, detail: reason.clone() };
+        self.apply_with_mode(&hit, mode, &std::collections::BTreeMap::new(), &reason)
+    }
+
+    /// Layer-2 FPM status-page HTML injection check (CVE-2026-129292) on the
+    /// three scoreboard-visible fields. Values are classified, never logged:
+    /// the reason is a fixed per-field-class string. Mode `[inspect]
+    /// status_injection` (default `detect`).
+    fn inspect_status(&mut self, user: Option<&[u8]>, method: Option<&[u8]>, script: Option<&[u8]>) -> Action {
+        #[cfg(test)]
+        if tests::FORCE_PANIC.with(|f| f.get()) {
+            panic!("injected test panic");
+        }
+        let mode = self.config.inspect.status_injection_mode(self.config.mode);
+        if mode == crate::config::Mode::Off {
+            return Action::Allow;
+        }
+        let mask = crate::inspect::status_injection_fields(user, method, script);
+        if mask == 0 {
+            return Action::Allow;
+        }
+        let rule = RuleId::StatusInjection;
+        if let Some(m) = self.excepted(rule, None, None, None) {
+            self.note_excepted_request(rule, &m);
+            return Action::Allow;
+        }
+        let reason = crate::inspect::status_injection_reason(mask);
         let hit = LimitHit { rule, severity: Severity::Standard, detail: reason.clone() };
         self.apply_with_mode(&hit, mode, &std::collections::BTreeMap::new(), &reason)
     }
@@ -3482,6 +3510,45 @@ pub unsafe extern "C" fn howdah_soap_check(
     })
 }
 
+/// Layer-2 FPM status-page HTML injection check (CVE-2026-129292), called once
+/// at RINIT under php-fpm. Each field is a NUL-free byte string or NULL when the
+/// SAPI supplied none. The values are classified for HTML metacharacters and
+/// NEVER logged. Detect-only by default (`[inspect] status_injection`): php-fpm
+/// writes the scoreboard before any extension runs, so even `block` (a clean
+/// refusal) cannot un-plant the entry. Returns 0 Allow, 1 Log, 2 Block; NULL ctx
+/// or panic returns 0.
+///
+/// # Safety
+/// `ctx` NULL or live; each pointer NULL or valid for its length.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_inspect_status(
+    ctx: *mut howdah_ctx,
+    user: *const c_char,
+    user_len: usize,
+    method: *const c_char,
+    method_len: usize,
+    script: *const c_char,
+    script_len: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return HOWDAH_ALLOW;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let f = |p: *const c_char, n: usize| -> Option<&'static [u8]> {
+            if p.is_null() {
+                None
+            } else {
+                Some(std::slice::from_raw_parts(p as *const u8, n))
+            }
+        };
+        code((*ctx).inspect_status(f(user, user_len), f(method, method_len), f(script, script_len)))
+    }));
+    r.unwrap_or_else(|_| {
+        report_panic(ctx);
+        HOWDAH_ALLOW
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3828,6 +3895,41 @@ mod tests {
         }
         assert!(take(c).is_none());
         unsafe { howdah_free(c) };
+    }
+
+    fn status(c: *mut howdah_ctx, u: Option<&[u8]>, m: Option<&[u8]>, s: Option<&[u8]>) -> i32 {
+        let p = |o: Option<&[u8]>| o.map_or((std::ptr::null(), 0), |b| (b.as_ptr() as *const c_char, b.len()));
+        let (up, ul) = p(u);
+        let (mp, ml) = p(m);
+        let (sp, sl) = p(s);
+        unsafe { howdah_inspect_status(c, up, ul, mp, ml, sp, sl) }
+    }
+
+    #[test]
+    fn status_injection_detects_by_default_logs_no_value() {
+        let c = init("");
+        begin(c);
+        assert_eq!(status(c, Some(b"alice"), Some(b"GET"), Some(b"/a/index.php")), HOWDAH_ALLOW);
+        assert!(take(c).is_none());
+        assert_eq!(status(c, Some(b"<svg/onload=x>"), Some(b"GET"), None), HOWDAH_LOG);
+        let line = take(c).expect("log line");
+        assert!(line.contains("\"rule\":\"status_injection\""), "{line}");
+        assert!(line.contains("auth user"), "{line}");
+        assert!(!line.contains("svg"), "{line}");
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn status_injection_block_off_and_null() {
+        let c = init("[inspect]\nstatus_injection = \"block\"");
+        begin(c);
+        assert_eq!(status(c, None, Some(b"G<T"), None), HOWDAH_BLOCK);
+        unsafe { howdah_free(c) };
+        let c = init("[inspect]\nstatus_injection = \"off\"");
+        begin(c);
+        assert_eq!(status(c, Some(b"<x>"), None, None), HOWDAH_ALLOW);
+        unsafe { howdah_free(c) };
+        assert_eq!(status(std::ptr::null_mut(), Some(b"<x>"), None, None), HOWDAH_ALLOW);
     }
 
     #[test]

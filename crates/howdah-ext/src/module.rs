@@ -449,6 +449,11 @@ unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
             maybe_begin();
         }
     }));
+    // Layer 2, FPM status-page HTML injection (CVE-2026-129292): log a request
+    // that plants HTML in the scoreboard fields. php-fpm fills the scoreboard
+    // before any extension runs, so this detects (and optionally refuses) but
+    // can never un-plant. FPM only; a no-op on every other SAPI.
+    let _ = catch_unwind(AssertUnwindSafe(|| input_filter::inspect_status_page_fields()));
     // Layer-4 main-script exec-dir check: the primary, opcache-independent
     // control. Runs every request, BEFORE the script executes, and records a
     // 403 if the main script resolves under a denied exec dir.

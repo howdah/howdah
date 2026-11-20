@@ -17,6 +17,7 @@
 #include "main/php.h"
 #include "SAPI.h"
 #include <stdint.h>
+#include <string.h>
 
 #if PHP_VERSION_ID >= 70000
 typedef size_t howdah_rp_count_t;
@@ -164,4 +165,23 @@ int64_t howdah_drain_unread_body(void) {
     howdah_rp_decide = saved_decide;
     return total;
 #endif
+}
+
+/* ---- FPM status-page injection (CVE-2026-129292) getters ----------------------
+ * php-fpm's fpm_request_info() copies these three request fields into the
+ * scoreboard BEFORE php_request_startup(), so no extension can prevent the
+ * planting; Howdah only reads them at RINIT to log it. NUL-terminated or NULL,
+ * engine-owned, never freed. The SG(request_info) members are stable 5.4-8.6. */
+const char *howdah_req_auth_user(void) {
+    return SG(request_info).auth_user;
+}
+const char *howdah_req_method(void) {
+    return SG(request_info).request_method;
+}
+const char *howdah_req_script(void) {
+    return SG(request_info).path_translated;
+}
+/* 1 iff the running SAPI is php-fpm ("fpm-fcgi"). */
+int howdah_sapi_is_fpm(void) {
+    return sapi_module.name && strcmp(sapi_module.name, "fpm-fcgi") == 0;
 }

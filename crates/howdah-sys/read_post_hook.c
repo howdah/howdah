@@ -135,6 +135,10 @@ int64_t howdah_drain_unread_body(void) {
     long rounds = 0;
     const char *n = sapi_module.name;
 
+#if PHP_VERSION_ID < 50500
+    (void) n; (void) total; (void) rounds; (void) saved_decide; (void) dummy;
+    return 0; /* PHP 5.4 has no SG(post_read) and predates the bug: harmless no-op */
+#else
     if (!n || !SG(server_context) || SG(post_read)) {
         return 0;
     }
@@ -159,4 +163,5 @@ int64_t howdah_drain_unread_body(void) {
     }
     howdah_rp_decide = saved_decide;
     return total;
+#endif
 }

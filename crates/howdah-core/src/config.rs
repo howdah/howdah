@@ -857,7 +857,7 @@ impl Default for RawConfig {
             mode: c.mode,
             limits: c.limits,
             log: c.log,
-            rules: c.rule_modes,
+            rules: BTreeMap::new(),
             inspect: c.inspect,
             sinks: c.sinks,
             behavior: c.behavior,
@@ -929,11 +929,18 @@ impl Config {
             }
         }
         crate::exceptions::Exceptions::validate(&raw.exceptions).map_err(ConfigError)?;
+        // `fastcgi_smuggle` defaults to detect (log only): the always-on body drain
+        // is the enforcement; a false block of an upload is the costlier error.
+        // `[rules] fastcgi_smuggle = "block"` opts in. Global `off` stays absolute.
+        let mut rule_modes = raw.rules;
+        if raw.mode != Mode::Off {
+            rule_modes.entry(RuleId::FastcgiSmuggle).or_insert(Mode::Detect);
+        }
         Ok(Config {
             mode: raw.mode,
             limits: raw.limits,
             log: raw.log,
-            rule_modes: raw.rules,
+            rule_modes,
             inspect: raw.inspect,
             sinks: raw.sinks,
             behavior: raw.behavior,
@@ -1005,7 +1012,7 @@ impl Config {
             mode: Mode::Block,
             limits: Limits::default(),
             log: LogConfig::default(),
-            rule_modes: BTreeMap::new(),
+            rule_modes: BTreeMap::from([(RuleId::FastcgiSmuggle, Mode::Detect)]),
             inspect: InspectConfig::default(),
             sinks: SinkConfig::default(),
             behavior: BehaviorConfig::default(),
@@ -1267,7 +1274,22 @@ self_test = "off"
         assert_eq!(c.mode, Mode::Block);
         assert!(c.limits.max_parts > 0);
         assert!(c.limits.validate().is_ok());
-        assert!(c.rule_modes.is_empty());
+        assert_eq!(c.rule_modes.get(&RuleId::FastcgiSmuggle), Some(&Mode::Detect));
+        assert_eq!(c.rule_modes.len(), 1);
+    }
+
+    #[test]
+    fn fastcgi_smuggle_defaults_to_detect_and_block_is_opt_in() {
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.mode, Mode::Block);
+        assert_eq!(c.rule_modes.get(&RuleId::FastcgiSmuggle), Some(&Mode::Detect));
+        let c = Config::from_toml("[rules]\nsql_injection = \"detect\"").unwrap();
+        assert_eq!(c.rule_modes.get(&RuleId::FastcgiSmuggle), Some(&Mode::Detect));
+        let c = Config::from_toml("[rules]\nfastcgi_smuggle = \"block\"").unwrap();
+        assert_eq!(c.rule_modes.get(&RuleId::FastcgiSmuggle), Some(&Mode::Block));
+        // Global off stays absolute: no default override re-arms the rule.
+        let c = Config::from_toml("mode = \"off\"").unwrap();
+        assert!(c.rule_modes.get(&RuleId::FastcgiSmuggle).is_none());
     }
 
     #[test]

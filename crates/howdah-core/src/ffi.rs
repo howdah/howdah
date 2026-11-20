@@ -5742,6 +5742,8 @@ mod tests {
         b.extend_from_slice(epilogue);
         b
     }
+    const BLOCK: &str = "[rules]\nfastcgi_smuggle = \"block\"\n";
+
 
     #[test]
     fn fastcgi_smuggle_blocks_in_a_field_epilogue_and_raw_bodies_without_stopping_the_read() {
@@ -5749,18 +5751,18 @@ mod tests {
         let mct = "multipart/form-data; boundary=B";
         for step in [1usize, 5, 4096] {
             let field = mp(&[("a", None, &smug)], b"");
-            let (end, line) = scan_all("", mct, &field, step);
+            let (end, line) = scan_all(BLOCK, mct, &field, step);
             assert_eq!(end, HOWDAH_BLOCK, "field step {step}");
             assert!(line.contains("fastcgi_smuggle"), "{line}");
             assert!(!line.contains("auto_prepend"), "values are never logged: {line}");
             let epi = mp(&[("a", None, b"x")], &smug);
-            assert_eq!(scan_all("", mct, &epi, step).0, HOWDAH_BLOCK, "epilogue step {step}");
+            assert_eq!(scan_all(BLOCK, mct, &epi, step).0, HOWDAH_BLOCK, "epilogue step {step}");
             // Malformed framing still scans the rest of the body.
             let mut broken = b"--B\r\ngarbage-no-disposition\r\n\r\n".to_vec();
             broken.extend_from_slice(&smug);
-            assert_eq!(scan_all("", mct, &broken, step).0, HOWDAH_BLOCK, "malformed step {step}");
+            assert_eq!(scan_all(BLOCK, mct, &broken, step).0, HOWDAH_BLOCK, "malformed step {step}");
             for ct in ["application/json", "application/x-www-form-urlencoded", "application/octet-stream"] {
-                assert_eq!(scan_all("", ct, &smug, step).0, HOWDAH_BLOCK, "{ct} step {step}");
+                assert_eq!(scan_all(BLOCK, ct, &smug, step).0, HOWDAH_BLOCK, "{ct} step {step}");
             }
         }
     }

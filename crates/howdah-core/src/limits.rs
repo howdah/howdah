@@ -501,6 +501,9 @@ pub enum RuleId {
     /// A mixed-case `HTTPS://` / `FTPS://` URL that PHP would send in plaintext
     /// (CVE-2026-128064). Standard, Layer 3; normalized to lowercase by default.
     TlsSchemeCase,
+    /// A phar archive whose declared signature type is a keyless digest while an
+    /// OpenSSL `.pubkey` is pinned beside it (CVE-2026-128090). Standard, Layer 3.
+    PharSignature,
     /// A SOAP request whose body opens with a DTD/DOCTYPE in the prolog
     /// (CVE-2026-129506, SoapServer DTD use-after-free) or carries a malformed
     /// SOAP-ENC `arraySize` (CVE-2026-15353, heap over-read). Standard, Layer 3;
@@ -575,6 +578,7 @@ impl RuleId {
             | RuleId::Xxe
             | RuleId::TlsVerify
             | RuleId::TlsSchemeCase
+            | RuleId::PharSignature
             | RuleId::SoapRequest => Severity::Standard,
             _ => Severity::Critical,
         }
@@ -587,7 +591,7 @@ impl RuleId {
 /// or miss one it accepts. `rule_catalog_covers_every_variant` fails to
 /// compile when a variant is added here but not to the list.
 pub fn rule_catalog() -> &'static [RuleId] {
-    const ALL: [RuleId; 49] = [
+    const ALL: [RuleId; 50] = [
         RuleId::MaxParts,
         RuleId::MaxFiles,
         RuleId::MaxPartHeaders,
@@ -630,6 +634,7 @@ pub fn rule_catalog() -> &'static [RuleId] {
         RuleId::Xxe,
         RuleId::TlsVerify,
         RuleId::TlsSchemeCase,
+        RuleId::PharSignature,
         RuleId::SoapRequest,
         RuleId::OutOfMemory,
         RuleId::StartupFatal,
@@ -900,6 +905,7 @@ mod tests {
                 | RuleId::Xxe
                 | RuleId::TlsVerify
                 | RuleId::TlsSchemeCase
+                | RuleId::PharSignature
                 | RuleId::SoapRequest
                 | RuleId::OutOfMemory
                 | RuleId::StartupFatal
@@ -909,7 +915,7 @@ mod tests {
                 | RuleId::FatalRecycle => {}
             }
         }
-        assert_eq!(rule_catalog().len(), 49);
+        assert_eq!(rule_catalog().len(), 50);
         let mut sorted = all.to_vec();
         sorted.sort();
         sorted.dedup();
@@ -952,6 +958,7 @@ mod tests {
             RuleId::Xxe,
             RuleId::TlsVerify,
             RuleId::TlsSchemeCase,
+            RuleId::PharSignature,
             RuleId::SoapRequest,
         ] {
             assert_eq!(r.severity(), Severity::Standard, "{r:?}");

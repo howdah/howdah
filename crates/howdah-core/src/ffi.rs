@@ -19,7 +19,7 @@
 //! * A ctx must not be used from two threads at once (PHP workers each own one).
 #![allow(non_camel_case_types)]
 
-use std::ffi::{c_char, CString};
+use std::ffi::{c_char, c_void, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -95,6 +95,9 @@ pub const HOWDAH_SINK_XML: i32 = 11;
 pub const HOWDAH_SINK_TLS: i32 = 12;
 /// Mixed-case `HTTPS://`/`FTPS://` scheme normalization (CVE-2026-128064).
 pub const HOWDAH_SINK_SCHEME_CASE: i32 = 13;
+/// Phar signature downgrade with a pinned `.pubkey` (CVE-2026-128090). `arg` is
+/// the glue-computed verdict token `downgrade` / `indeterminate`.
+pub const HOWDAH_SINK_PHAR_SIG: i32 = 14;
 
 // SSRF event kinds (`howdah_sink_check_ssrf_kind_at`). RANGE is the original
 // check-time reserved-range verdict; REBIND judges the address a connection
@@ -326,6 +329,7 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::Xxe => "XML external entity or entity bomb parsed with a dangerous libxml flag",
         RuleId::TlsVerify => "curl TLS certificate verification disabled",
         RuleId::TlsSchemeCase => "mixed-case https/ftps URL scheme that PHP would send in plaintext",
+        RuleId::PharSignature => "phar archive signature downgraded to a keyless digest while an OpenSSL public key is pinned",
         RuleId::SoapRequest => "soap request with a prolog DTD or a malformed array dimension",
         RuleId::OutOfMemory => "worker ended on out-of-memory",
         RuleId::StartupFatal => "fatal error during request startup",
@@ -856,6 +860,20 @@ impl howdah_ctx {
                     }
                 }),
             ),
+            // `arg` is a glue-computed token, never the path or archive bytes:
+            // `downgrade` (blockable) or `indeterminate` (log only).
+            SinkId::PharSig => (
+                RuleId::PharSignature,
+                match arg {
+                    b"downgrade" => Some(format!(
+                        "signature-downgrade: keyless signature on a phar with a pinned .pubkey via {n}"
+                    )),
+                    b"indeterminate" => Some(format!(
+                        "signature-indeterminate: signature type unreadable on a phar with a pinned .pubkey, not blocked via {n}"
+                    )),
+                    _ => None,
+                },
+            ),
             SinkId::Unserialize => {
                 let scan = unserialize_classes(arg);
                 let allow = &sinks.unserialize.allow_classes;
@@ -879,7 +897,7 @@ impl howdah_ctx {
         }
         // tls is detect-only in this release: a block mode is logged as log.
         let action = match mode {
-            Mode::Block if sink != SinkId::Tls => Action::Block,
+            Mode::Block if sink != SinkId::Tls && !(sink == SinkId::PharSig && arg == b"indeterminate") => Action::Block,
             _ => Action::Log,
         };
         self.sink_log = Some(self.record(rule, action, reason));
@@ -1949,6 +1967,7 @@ pub unsafe extern "C" fn howdah_sink_check(
         HOWDAH_SINK_XML => SinkId::Xml,
         HOWDAH_SINK_TLS => SinkId::Tls,
         HOWDAH_SINK_SCHEME_CASE => SinkId::SchemeCase,
+        HOWDAH_SINK_PHAR_SIG => SinkId::PharSig,
         _ => return HOWDAH_ALLOW,
     };
     let r = catch_unwind(AssertUnwindSafe(|| {
@@ -2132,6 +2151,31 @@ pub unsafe extern "C" fn howdah_sink_ssrf_armed(ctx: *mut howdah_ctx) -> i32 {
     .unwrap_or(0)
 }
 
+/// Random-access read callback for `howdah_phar_sig_classify`: fill `buf[..len]`
+/// from absolute offset `off`; 1 on a full read, 0 otherwise.
+pub type howdah_phar_read_t = Option<unsafe extern "C" fn(*mut c_void, u64, *mut u8, usize) -> i32>;
+
+/// Classify the signature type a phar archive declares (CVE-2026-128090): 0 an
+/// OpenSSL type, 1 a keyless digest (downgrade candidate), 2 indeterminate
+/// (compressed, unreadable or not a phar). Only reads through `read`; never
+/// verifies or executes anything. NULL `read` or a panic is 2.
+///
+/// # Safety
+/// `read` must be safe to call with `ctx` for any in-range offset/len.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_phar_sig_classify(size: u64, read: howdah_phar_read_t, ctx: *mut c_void) -> i32 {
+    let Some(read) = read else { return 2 };
+    catch_unwind(AssertUnwindSafe(|| {
+        let mut rd = |off: u64, buf: &mut [u8]| read(ctx, off, buf.as_mut_ptr(), buf.len()) == 1;
+        match crate::sinks::phar_sig::classify(size, &mut rd) {
+            crate::sinks::phar_sig::PharSig::OpenSsl(_) => 0,
+            crate::sinks::phar_sig::PharSig::Keyless(_) => 1,
+            crate::sinks::phar_sig::PharSig::Indeterminate => 2,
+        }
+    }))
+    .unwrap_or(2)
+}
+
 /// `[sinks.scheme_case]` mode for the stream-wrapper proxy: 0 off, 1 detect
 /// (log only, PHP still goes plaintext), 2 fix (lowercase the scheme). NULL ctx
 /// or panic is 0.
@@ -2197,6 +2241,7 @@ pub unsafe extern "C" fn howdah_sink_armed(ctx: *mut howdah_ctx, sink: i32) -> i
         HOWDAH_SINK_XML => SinkId::Xml,
         HOWDAH_SINK_TLS => SinkId::Tls,
         HOWDAH_SINK_SCHEME_CASE => SinkId::SchemeCase,
+        HOWDAH_SINK_PHAR_SIG => SinkId::PharSig,
         _ => return 0,
     };
     catch_unwind(AssertUnwindSafe(|| {
@@ -2671,6 +2716,7 @@ pub unsafe extern "C" fn howdah_sink_check_at(
         HOWDAH_SINK_XML => SinkId::Xml,
         HOWDAH_SINK_TLS => SinkId::Tls,
         HOWDAH_SINK_SCHEME_CASE => SinkId::SchemeCase,
+        HOWDAH_SINK_PHAR_SIG => SinkId::PharSig,
         _ => return HOWDAH_ALLOW,
     };
     let r = catch_unwind(AssertUnwindSafe(|| {
@@ -4826,6 +4872,51 @@ mod tests {
         assert_eq!(unsafe { howdah_sink_armed(c, HOWDAH_SINK_SCHEME_CASE) }, 0);
         assert_eq!(sink(c, HOWDAH_SINK_SCHEME_CASE, "https", url), HOWDAH_ALLOW);
         unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn phar_signature_sink_block_detect_off() {
+        let c = init("");
+        assert_eq!(unsafe { howdah_sink_armed(c, HOWDAH_SINK_PHAR_SIG) }, 1);
+        assert_eq!(sink(c, HOWDAH_SINK_PHAR_SIG, "phar", b"downgrade"), HOWDAH_BLOCK);
+        let line = take_sink(c).unwrap();
+        assert!(line.contains("\"rule\":\"phar_signature\"") && line.contains("signature-downgrade"), "{line}");
+        assert!(!line.contains(".phar") && !line.contains("/"), "{line}");
+        // indeterminate is detect-only even in block mode
+        assert_eq!(sink(c, HOWDAH_SINK_PHAR_SIG, "phar", b"indeterminate"), HOWDAH_LOG);
+        assert!(take_sink(c).unwrap().contains("signature-indeterminate"));
+        assert_eq!(sink(c, HOWDAH_SINK_PHAR_SIG, "phar", b"other"), HOWDAH_ALLOW);
+        unsafe { howdah_free(c) };
+        let c = init("[sinks.phar]\nsignature=\"detect\"");
+        assert_eq!(sink(c, HOWDAH_SINK_PHAR_SIG, "phar", b"downgrade"), HOWDAH_LOG);
+        unsafe { howdah_free(c) };
+        let c = init("[sinks.phar]\nsignature=\"off\"");
+        assert_eq!(unsafe { howdah_sink_armed(c, HOWDAH_SINK_PHAR_SIG) }, 0);
+        assert_eq!(sink(c, HOWDAH_SINK_PHAR_SIG, "phar", b"downgrade"), HOWDAH_ALLOW);
+        unsafe { howdah_free(c) };
+    }
+
+    #[test]
+    fn phar_sig_classify_ffi() {
+        unsafe extern "C" fn rd(ctx: *mut c_void, off: u64, buf: *mut u8, len: usize) -> i32 {
+            let d = &*(ctx as *const Vec<u8>);
+            let o = off as usize;
+            if o + len > d.len() {
+                return 0;
+            }
+            std::ptr::copy_nonoverlapping(d[o..].as_ptr(), buf, len);
+            1
+        }
+        let mut v = b"<?php __HALT_COMPILER();".to_vec();
+        v.extend_from_slice(&[1u8; 16]);
+        v.extend_from_slice(&0x11u32.to_le_bytes());
+        v.extend_from_slice(b"GBMB");
+        let p = &v as *const Vec<u8> as *mut c_void;
+        assert_eq!(unsafe { howdah_phar_sig_classify(v.len() as u64, Some(rd), p) }, 0);
+        let n = v.len();
+        v[n - 8] = 4;
+        assert_eq!(unsafe { howdah_phar_sig_classify(n as u64, Some(rd), p) }, 1);
+        assert_eq!(unsafe { howdah_phar_sig_classify(n as u64, None, p) }, 2);
     }
 
     #[test]

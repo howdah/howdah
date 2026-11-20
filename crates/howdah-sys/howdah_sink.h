@@ -18,6 +18,7 @@
 #define HOWDAH_SINK_XML             11
 #define HOWDAH_SINK_TLS             12
 #define HOWDAH_SINK_SCHEME_CASE     13
+#define HOWDAH_SINK_PHAR_SIG        14
 
 #define HOWDAH_ACTION_BLOCK      2
 /* howdah_sink_check_xml only: neutralize by rewriting the options argument

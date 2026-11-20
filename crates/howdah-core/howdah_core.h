@@ -91,6 +91,12 @@
  */
 #define HOWDAH_SINK_SCHEME_CASE 13
 
+/**
+ * Phar signature downgrade with a pinned `.pubkey` (CVE-2026-128090). `arg` is
+ * the glue-computed verdict token `downgrade` / `indeterminate`.
+ */
+#define HOWDAH_SINK_PHAR_SIG 14
+
 #define HOWDAH_SSRF_KIND_RANGE 0
 
 #define HOWDAH_SSRF_KIND_REBIND 1
@@ -316,6 +322,12 @@ typedef struct RequestMeta {
   const char *uri;
   size_t uri_len;
 } RequestMeta;
+
+/**
+ * Random-access read callback for `howdah_phar_sig_classify`: fill `buf[..len]`
+ * from absolute offset `off`; 1 on a full read, 0 otherwise.
+ */
+typedef int32_t (*howdah_phar_read_t)(void*, uint64_t, uint8_t*, size_t);
 
 /**
  * Create a context from TOML config. Invalid, non-UTF-8 or NULL config falls
@@ -568,6 +580,17 @@ int32_t howdah_behavior_check_php_write(struct howdah_ctx *ctx,
  * `ctx` NULL or live.
  */
 int32_t howdah_sink_ssrf_armed(struct howdah_ctx *ctx);
+
+/**
+ * Classify the signature type a phar archive declares (CVE-2026-128090): 0 an
+ * OpenSSL type, 1 a keyless digest (downgrade candidate), 2 indeterminate
+ * (compressed, unreadable or not a phar). Only reads through `read`; never
+ * verifies or executes anything. NULL `read` or a panic is 2.
+ *
+ * # Safety
+ * `read` must be safe to call with `ctx` for any in-range offset/len.
+ */
+int32_t howdah_phar_sig_classify(uint64_t size, howdah_phar_read_t read, void *ctx);
 
 /**
  * `[sinks.scheme_case]` mode for the stream-wrapper proxy: 0 off, 1 detect

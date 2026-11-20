@@ -67,6 +67,7 @@ pub fn rule_layer(r: RuleId) -> u8 {
         | RuleId::Xxe
         | RuleId::TlsVerify
         | RuleId::TlsSchemeCase
+        | RuleId::PharSignature
         | RuleId::SoapRequest => 3,
         RuleId::UploadExec | RuleId::UnexpectedBinary | RuleId::UnexpectedEgress
         | RuleId::PhpWrite
@@ -136,6 +137,7 @@ fn rule_name(r: RuleId) -> &'static str {
         RuleId::Xxe => "xxe",
         RuleId::TlsVerify => "tls_verify",
         RuleId::TlsSchemeCase => "tls_scheme_case",
+        RuleId::PharSignature => "phar_signature",
         RuleId::SoapRequest => "soap_request",
         RuleId::OutOfMemory => "out_of_memory",
         RuleId::StartupFatal => "startup_fatal",
@@ -450,6 +452,7 @@ mod tests {
             (RuleId::Xxe, 3),
             (RuleId::TlsVerify, 3),
             (RuleId::TlsSchemeCase, 3),
+            (RuleId::PharSignature, 3),
             (RuleId::SoapRequest, 3),
             (RuleId::OutOfMemory, 1),
             (RuleId::StartupFatal, 1),
@@ -458,7 +461,7 @@ mod tests {
             (RuleId::NestingBudget, 1),
             (RuleId::ParseMemoryEstimate, 1),
         ];
-        assert_eq!(rule_catalog().len(), 49);
+        assert_eq!(rule_catalog().len(), 50);
         assert_eq!(want.len(), rule_catalog().len(), "layer table and rule_catalog differ");
         for r in rule_catalog() {
             let w = want.iter().find(|(x, _)| x == r).unwrap_or_else(|| panic!("{r:?} has no layer in this table")).1;

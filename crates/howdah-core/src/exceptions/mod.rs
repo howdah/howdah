@@ -71,6 +71,7 @@ impl Layer {
             | RuleId::Xxe
             | RuleId::TlsVerify
             | RuleId::TlsSchemeCase
+            | RuleId::PharSignature
             | RuleId::SoapRequest => Layer::Sinks,
             RuleId::UploadExec
             | RuleId::UnexpectedBinary

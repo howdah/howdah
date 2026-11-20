@@ -340,11 +340,16 @@ impl Default for UnserializeConfig {
 pub struct PharConfig {
     pub mode: Option<Mode>,
     pub allow_paths: Vec<String>,
+    /// Refuse a phar whose declared signature type is a keyless digest while a
+    /// sibling `<archive>.pubkey` is pinned (CVE-2026-128090). `block` (default),
+    /// `detect` or `off`. Independent of `mode` (the deserialization guard) and of
+    /// `sinks.mode`; a global `off` or `[sinks] enabled = false` still silences it.
+    pub signature: Mode,
 }
 
 impl Default for PharConfig {
     fn default() -> Self {
-        PharConfig { mode: Some(Mode::Off), allow_paths: Vec::new() }
+        PharConfig { mode: Some(Mode::Off), allow_paths: Vec::new(), signature: Mode::Block }
     }
 }
 
@@ -719,6 +724,8 @@ impl SinkConfig {
             SinkId::Eval => self.eval.mode,
             SinkId::Unserialize => self.unserialize.mode,
             SinkId::Phar => self.phar.mode,
+            // Own key, independent of `phar.mode` and `sinks.mode`.
+            SinkId::PharSig => Some(self.phar.signature),
             SinkId::Ssrf => self.ssrf.mode,
             SinkId::Mail => self.mail.mode,
             SinkId::PregEval => self.preg_eval.mode,
@@ -1489,6 +1496,32 @@ self_test = "off"
     #[test]
     fn sinks_unknown_key_rejected() {
         assert!(Config::from_toml("[sinks]\nnope = 1").is_err());
+    }
+
+    #[test]
+    fn phar_signature_defaults_block_and_is_independent() {
+        use crate::sinks::SinkId;
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.sinks.phar.signature, Mode::Block);
+        // Existing deserialization guard stays off by default.
+        assert_eq!(c.sinks.effective_mode(SinkId::Phar, Mode::Detect), Mode::Off);
+        assert_eq!(c.sinks.effective_mode(SinkId::PharSig, Mode::Detect), Mode::Block);
+        // Independent of sinks.mode and of phar.mode, in both directions.
+        let c = Config::from_toml("[sinks]\nmode=\"detect\"\n[sinks.phar]\nmode=\"block\"\nsignature=\"off\"").unwrap();
+        assert_eq!(c.sinks.effective_mode(SinkId::Phar, Mode::Detect), Mode::Block);
+        assert_eq!(c.sinks.effective_mode(SinkId::PharSig, Mode::Detect), Mode::Off);
+        let c = Config::from_toml("[sinks.phar]\nmode=\"off\"\nsignature=\"detect\"").unwrap();
+        assert_eq!(c.sinks.effective_mode(SinkId::Phar, Mode::Block), Mode::Off);
+        assert_eq!(c.sinks.effective_mode(SinkId::PharSig, Mode::Block), Mode::Detect);
+        // Existing keys keep working alongside the new one.
+        let c = Config::from_toml("[sinks.phar]\nallow_paths=[\"/a.phar\"]").unwrap();
+        assert_eq!(c.sinks.phar.signature, Mode::Block);
+        assert_eq!(c.sinks.phar.allow_paths, vec!["/a.phar".to_string()]);
+        // Global off / sinks disabled still silence it.
+        assert_eq!(c.sinks.effective_mode(SinkId::PharSig, Mode::Off), Mode::Off);
+        let c = Config::from_toml("[sinks]\nenabled=false").unwrap();
+        assert_eq!(c.sinks.effective_mode(SinkId::PharSig, Mode::Block), Mode::Off);
+        assert!(Config::from_toml("[sinks.phar]\nsignature=\"nope\"").is_err());
     }
 
     #[test]

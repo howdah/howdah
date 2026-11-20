@@ -271,12 +271,22 @@ unsafe extern "C" fn rinit(_type: c_int, _module_number: c_int) -> c_int {
     } else {
         sys::howdah_refuse_disarm();
     }
+    sys::howdah_phar_sig_reset();
     static INSTALLED: AtomicBool = AtomicBool::new(false);
     if !INSTALLED.swap(true, Ordering::Relaxed) && !CTX.is_null() {
         let _ = catch_unwind(AssertUnwindSafe(|| {
             INSPECT_ARMED.store(core::howdah_inspect_armed(CTX) != 0, Ordering::Relaxed);
             if core::howdah_sink_armed(CTX, core::HOWDAH_SINK_PHAR) != 0 {
                 sys::howdah_install_phar_hook(crate::sink_filter::decide);
+            }
+            // CVE-2026-128090: refuse a keyless-digest phar when an OpenSSL
+            // .pubkey is pinned beside it. Default block; independent of the
+            // deserialization guard above.
+            if core::howdah_sink_armed(CTX, core::HOWDAH_SINK_PHAR_SIG) != 0 {
+                sys::howdah_install_phar_sig_hook(
+                    crate::sink_filter::decide,
+                    core::howdah_phar_sig_classify,
+                );
             }
             // CVE-2026-128064: proxy http/https + ftp/ftps so a mixed-case TLS
             // scheme is lowercased (fix) or reported (detect). Default fix.

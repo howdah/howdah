@@ -88,6 +88,22 @@ extern "C" {
     /// missing-file sentinel without calling phar.
     pub fn howdah_install_phar_hook(cb: HowdahSinkDecide) -> ::std::ffi::c_int;
 
+    /// Arm the phar signature-downgrade guard (CVE-2026-128090, see
+    /// `phar_hook.c`): proxies the phar wrapper and the Phar/PharData open entry
+    /// points. `classify` is the core's `howdah_phar_sig_classify`. Returns how
+    /// many entry points were hooked (0 if phar is absent).
+    pub fn howdah_install_phar_sig_hook(
+        cb: HowdahSinkDecide,
+        classify: unsafe extern "C" fn(
+            u64,
+            Option<unsafe extern "C" fn(*mut ::std::ffi::c_void, u64, *mut u8, usize) -> i32>,
+            *mut ::std::ffi::c_void,
+        ) -> i32,
+    ) -> ::std::ffi::c_int;
+
+    /// Drop the per-request phar signature verdict cache. Call at every RINIT.
+    pub fn howdah_phar_sig_reset();
+
     /// Proxy the http/https and ftp/ftps stream wrappers (see `scheme_hook.c`) so a
     /// mixed-case `HTTPS://`/`FTPS://` URL is reported (and, `mode` 2, lowercased
     /// so TLS is used; `mode` 1 only reports). `lenfn` is the core's scheme

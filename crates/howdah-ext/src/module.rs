@@ -57,6 +57,8 @@ pub(crate) static mut DEFERRED: Deferred = Deferred::new();
 /// script (Layer 2 never scans header values), and an armed class refuses
 /// before execution.
 static INSPECT_ARMED: AtomicBool = AtomicBool::new(false);
+/// CVE-2026-129289: drain the unread request body at `post_deactivate`.
+static DRAIN_ARMED: AtomicBool = AtomicBool::new(false);
 static mut MODULE_NUMBER: c_int = 0;
 /// For the info table: (mode, config path, log destination, hook) as displayed.
 static mut DISP_MODE: Option<CString> = None;
@@ -585,6 +587,16 @@ unsafe fn exec_dir_decision() -> Option<(c_int, String)> {
 /// Called by PHP once per request at shutdown (NTS).
 unsafe extern "C" fn post_deactivate() -> c_int {
     let _ = catch_unwind(AssertUnwindSafe(|| clear_request_state()));
+    // CVE-2026-129289: consume the request body PHP left unread BEFORE PHP's own
+    // (skipped-on-php://input) drain would have, so the leftover bytes can never
+    // be parsed as the next FastCGI request on a reused connection. Gated in C on
+    // a FastCGI-family SAPI + !post_read + a live server_context. The drain
+    // neutralises our read_post scanner (stop latch + decide) so it actually
+    // consumes, and never bails. It runs BEFORE the recycle exit below, so a
+    // recycled worker has still emptied its connection.
+    if DRAIN_ARMED.load(Ordering::Relaxed) {
+        let _ = catch_unwind(AssertUnwindSafe(|| sys::howdah_drain_unread_body()));
+    }
     // §4.7 recycle facet: if this request raised a poisoning-class fatal while
     // the facet was enforcing, the error-cb marked the worker tainted. Now that
     // request teardown is done (PHP has rendered and, on SAPIs that flush here,
@@ -961,6 +973,13 @@ unsafe extern "C" fn minit(type_: c_int, module_number: c_int) -> c_int {
     // when `oom_exit` is on (the default). All three gates are process-static,
     // read once here. Fail-open: a panic leaves `zend_error_cb` untouched.
     let _ = catch_unwind(AssertUnwindSafe(|| install_oom_backstop()));
+
+    // CVE-2026-129289: arm the unread-body drain (`drain_unread_body`, default on;
+    // a global `mode = "off"` disables it). Process-static, read once here. The
+    // SAPI gate (FastCGI family) is applied in C at drain time.
+    let drain_on = catch_unwind(AssertUnwindSafe(|| !CTX.is_null() && core::howdah_drain_unread_armed(CTX) != 0))
+        .unwrap_or(false);
+    DRAIN_ARMED.store(drain_on, Ordering::Relaxed);
 
     SUCCESS
 }

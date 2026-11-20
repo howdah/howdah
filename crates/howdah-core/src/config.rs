@@ -824,6 +824,11 @@ pub struct Config {
     /// of recycling, so an operator can size their uncaught-fatal rate before
     /// enforcing. Off by default (enforce). No effect unless the facet is armed.
     pub recycle_observe: bool,
+    /// Drain the request body PHP leaves unread (CVE-2026-129289) before the next
+    /// request on a FastCGI connection can parse it. On by default; a global
+    /// `mode = "off"` also disables it. Not a rule: it completes what PHP should
+    /// have done, so it has no `[rules]` entry and adds nothing to the catalog.
+    pub drain_unread_body: bool,
 }
 
 #[derive(Deserialize)]
@@ -842,6 +847,7 @@ struct RawConfig {
     oom_exit: bool,
     recycle_on_fatal: bool,
     recycle_observe: bool,
+    drain_unread_body: bool,
 }
 
 impl Default for RawConfig {
@@ -861,6 +867,7 @@ impl Default for RawConfig {
             oom_exit: c.oom_exit,
             recycle_on_fatal: c.recycle_on_fatal,
             recycle_observe: c.recycle_observe,
+            drain_unread_body: c.drain_unread_body,
         }
     }
 }
@@ -936,6 +943,7 @@ impl Config {
             oom_exit: raw.oom_exit,
             recycle_on_fatal: raw.recycle_on_fatal,
             recycle_observe: raw.recycle_observe,
+            drain_unread_body: raw.drain_unread_body,
         })
     }
 
@@ -1007,6 +1015,7 @@ impl Config {
             oom_exit: true,
             recycle_on_fatal: false,
             recycle_observe: false,
+            drain_unread_body: true,
         }
     }
 }

@@ -182,6 +182,12 @@ extern "C" {
     /// on a persistent fpm/Apache worker.
     pub fn howdah_read_post_reset();
 
+    /// CVE-2026-129289: drain the request body PHP leaves unread (see
+    /// `read_post_hook.c`). Gated in C on a FastCGI-family SAPI, a live
+    /// `server_context` and `!post_read`; suspends the scanner hook for the
+    /// drain; never bails. Returns the bytes drained.
+    pub fn howdah_drain_unread_body() -> i64;
+
     /// PHP's effective PARSED `memory_limit` for this request in bytes
     /// (`PG(memory_limit)`; `-1` = no limit). Not `zend_ini_long`, which would
     /// misread the `128M` shorthand.

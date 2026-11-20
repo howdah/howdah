@@ -756,6 +756,17 @@ int32_t howdah_oom_armed(struct howdah_ctx *ctx);
 int32_t howdah_recycle_on_fatal(struct howdah_ctx *ctx);
 
 /**
+ * 1 iff the config ARMS the unread-body drain (CVE-2026-129289):
+ * `drain_unread_body` is on AND the global mode is not `off`. 0 for NULL and
+ * on panic (do not drain: the fail-open direction, no behavior change). The glue
+ * applies the SAPI gate on top.
+ *
+ * # Safety
+ * `ctx` NULL or live.
+ */
+int32_t howdah_drain_unread_armed(struct howdah_ctx *ctx);
+
+/**
  * 1 iff the config ARMS the §4.7 recycle facet: `recycle_on_fatal` is on AND
  * the global mode is not `off` (a global `off` disables every layer, this one
  * included; `detect` keeps it armed, like the OOM backstop). The glue applies

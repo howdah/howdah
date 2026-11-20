@@ -39,6 +39,7 @@ impl Layer {
             | RuleId::ParseMemoryBudget
             | RuleId::MalformedMultipart
             | RuleId::UploadProgressAbuse
+            | RuleId::FastcgiSmuggle
             | RuleId::SelfTest
             | RuleId::MaxInputVars
             | RuleId::MaxInputNestingDepth

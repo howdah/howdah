@@ -250,6 +250,11 @@ pub struct howdah_ctx {
     /// clean 403; truncating there leaves the FastCGI body unread and resets the
     /// client. Reset by `scan_post_begin`.
     post_scan_blocked: bool,
+    /// CVE-2026-129289: FastCGI-framing detector for bodies the multipart scanner
+    /// does not frame (urlencoded, JSON, raw): every byte is eligible there.
+    fcgi_scan: crate::fcgi_smuggle::FcgiScan,
+    /// The `fastcgi_smuggle` hit was already folded this request.
+    fcgi_reported: bool,
     request_id: String,
     meta: Meta,
     worst: Action,
@@ -286,6 +291,7 @@ fn describe(r: RuleId) -> &'static str {
         RuleId::ParseMemoryBudget => "body exceeds parse memory budget",
         RuleId::MalformedMultipart => "malformed or truncated multipart body",
         RuleId::UploadProgressAbuse => "upload progress abuse",
+        RuleId::FastcgiSmuggle => "fastcgi request smuggling payload in the request body",
         RuleId::SelfTest => "self test",
         RuleId::MaxInputVars => "too many input variables",
         RuleId::MaxInputNestingDepth => "input array nesting too deep",
@@ -368,6 +374,8 @@ impl howdah_ctx {
             post_max_size: 0,
             memory_limit: -1,
             post_scan_blocked: false,
+            fcgi_scan: crate::fcgi_smuggle::FcgiScan::new(),
+            fcgi_reported: false,
             request_id: new_request_id(),
             meta: Meta::default(),
             worst: Action::Allow,
@@ -1272,6 +1280,8 @@ impl howdah_ctx {
         self.post_max_size = post_max_size;
         self.memory_limit = memory_limit;
         self.post_scan_blocked = false;
+        self.fcgi_scan = crate::fcgi_smuggle::FcgiScan::new();
+        self.fcgi_reported = false;
     }
 
     /// §4.2: feed `chunk` raw body bytes to the byte-stream scanner and fold any
@@ -1295,7 +1305,13 @@ impl howdah_ctx {
         }
         let pms = self.post_max_size;
         let Some(state) = self.post_scan.as_mut() else {
-            return Action::Allow; // not multipart / no boundary: never truncate
+            // Not multipart / no boundary: never truncate. Every byte of such a
+            // body is eligible for the CVE-2026-129289 framing check.
+            self.fcgi_scan.feed(chunk);
+            if self.fcgi_scan.hit() {
+                self.report_fcgi_smuggle();
+            }
+            return Action::Allow;
         };
         let res = state.feed(chunk);
         let limits = &self.config.limits;
@@ -1314,6 +1330,9 @@ impl howdah_ctx {
         hits.push(limits.check_fed_bytes(state.total_fed_bytes()));
         // Gap B (§4.3): bytes actually read vs PHP's effective post_max_size.
         hits.push(limits.check_post_bytes(state.total_fed_bytes(), pms));
+        if state.fcgi_smuggle() {
+            self.report_fcgi_smuggle();
+        }
         // Every hit folds into `worst` (verdict + fail-closed), but only an
         // UNBOUNDED-growth limit stops the body: a bounded one (max_parts, etc.)
         // the scanner also detects must still drain for a clean 403.
@@ -1338,6 +1357,17 @@ impl howdah_ctx {
             Action::Block
         } else {
             Action::Allow
+        }
+    }
+
+    /// CVE-2026-129289: fold the `fastcgi_smuggle` hit once per request. It never
+    /// stops the read (see `rule_stops_the_read`); the verdict is delivered at the
+    /// end through the existing refusal path.
+    fn report_fcgi_smuggle(&mut self) {
+        if !self.fcgi_reported {
+            self.fcgi_reported = true;
+            let h = crate::limits::fastcgi_smuggle_hit();
+            self.apply(Some(&h));
         }
     }
 
@@ -1503,6 +1533,8 @@ pub unsafe extern "C" fn howdah_request_begin(
         };
         c.state = Some(MultipartState::new(&b));
         c.post_scan = None; // set by howdah_scan_post_begin once the boundary is known
+        c.fcgi_scan = crate::fcgi_smuggle::FcgiScan::new();
+        c.fcgi_reported = false;
         c.post_max_size = 0;
         c.memory_limit = -1;
         c.request_id = new_request_id();
@@ -2422,6 +2454,25 @@ pub unsafe extern "C" fn howdah_recycle_on_fatal(ctx: *mut howdah_ctx) -> i32 {
         return 0;
     }
     catch_unwind(AssertUnwindSafe(|| i32::from((*ctx).config.recycle_on_fatal))).unwrap_or(0)
+}
+
+/// 1 iff the config ARMS the unread-body drain (CVE-2026-129289):
+/// `drain_unread_body` is on AND the global mode is not `off`. 0 for NULL and
+/// on panic (do not drain: the fail-open direction, no behavior change). The glue
+/// applies the SAPI gate on top.
+///
+/// # Safety
+/// `ctx` NULL or live.
+#[no_mangle]
+pub unsafe extern "C" fn howdah_drain_unread_armed(ctx: *mut howdah_ctx) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = &*ctx;
+        i32::from(c.config.drain_unread_body && c.config.mode != Mode::Off)
+    }))
+    .unwrap_or(0)
 }
 
 /// 1 iff the config ARMS the §4.7 recycle facet: `recycle_on_fatal` is on AND
@@ -5630,6 +5681,128 @@ mod tests {
             howdah_scan_post_begin(ctx, ct.as_ptr() as *const c_char, ct.len(), 0, -1);
             assert_eq!(howdah_scan_post(ctx, body.as_ptr() as *const c_char, body.len()), HOWDAH_ALLOW);
             howdah_free(ctx);
+        }
+    }
+
+    // ---- CVE-2026-129289: fastcgi_smuggle + the drain toggle ------------------
+
+    fn fcgi_params(name: &[u8], value: &[u8]) -> Vec<u8> {
+        let mut c = vec![name.len() as u8, value.len() as u8];
+        c.extend_from_slice(name);
+        c.extend_from_slice(value);
+        let mut r = vec![1, 4, 0, 1, (c.len() >> 8) as u8, c.len() as u8, 0, 0];
+        r.extend_from_slice(&c);
+        r
+    }
+
+    /// Run `body` through the scanner (split into `step`-byte chunks) for a
+    /// request of `ct`; returns (worst action code, log line).
+    fn scan_all(toml: &str, ct: &str, body: &[u8], step: usize) -> (i32, String) {
+        let ctx = init(toml);
+        // Structured mode (empty boundary): the byte feed is the scanner's, so
+        // request_end does not call a never-fed parser "truncated".
+        let (ip, m, u) = ("1.2.3.4", "POST", "/up");
+        let meta = RequestMeta {
+            client_ip: ip.as_ptr() as _,
+            client_ip_len: ip.len(),
+            method: m.as_ptr() as _,
+            method_len: m.len(),
+            uri: u.as_ptr() as _,
+            uri_len: u.len(),
+        };
+        unsafe { howdah_request_begin(ctx, std::ptr::null(), 0, &meta) };
+        let mut last = HOWDAH_ALLOW;
+        unsafe {
+            howdah_scan_post_begin(ctx, ct.as_ptr() as *const c_char, ct.len(), 0, -1);
+            for ch in body.chunks(step) {
+                last = howdah_scan_post(ctx, ch.as_ptr() as *const c_char, ch.len());
+            }
+            let end = howdah_request_end(ctx);
+            let line = scan_line(ctx);
+            howdah_free(ctx);
+            assert_eq!(last, HOWDAH_ALLOW, "a smuggle verdict must never stop the read");
+            (end, line)
+        }
+    }
+
+    fn mp(parts: &[(&str, Option<&str>, &[u8])], epilogue: &[u8]) -> Vec<u8> {
+        let mut b = Vec::new();
+        for (name, file, data) in parts {
+            b.extend_from_slice(b"--B\r\nContent-Disposition: form-data; name=\"");
+            b.extend_from_slice(name.as_bytes());
+            b.push(b'"');
+            if let Some(f) = file {
+                b.extend_from_slice(format!("; filename=\"{f}\"\r\nContent-Type: application/octet-stream").as_bytes());
+            }
+            b.extend_from_slice(b"\r\n\r\n");
+            b.extend_from_slice(data);
+            b.extend_from_slice(b"\r\n");
+        }
+        b.extend_from_slice(b"--B--\r\n");
+        b.extend_from_slice(epilogue);
+        b
+    }
+
+    #[test]
+    fn fastcgi_smuggle_blocks_in_a_field_epilogue_and_raw_bodies_without_stopping_the_read() {
+        let smug = fcgi_params(b"PHP_ADMIN_VALUE", b"auto_prepend_file=php://input");
+        let mct = "multipart/form-data; boundary=B";
+        for step in [1usize, 5, 4096] {
+            let field = mp(&[("a", None, &smug)], b"");
+            let (end, line) = scan_all("", mct, &field, step);
+            assert_eq!(end, HOWDAH_BLOCK, "field step {step}");
+            assert!(line.contains("fastcgi_smuggle"), "{line}");
+            assert!(!line.contains("auto_prepend"), "values are never logged: {line}");
+            let epi = mp(&[("a", None, b"x")], &smug);
+            assert_eq!(scan_all("", mct, &epi, step).0, HOWDAH_BLOCK, "epilogue step {step}");
+            // Malformed framing still scans the rest of the body.
+            let mut broken = b"--B\r\ngarbage-no-disposition\r\n\r\n".to_vec();
+            broken.extend_from_slice(&smug);
+            assert_eq!(scan_all("", mct, &broken, step).0, HOWDAH_BLOCK, "malformed step {step}");
+            for ct in ["application/json", "application/x-www-form-urlencoded", "application/octet-stream"] {
+                assert_eq!(scan_all("", ct, &smug, step).0, HOWDAH_BLOCK, "{ct} step {step}");
+            }
+        }
+    }
+
+    #[test]
+    fn fastcgi_smuggle_ignores_file_part_data_and_benign_bodies() {
+        let smug = fcgi_params(b"SCRIPT_FILENAME", b"/etc/passwd");
+        let mct = "multipart/form-data; boundary=B";
+        let file = mp(&[("f", Some("x.pcap"), &smug), ("a", None, b"hi")], b"");
+        for step in [1usize, 7, 4096] {
+            assert_eq!(scan_all("", mct, &file, step).0, HOWDAH_ALLOW, "file step {step}");
+        }
+        let benign: &[&[u8]] = &[b"a=1&b=2", br#"{"k":"PHP_VALUE"}"#, b"\x01\x04 plain", b"<a>SCRIPT_FILENAME</a>"];
+        for b in benign {
+            assert_eq!(scan_all("", "application/json", b, 3).0, HOWDAH_ALLOW);
+            assert_eq!(scan_all("", mct, &mp(&[("a", None, b)], b""), 3).0, HOWDAH_ALLOW);
+        }
+    }
+
+    #[test]
+    fn fastcgi_smuggle_is_addressable_under_rules() {
+        let smug = fcgi_params(b"DOCUMENT_ROOT", b"/");
+        let (end, line) = scan_all("[rules]\nfastcgi_smuggle = \"detect\"\n", "text/plain", &smug, 64);
+        assert_eq!(end, HOWDAH_LOG);
+        assert!(line.contains("fastcgi_smuggle"));
+        assert_eq!(scan_all("[rules]\nfastcgi_smuggle = \"off\"\n", "text/plain", &smug, 64).0, HOWDAH_ALLOW);
+        assert_eq!(scan_all("mode = \"detect\"\n", "text/plain", &smug, 64).0, HOWDAH_LOG);
+    }
+
+    #[test]
+    fn drain_unread_armed_honors_key_and_mode() {
+        let on = init("");
+        assert_eq!(unsafe { howdah_drain_unread_armed(on) }, 1, "on by default");
+        let no = init("drain_unread_body = false\n");
+        assert_eq!(unsafe { howdah_drain_unread_armed(no) }, 0);
+        let off = init("mode = \"off\"\n");
+        assert_eq!(unsafe { howdah_drain_unread_armed(off) }, 0);
+        assert_eq!(unsafe { howdah_drain_unread_armed(std::ptr::null_mut()) }, 0);
+        unsafe {
+            howdah_free(on);
+            howdah_free(no);
+            howdah_free(off);
         }
     }
 

@@ -400,6 +400,15 @@ pub fn upload_progress_abuse_hit() -> LimitHit {
     }
 }
 
+/// The hit recorded for a FastCGI-smuggling body (fixed reason, no value).
+pub fn fastcgi_smuggle_hit() -> LimitHit {
+    LimitHit {
+        rule: RuleId::FastcgiSmuggle,
+        severity: RuleId::FastcgiSmuggle.severity(),
+        detail: String::new(),
+    }
+}
+
 /// The hit recorded for the self-test marker (always `Standard`, never critical).
 pub fn selftest_hit() -> LimitHit {
     LimitHit {
@@ -422,6 +431,12 @@ pub enum RuleId {
     ParseMemoryBudget,
     MalformedMultipart,
     UploadProgressAbuse,
+    /// CVE-2026-129289: a request body carries FastCGI record framing with a dangerous
+    /// PARAMS name (PHP_ADMIN_VALUE, SCRIPT_FILENAME, ...): the payload that smuggles
+    /// a second request through an unread body. Standard, Layer 1. The body drain
+    /// (`drain_unread_body`) is the fix; this is visibility and a refusal. See
+    /// `crate::fcgi_smuggle`.
+    FastcgiSmuggle,
     SelfTest,
     MaxInputVars,
     MaxInputNestingDepth,
@@ -520,6 +535,7 @@ impl RuleId {
         match self {
             RuleId::MalformedMultipart
             | RuleId::UploadProgressAbuse
+            | RuleId::FastcgiSmuggle
             | RuleId::SelfTest
             | RuleId::MaxInputKeyBytes
             | RuleId::MaxRequestHeaders
@@ -560,7 +576,7 @@ impl RuleId {
 /// or miss one it accepts. `rule_catalog_covers_every_variant` fails to
 /// compile when a variant is added here but not to the list.
 pub fn rule_catalog() -> &'static [RuleId] {
-    const ALL: [RuleId; 46] = [
+    const ALL: [RuleId; 47] = [
         RuleId::MaxParts,
         RuleId::MaxFiles,
         RuleId::MaxPartHeaders,
@@ -570,6 +586,7 @@ pub fn rule_catalog() -> &'static [RuleId] {
         RuleId::ParseMemoryBudget,
         RuleId::MalformedMultipart,
         RuleId::UploadProgressAbuse,
+        RuleId::FastcgiSmuggle,
         RuleId::SelfTest,
         RuleId::MaxInputVars,
         RuleId::MaxInputNestingDepth,
@@ -837,6 +854,7 @@ mod tests {
                 | RuleId::ParseMemoryBudget
                 | RuleId::MalformedMultipart
                 | RuleId::UploadProgressAbuse
+                | RuleId::FastcgiSmuggle
                 | RuleId::SelfTest
                 | RuleId::MaxInputVars
                 | RuleId::MaxInputNestingDepth
@@ -876,7 +894,7 @@ mod tests {
                 | RuleId::FatalRecycle => {}
             }
         }
-        assert_eq!(rule_catalog().len(), 46);
+        assert_eq!(rule_catalog().len(), 47);
         let mut sorted = all.to_vec();
         sorted.sort();
         sorted.dedup();

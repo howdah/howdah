@@ -37,6 +37,7 @@ pub fn rule_layer(r: RuleId) -> u8 {
         | RuleId::ParseMemoryBudget
         | RuleId::MalformedMultipart
         | RuleId::UploadProgressAbuse
+        | RuleId::FastcgiSmuggle
         | RuleId::SelfTest
         | RuleId::MaxInputVars
         | RuleId::MaxInputNestingDepth
@@ -100,6 +101,7 @@ fn rule_name(r: RuleId) -> &'static str {
         RuleId::ParseMemoryBudget => "parse_memory_budget",
         RuleId::MalformedMultipart => "malformed_multipart",
         RuleId::UploadProgressAbuse => "upload_progress_abuse",
+        RuleId::FastcgiSmuggle => "fastcgi_smuggle",
         RuleId::SelfTest => "self_test",
         RuleId::MaxInputVars => "max_input_vars",
         RuleId::MaxInputNestingDepth => "max_input_nesting_depth",
@@ -411,6 +413,7 @@ mod tests {
             (RuleId::ParseMemoryBudget, 1),
             (RuleId::MalformedMultipart, 1),
             (RuleId::UploadProgressAbuse, 1),
+            (RuleId::FastcgiSmuggle, 1),
             (RuleId::SelfTest, 1),
             (RuleId::MaxInputVars, 1),
             (RuleId::MaxInputNestingDepth, 1),
@@ -449,7 +452,7 @@ mod tests {
             (RuleId::NestingBudget, 1),
             (RuleId::ParseMemoryEstimate, 1),
         ];
-        assert_eq!(rule_catalog().len(), 46);
+        assert_eq!(rule_catalog().len(), 47);
         assert_eq!(want.len(), rule_catalog().len(), "layer table and rule_catalog differ");
         for r in rule_catalog() {
             let w = want.iter().find(|(x, _)| x == r).unwrap_or_else(|| panic!("{r:?} has no layer in this table")).1;

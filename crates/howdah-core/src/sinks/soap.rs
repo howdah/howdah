@@ -123,44 +123,43 @@ fn dtd_in_prolog(xml: &[u8]) -> bool {
     }
 }
 
-/// True iff the local name of an XML attribute (possibly `prefix:arraySize`)
-/// is exactly `arraySize`.
-fn local_name_is_array_size(name: &[u8]) -> bool {
-    let local = match name.iter().rposition(|&b| b == b':') {
-        Some(p) => &name[p + 1..],
-        None => name,
-    };
-    local == b"arraySize"
+/// The two SOAP encoding namespaces `ext/soap` reads `arraySize` from
+/// (SOAP_1_1_ENC_NAMESPACE / SOAP_1_2_ENC_NAMESPACE). An `arraySize` attribute
+/// in any other namespace is business XML and never reaches `calc_dimension_12`.
+const SOAP11_ENC_NS: &[u8] = b"http://schemas.xmlsoap.org/soap/encoding/";
+const SOAP12_ENC_NS: &[u8] = b"http://www.w3.org/2003/05/soap-encoding";
+
+fn is_soap_enc_ns(uri: &[u8]) -> bool {
+    uri == SOAP11_ENC_NS || uri == SOAP12_ENC_NS
 }
 
-/// Mirror `calc_dimension_12`'s accepted grammar: one or more
-/// whitespace-separated tokens, each a non-negative integer, with an optional
-/// leading `*` allowed ONLY as the first token. Returns true iff `value` is a
-/// valid dimension list. Empty / whitespace-only / non-numeric values are not
-/// valid (they are what the CVE reads uninitialised).
-fn valid_dimension_list(value: &[u8]) -> bool {
-    let mut tokens = value.split(|b| b.is_ascii_whitespace()).filter(|t| !t.is_empty());
-    let mut any = false;
-    for (idx, tok) in (&mut tokens).enumerate() {
-        any = true;
-        if idx == 0 && tok == b"*" {
-            continue; // leading '*' (unbounded) allowed as the first token only
-        }
-        if !tok.iter().all(|b| b.is_ascii_digit()) {
-            return false;
-        }
+/// Max distinct prefixes tracked as bound to a SOAP encoding namespace. Past
+/// this, every prefix is conservatively treated as SOAP-ENC (fail closed).
+const MAX_ENC_PREFIXES: usize = 16;
+
+/// Namespace prefixes (and the default namespace) bound to a SOAP encoding
+/// namespace ANYWHERE in the document. Document-wide rather than scoped: a
+/// superset of the real scope, so a prefix re-bound or declared deep in the tree
+/// is never missed (no bypass); the cost is at most a rare over-flag.
+struct EncNs<'a> {
+    prefixes: [&'a [u8]; MAX_ENC_PREFIXES],
+    count: usize,
+    overflow: bool,
+    default_bound: bool,
+}
+
+impl<'a> EncNs<'a> {
+    fn has_prefix(&self, p: &[u8]) -> bool {
+        self.overflow || self.prefixes[..self.count].contains(&p)
     }
-    any
 }
 
-/// Scan a single element start-tag's bytes (everything between `<` and `>`,
-/// exclusive) for an `arraySize` attribute with an invalid value. The element
-/// name is skipped first; then attributes are parsed `name (ws)? = (ws)?
-/// quote value quote`.
-fn tag_has_bad_array_size(tag: &[u8]) -> bool {
+/// Walk the attributes of one start tag's bytes (between `<` and `>`),
+/// calling `f(name, value)` for each quoted attribute; stops and returns true
+/// as soon as `f` does. End tags carry no attributes.
+fn for_each_attr<'a>(tag: &'a [u8], f: &mut dyn FnMut(&'a [u8], &'a [u8]) -> bool) -> bool {
     let n = tag.len();
     let mut i = 0;
-    // An end tag (`/name`) carries no attributes.
     if i < n && tag[i] == b'/' {
         return false;
     }
@@ -175,12 +174,10 @@ fn tag_has_bad_array_size(tag: &[u8]) -> bool {
         if i >= n {
             break;
         }
-        // A self-closing slash: skip it and keep looking.
         if tag[i] == b'/' {
             i += 1;
             continue;
         }
-        // Attribute name: up to whitespace or '='.
         let name_start = i;
         while i < n && !tag[i].is_ascii_whitespace() && tag[i] != b'=' {
             i += 1;
@@ -203,25 +200,21 @@ fn tag_has_bad_array_size(tag: &[u8]) -> bool {
                 }
                 let val = &tag[val_start..i];
                 if i < n {
-                    i += 1; // consume the closing quote
+                    i += 1;
                 }
-                if local_name_is_array_size(name) && !valid_dimension_list(val) {
+                if f(name, val) {
                     return true;
                 }
             }
-            // No quoted value (malformed): skip; SOAP will reject the XML.
         }
-        // Else a valueless token; keep scanning.
     }
     false
 }
 
-/// True iff any element start tag carries an `arraySize` attribute (any
-/// namespace prefix) with an empty, whitespace-only or non-dimension value.
-/// Comments, CDATA sections, processing instructions and `<!...>` declarations
-/// are skipped, so the literal `arraySize` in element text or a CDATA block is
-/// never mistaken for an attribute.
-fn malformed_array_size(xml: &[u8]) -> bool {
+/// Visit every element start/end tag's inner bytes (between `<` and `>`),
+/// skipping comments, CDATA, PIs and `<!...>` declarations so literals inside
+/// them are never mistaken for attributes. Stops (true) when `f` returns true.
+fn for_each_tag<'a>(xml: &'a [u8], f: &mut dyn FnMut(&'a [u8]) -> bool) -> bool {
     let n = xml.len();
     let mut i = 0;
     while i < n {
@@ -252,9 +245,6 @@ fn malformed_array_size(xml: &[u8]) -> bool {
             continue;
         }
         if rest.starts_with(b"<!") {
-            // A declaration (DOCTYPE, etc.): skip to the next '>'. (A prolog
-            // DOCTYPE is handled by dtd_in_prolog; this only keeps the scan in
-            // sync and never looks for arraySize inside it.)
             match find(&rest[2..], b">") {
                 Some(e) => i += 2 + e + 1,
                 None => return false,
@@ -283,12 +273,81 @@ fn malformed_array_size(xml: &[u8]) -> bool {
             }
             j += 1;
         }
-        if tag_has_bad_array_size(&xml[tag_start..j]) {
+        if f(&xml[tag_start..j]) {
             return true;
         }
         i = if j < n { j + 1 } else { j };
     }
     false
+}
+
+/// Mirror `calc_dimension_12`'s accepted grammar: one or more
+/// whitespace-separated tokens, each a non-negative integer, with an optional
+/// leading `*` allowed ONLY as the first token. Returns true iff `value` is a
+/// valid dimension list. Empty / whitespace-only / non-numeric values are not
+/// valid (they are what the CVE reads uninitialised).
+fn valid_dimension_list(value: &[u8]) -> bool {
+    let mut tokens = value.split(|b| b.is_ascii_whitespace()).filter(|t| !t.is_empty());
+    let mut any = false;
+    for (idx, tok) in (&mut tokens).enumerate() {
+        any = true;
+        if idx == 0 && tok == b"*" {
+            continue; // leading '*' (unbounded) allowed as the first token only
+        }
+        if !tok.iter().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+    }
+    any
+}
+
+/// True iff some element carries an `arraySize` attribute in a SOAP encoding
+/// namespace (resolved by namespace URI, never by a hardcoded prefix) whose
+/// value is empty, whitespace-only or not a valid dimension list. `arraySize`
+/// attributes whose prefix is not bound to a SOAP-ENC URI are business XML and
+/// are ignored. An unprefixed `arraySize` counts only when a default `xmlns=`
+/// binds a SOAP-ENC URI (conservative: XML itself gives such attributes no
+/// namespace).
+fn malformed_array_size(xml: &[u8]) -> bool {
+    // Pass 1: collect xmlns declarations that bind a SOAP encoding namespace.
+    let mut ns = EncNs {
+        prefixes: [&[]; MAX_ENC_PREFIXES],
+        count: 0,
+        overflow: false,
+        default_bound: false,
+    };
+    for_each_tag(xml, &mut |tag| {
+        for_each_attr(tag, &mut |name, val| {
+            if !is_soap_enc_ns(val) {
+                return false;
+            }
+            if name == b"xmlns" {
+                ns.default_bound = true;
+            } else if let Some(p) = name.strip_prefix(b"xmlns:") {
+                if ns.count < MAX_ENC_PREFIXES {
+                    ns.prefixes[ns.count] = p;
+                    ns.count += 1;
+                } else {
+                    ns.overflow = true;
+                }
+            }
+            false
+        })
+    });
+    // Nothing binds a SOAP-ENC namespace: no arraySize can be the vulnerable one.
+    if ns.count == 0 && !ns.default_bound && !ns.overflow {
+        return false;
+    }
+    // Pass 2: any in-namespace arraySize with an invalid value.
+    for_each_tag(xml, &mut |tag| {
+        for_each_attr(tag, &mut |name, val| {
+            let in_enc_ns = match name.iter().rposition(|&b| b == b':') {
+                Some(p) => &name[p + 1..] == b"arraySize" && ns.has_prefix(&name[..p]),
+                None => name == b"arraySize" && ns.default_bound,
+            };
+            in_enc_ns && !valid_dimension_list(val)
+        })
+    })
 }
 
 #[cfg(test)]
@@ -393,16 +452,45 @@ mod tests {
 
     #[test]
     fn array_size_single_quotes() {
-        let x = soap11("<a enc:arraySize='abc'/>");
+        let x = soap11("<a xmlns:enc='http://schemas.xmlsoap.org/soap/encoding/' enc:arraySize='abc'/>");
         assert_eq!(soap_request_verdict(x.as_bytes()), Some(REASON_ARRAY_DIMENSIONS));
-        let ok = soap11("<a enc:arraySize='2 3'/>");
+        let ok = soap11("<a xmlns:enc='http://schemas.xmlsoap.org/soap/encoding/' enc:arraySize='2 3'/>");
         assert_eq!(soap_request_verdict(ok.as_bytes()), None);
     }
 
     #[test]
-    fn array_size_no_prefix() {
-        let x = soap11("<a arraySize=\"\"/>");
-        assert_eq!(soap_request_verdict(x.as_bytes()), Some(REASON_ARRAY_DIMENSIONS));
+    fn array_size_no_prefix_business_not_flagged() {
+        // No SOAP-ENC namespace bound anywhere: business XML, must pass.
+        for v in ["auto", "", "abc"] {
+            let x = soap11(&format!("<grid arraySize=\"{v}\"/>"));
+            assert_eq!(soap_request_verdict(x.as_bytes()), None, "{v:?}");
+        }
+    }
+
+    #[test]
+    fn array_size_other_namespace_not_flagged() {
+        let x = soap11("<g xmlns:biz=\"urn:biz\" biz:arraySize=\"auto\"/>");
+        assert_eq!(soap_request_verdict(x.as_bytes()), None);
+        // A SOAP-ENC binding elsewhere does not taint a differently-bound prefix.
+        let y = soap11(
+            "<e xmlns:enc=\"http://www.w3.org/2003/05/soap-encoding\" enc:arraySize=\"2\">\
+             <g xmlns:biz=\"urn:biz\" biz:arraySize=\"auto\"/></e>",
+        );
+        assert_eq!(soap_request_verdict(y.as_bytes()), None);
+    }
+
+    #[test]
+    fn array_size_custom_prefix_bound_to_soap_enc_caught() {
+        for ns in ["http://www.w3.org/2003/05/soap-encoding", "http://schemas.xmlsoap.org/soap/encoding/"] {
+            let x = soap11(&format!("<a xmlns:zz=\"{ns}\" zz:arraySize=\"auto\"/>"));
+            assert_eq!(soap_request_verdict(x.as_bytes()), Some(REASON_ARRAY_DIMENSIONS), "{ns}");
+        }
+        // Declared on an ancestor, used on a descendant.
+        let y = soap11("<r xmlns:q=\"http://schemas.xmlsoap.org/soap/encoding/\"><a q:arraySize=\"\"/></r>");
+        assert_eq!(soap_request_verdict(y.as_bytes()), Some(REASON_ARRAY_DIMENSIONS));
+        // Default namespace bound to SOAP-ENC, unprefixed attribute (conservative).
+        let z = soap11("<a xmlns=\"http://www.w3.org/2003/05/soap-encoding\" arraySize=\"x\"/>");
+        assert_eq!(soap_request_verdict(z.as_bytes()), Some(REASON_ARRAY_DIMENSIONS));
     }
 
     #[test]
@@ -411,14 +499,14 @@ mod tests {
         // never as an attribute name of this element.
         let x = soap11("<note>the arraySize=\"\" was wrong</note>");
         assert_eq!(soap_request_verdict(x.as_bytes()), None);
-        let y = soap11("<a title=\"arraySize=\"/>");
+        let y = soap11("<a xmlns:enc=\"http://www.w3.org/2003/05/soap-encoding\" title=\"arraySize=\"/>");
         assert_eq!(soap_request_verdict(y.as_bytes()), None);
     }
 
     #[test]
     fn similar_attr_name_not_matched() {
         // myArraySize / arraySizes must NOT match the local name arraySize.
-        let x = soap11("<a myarraySize=\"\" xarraySizes=\"\"/>");
+        let x = soap11("<a xmlns:enc=\"http://www.w3.org/2003/05/soap-encoding\" myarraySize=\"\" enc:xarraySizes=\"\"/>");
         assert_eq!(soap_request_verdict(x.as_bytes()), None);
     }
 

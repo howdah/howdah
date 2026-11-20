@@ -137,6 +137,13 @@ cat > "$WORK/okarray2.xml" <<'PHP'
   <SOAP-ENV:Body><ns1:ping><arr enc:arraySize="2 3"><i>1</i></arr></ns1:ping></SOAP-ENV:Body>
 </SOAP-ENV:Envelope>
 PHP
+# Business payload with an unrelated (non-SOAP-ENC) arraySize: must NOT trip.
+cat > "$WORK/bizarray.xml" <<'PHP'
+<?xml version="1.0" encoding="UTF-8"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="urn:howdah-lab">
+  <SOAP-ENV:Body><ns1:ping><grid arraySize="auto"/><grid xmlns:b="urn:biz" b:arraySize=""/></ns1:ping></SOAP-ENV:Body>
+</SOAP-ENV:Envelope>
+PHP
 cat > "$WORK/cdata.xml" <<'PHP'
 <?xml version="1.0" encoding="UTF-8"?>
 <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="urn:howdah-lab">
@@ -212,7 +219,7 @@ echo "  ok   - malformed arraySize: clean 403, soap_request logged (reason array
 # --- BENIGN corpus: ZERO blocks, each reaches SOAP --------------------------
 : > "$LOG"
 BN=0
-for b in valid11.xml valid12.xml okarray.xml okarray2.xml cdata.xml; do
+for b in valid11.xml valid12.xml okarray.xml okarray2.xml bizarray.xml cdata.xml; do
   code=$(post "$WORK/$b")
   [ "$code" != "403" ] || fail "benign $b was refused with 403 (Howdah false positive)"
   if grep -q 'Howdah blocked' "$WORK/resp.txt"; then fail "benign $b got a Howdah refusal body"; fi

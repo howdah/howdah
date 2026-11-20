@@ -136,9 +136,9 @@ int64_t howdah_drain_unread_body(void) {
     long rounds = 0;
     const char *n = sapi_module.name;
 
-#if PHP_VERSION_ID < 50500
+#if PHP_VERSION_ID < 50600
     (void) n; (void) total; (void) rounds; (void) saved_decide; (void) dummy;
-    return 0; /* PHP 5.4 has no SG(post_read) and predates the bug: harmless no-op */
+    return 0; /* PHP 5.4/5.5 lack sapi_read_post_block+SG(post_read) (5.6+) and predate the bug: harmless no-op */
 #else
     if (!n || !SG(server_context) || SG(post_read)) {
         return 0;

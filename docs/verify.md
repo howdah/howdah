@@ -39,7 +39,7 @@ curl -fsSL https://howdah.org/key.asc | gpg --show-keys --with-fingerprint
 Then verify (set `V` and `T` to the release and tarball you want):
 
 ```sh
-V=1.7.0
+V=1.7.1
 B=https://github.com/howdah/howdah/releases/download/v$V
 T=howdah-$V-php7.4-20190902-linux-x86_64.tar.gz
 curl -fLO $B/$T -O $B/SHA256SUMS -O $B/SHA256SUMS.asc -O $B/howdah-release-signing.asc
@@ -77,7 +77,7 @@ Stricter: require the release workflow, the tag, and a GitHub-hosted runner:
 ```sh
 gh attestation verify howdah-1.7.0-php7.4-20190902-linux-x86_64.tar.gz -R howdah/howdah \
   --signer-workflow howdah/howdah/.github/workflows/release.yml \
-  --source-ref refs/tags/v1.7.0 \
+  --source-ref refs/tags/v1.7.1 \
   --deny-self-hosted-runners
 ```
 
@@ -161,8 +161,8 @@ and compare it with the signed checksum.
 
 ```sh
 git clone https://github.com/howdah/howdah && cd howdah
-packaging/verify-reproducible.sh v1.7.0 7.4                 # x86_64
-packaging/verify-reproducible.sh v1.7.0 8.3 x86_64-musl     # or aarch64
+packaging/verify-reproducible.sh v1.7.1 7.4                 # x86_64
+packaging/verify-reproducible.sh v1.7.1 8.3 x86_64-musl     # or aarch64
 ```
 
 The script downloads `SHA256SUMS` and its signature, checks the signature

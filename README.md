@@ -3,6 +3,9 @@
 **An open-source, defensive web application firewall for PHP, built as a native
 extension.**
 
+**Website: [howdah.org](https://howdah.org)** ·
+[Download](https://github.com/howdah/howdah/releases/latest)
+
 Howdah loads into PHP itself and inspects requests before PHP processes them,
 so it can stop abuse that a network-level WAF never sees. It is a *defensive*
 tool: it recognizes and blocks abusive input. It is not a hacking tool, and it

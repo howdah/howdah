@@ -98,6 +98,14 @@ starts doing real work on every request), not a small one. In CI mode PHP,
 nginx and wrk share 4 CPUs, as on a 4-vCPU runner; on a bigger machine all
 three are pinned to CPUs 2-5 so a local CI-mode run is measured the same way.
 
+Normalizing does not cancel every hardware difference, though. On GitHub's
+Intel Xeon 6975P-C runners the `post_multipart_50k` cells sit around 1.55 at
+any commit, against about 1.3 on the other runner CPUs, which is past the 25%
+limit. So `baseline-ci.json` can also hold a baseline per CPU model under
+`by_cpu`. The gate uses the one matching `cpu_model` in the run's
+`results.json`, falls back to the default `cells` for any other CPU, and the
+job log says which one it used.
+
 To regenerate the baseline after an intended performance change:
 
 ```
@@ -105,7 +113,16 @@ MODE=ci OUT=lab/bench/out/ci sh lab/bench/run.sh
 node lab/bench/bench.mjs baseline lab/bench/out/ci/results.json > lab/bench/baseline-ci.json
 ```
 
-and say why in the commit.
+and say why in the commit. `baseline` also takes several `results.json` files
+and keeps each cell's median. Regenerating drops the per-CPU baselines, which is
+right, because such a change moves them too. Rebuild each one from the
+`bench-results` artifacts of CI runs on that CPU. The job log and `results.json`
+name the CPU, and the artifact is uploaded before the gate step, so a run that
+fails the gate still provides one:
+
+```
+node lab/bench/bench.mjs baseline-cpu lab/bench/baseline-ci.json run1/results.json run2/results.json ...
+```
 
 ## Layer 2 detection and false positives (`corpus.sh`)
 

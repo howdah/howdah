@@ -5,6 +5,17 @@ All notable changes to Howdah are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The `bench` CI job failed on every run that landed on one of GitHub's Intel
+  Xeon 6975P-C runners, whatever the change. On that CPU the multipart cells'
+  normalized overhead is about 1.55, against about 1.3 on the other runner CPUs,
+  which is past the 25% limit. `lab/bench/baseline-ci.json` can now hold a
+  baseline per runner CPU (`by_cpu`), and the gate uses the one matching the
+  run's CPU. The 6975P-C baseline is the median of four CI runs on that CPU.
+  `bench.mjs baseline` also takes several runs and keeps each cell's median, and
+  `bench.mjs baseline-cpu` adds a per-CPU baseline.
+
 ## [1.7.1] - 2026-11-19
 
 Virtual patches for the PHP CVEs released on 2026-11-19 (PHP 8.2.36 / 8.3.37 / 8.4.28 / 8.5.13 / 8.6.0), so unpatched and end-of-life PHP (5.4–8.6) is protected in-process. Added PHP 8.6 as a supported version.

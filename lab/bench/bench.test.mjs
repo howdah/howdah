@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  formBody, multipartBody, MULTIPART_BOUNDARY, median, aggregate, baselineOf, gate,
+  formBody, multipartBody, MULTIPART_BOUNDARY, median, aggregate, baselineOf, cpuBaselineOf, gate,
   groupEvents, splitByEncoder, howdahClass, inScope, summarizeCorpus, gotestwafSent, markdown,
 } from './bench.mjs';
 
@@ -109,6 +109,41 @@ test('the gate fails on Howdah events from benign traffic and on missing cells',
   const f = gate(run, baselineOf(base)).fails;
   assert.ok(f.some((x) => /wrote 2 Howdah event/.test(x)));
   assert.ok(f.some((x) => /8\.3\/fpm\/get_nobody\/l12: cell missing/.test(x)));
+});
+
+const onCpu = (results, cpu) => ({ ...results, machine: { ...results.machine, cpu_model: cpu } });
+const formRun = (l12p50) => resultsFor([
+  row('noext', 1, 1000, 3000, { workload: 'post_form_1k' }),
+  row('l12', 1, l12p50, 3000, { workload: 'post_form_1k' }),
+]);
+
+test('the gate uses the baseline for the run\'s CPU when there is one, the default otherwise', () => {
+  const baseline = { ...baselineOf(formRun(1000)), by_cpu: { 'Xeon X': cpuBaselineOf([onCpu(formRun(1300), 'Xeon X')]).entry } };
+  // 1.5 is 50% over the default baseline (1.0) but only 15% over Xeon X's own (1.3).
+  const own = gate(onCpu(formRun(1500), 'Xeon X'), baseline);
+  assert.deepEqual(own.fails, []);
+  assert.equal(own.baselineCpu, 'Xeon X');
+  const other = gate(onCpu(formRun(1500), 'EPYC Y'), baseline);
+  assert.equal(other.fails.length, 1);
+  assert.match(other.fails[0], /normalized p50 1\.5 vs baseline 1 /);
+  assert.equal(other.baselineCpu, null);
+  // A CPU baseline is not a loophole: a regression on that CPU still fails.
+  assert.equal(gate(onCpu(formRun(1700), 'Xeon X'), baseline).fails.length, 1);
+});
+
+test('a baseline from several runs keeps the median of each cell', () => {
+  const runs = [1100, 1500, 1200].map(formRun);
+  assert.equal(baselineOf(runs).cells['8.3/fpm/post_form_1k/l12'].ratio_p50, 1.2);
+  assert.equal(baselineOf(runs).generated_from.length, 3);
+  assert.equal(cpuBaselineOf(runs).entry.cells['8.3/fpm/post_form_1k/l12'].ratio_p50, 1.2);
+  // One run still gives the single-run shape the existing baseline file has.
+  assert.equal(baselineOf(runs[0]).generated_from.cpu_model, 'cpu');
+});
+
+test('a CPU baseline refuses runs from different CPUs', () => {
+  assert.throws(() => cpuBaselineOf([onCpu(formRun(1100), 'A'), onCpu(formRun(1100), 'B')]), /different CPUs: A, B/);
+  assert.throws(() => cpuBaselineOf([]), /no runs/);
+  assert.throws(() => baselineOf([]), /no runs/);
 });
 
 test('markdown has a headline row per PHP and server, and flags invalid cells', () => {

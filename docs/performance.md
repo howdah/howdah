@@ -400,4 +400,7 @@ GitHub's runners are shared virtual machines and their timings move a lot, so
 both limits are deliberately loose: the job catches a gross regression, not a
 small one. It uploads its results as the `bench-results` artifact. The
 baseline was generated from a local CI-mode run on commit `2e3109efc754`
-(`lab/bench/results/2026-10-24/ci-mode-results.json`).
+(`lab/bench/results/2026-10-24/ci-mode-results.json`). Runs on GitHub's Intel
+Xeon 6975P-C runners are compared against a baseline of their own, the median of
+four CI runs on that CPU, because there the multipart cells' relative overhead
+is higher at any commit (about 1.55 against about 1.3).
